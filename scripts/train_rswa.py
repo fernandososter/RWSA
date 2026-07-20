@@ -48,6 +48,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--notes", default=None)
     parser.add_argument("--tags", nargs="*", default=[])
     parser.add_argument("--patience", type=int, default=15)
+    parser.add_argument("--monitor", choices=["rswa_f1_macro", "rswa_kappa_macro"], default="rswa_f1_macro", help="Métrica usada para selecionar o melhor checkpoint.")
+
     return parser.parse_args()
 
 
@@ -87,7 +89,12 @@ def main() -> None:
             criterion = RSWALoss(tonic_pos_weight=tonic_weight, phasic_pos_weight=phasic_weight)
             optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
             logger.log_subject_split(train_subjects, val_subjects, filename=f"fold_{fold}_split.json")
-            best_f1, best_epoch, stale = float("-inf"), 0, 0
+            
+            best_metric = float("-inf")
+            best_epoch = 0
+            stale = 0
+            best_metrics: dict[str, float] = {}
+
             history: list[dict[str, float]] = []
 
             for epoch in range(1, args.epochs + 1):
@@ -106,18 +113,56 @@ def main() -> None:
                        **{f"val_{k}": v for k, v in val_metrics.items()}}
                 history.append(row)
                 logger.log_epoch(row)
-                logger.info(f"fold={fold} ep={epoch:03d} train_loss={train_metrics['loss']:.4f} val_loss={val_metrics['loss']:.4f} val_f1={val_metrics['rswa_f1_macro']:.4f}")
-                save_checkpoint(checkpoint_dir / "last.pt", model=model, optimizer=optimizer, epoch=epoch, metrics=val_metrics, extra={"fold": fold})
-                if val_metrics["rswa_f1_macro"] > best_f1:
-                    best_f1, best_epoch, stale = val_metrics["rswa_f1_macro"], epoch, 0
-                    save_checkpoint(checkpoint_dir / "best.pt", model=model, optimizer=optimizer, epoch=epoch, metrics=val_metrics, extra={"fold": fold})
+                
+                
+                logger.info(
+                    f"fold={fold} "
+                    f"ep={epoch:03d} "
+                    f"train_loss={train_metrics['loss']:.4f} "
+                    f"val_loss={val_metrics['loss']:.4f} "
+                    f"train_f1={train_metrics['rswa_f1_macro']:.4f} "
+                    f"val_f1={val_metrics['rswa_f1_macro']:.4f} "
+                    f"train_kappa={train_metrics['rswa_kappa_macro']:.4f} "
+                    f"val_kappa={val_metrics['rswa_kappa_macro']:.4f} "
+                    f"val_tonic_kappa={val_metrics['tonic_kappa']:.4f} "
+                    f"val_phasic_kappa={val_metrics['phasic_kappa']:.4f}"
+                )
+
+                current_metric = float(val_metrics[args.monitor])
+
+                if current_metric > best_metric:
+                    best_metric = current_metric
+                    best_epoch = epoch
+                    stale = 0
+                    best_metrics = dict(val_metrics)
+
+                    save_checkpoint(
+                        checkpoint_dir / "best.pt",
+                        model=model,
+                        optimizer=optimizer,
+                        epoch=epoch,
+                        metrics=val_metrics,
+                        extra={
+                            "fold": fold,
+                            "monitor": args.monitor,
+                            "monitor_value": current_metric,
+                        },
+                    )
+
+                    logger.info(
+                        f"Fold {fold}: novo melhor checkpoint "
+                        f"na época {epoch}, "
+                        f"{args.monitor}={current_metric:.4f}"
+                    )
                 else:
                     stale += 1
+
                 if stale >= args.patience:
                     logger.info(f"Fold {fold}: early stopping na época {epoch}.")
                     break
 
-            plot_training_curves(history, figures_dir / "training_curves.png", f1_key="rswa_f1_macro", title=f"RSWA - Fold {fold}")
+            plot_training_curves( history, figures_dir / "training_curves.png", f1_key="rswa_f1_macro", kappa_key="rswa_kappa_macro", title=f"RSWA - Fold {fold}")
+
             load_checkpoint(checkpoint_dir / "best.pt", model, device)
             final = collect_rswa_predictions(model, val_loader, device, amp=not args.no_amp, threshold=args.threshold)
             for name, display in (("tonic", "Tonic"), ("phasic", "Phasic")):
@@ -127,7 +172,30 @@ def main() -> None:
                 plot_confusion_matrix(final[f"{name}_expected"], final[f"{name}_prediction"],
                                       figures_dir / f"confusion_matrix_{name}_normalized.png", labels=[0, 1],
                                       display_labels=["Negative", "Positive"], title=f"{display} normalized confusion matrix - Fold {fold}", normalize="true")
-            fold_summaries.append({"fold": fold, "best_epoch": best_epoch, "best_val_rswa_f1_macro": best_f1})
+            
+            fold_summaries.append(
+                {
+                    "fold": fold,
+                    "best_epoch": best_epoch,
+                    "monitor": args.monitor,
+                    "best_monitor_value": best_metric,
+                    "best_val_loss": best_metrics.get("loss"),
+                    "best_val_rswa_f1_macro": best_metrics.get(
+                        "rswa_f1_macro"
+                    ),
+                    "best_val_rswa_kappa_macro": best_metrics.get(
+                        "rswa_kappa_macro"
+                    ),
+                    "best_val_tonic_f1": best_metrics.get("tonic_f1"),
+                    "best_val_phasic_f1": best_metrics.get("phasic_f1"),
+                    "best_val_tonic_kappa": best_metrics.get(
+                        "tonic_kappa"
+                    ),
+                    "best_val_phasic_kappa": best_metrics.get(
+                        "phasic_kappa"
+                    ),
+                }
+            )
 
         logger.finalize(status="completed", summary={"folds": fold_summaries})
 

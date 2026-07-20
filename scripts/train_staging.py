@@ -45,6 +45,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tags", nargs="*", default=[])
     parser.add_argument("--patience", type=int, default=20)
     parser.add_argument("--class-weights", type=float, nargs=5, default=None)
+    parser.add_argument("--monitor", choices=["f1_macro", "kappa"],default="f1_macro",  help="Métrica de validação usada para selecionar o melhor checkpoint.")
     return parser.parse_args()
 
 
@@ -99,7 +100,12 @@ def main() -> None:
 
             logger.info(f"Fold {fold}: treino={len(train_subjects)} validação={len(val_subjects)}")
             logger.log_subject_split(train_subjects, val_subjects, filename=f"fold_{fold}_split.json")
-            best_f1, best_epoch, stale = float("-inf"), 0, 0
+            
+            best_metric = float("-inf")
+            best_epoch = 0
+            stale = 0
+            best_metrics: dict[str, float] = {}
+
             history: list[dict[str, float]] = []
 
             for epoch in range(1, args.epochs + 1):
@@ -122,20 +128,50 @@ def main() -> None:
                 }
                 history.append(row)
                 logger.log_epoch(row)
-                logger.info(f"fold={fold} ep={epoch:03d} train_loss={train_metrics['loss']:.4f} val_loss={val_metrics['loss']:.4f} val_f1={val_metrics['f1_macro']:.4f}")
+                
+                logger.info(
+                    f"fold={fold} "
+                    f"ep={epoch:03d} "
+                    f"train_loss={train_metrics['loss']:.4f} "
+                    f"val_loss={val_metrics['loss']:.4f} "
+                    f"train_f1={train_metrics['f1_macro']:.4f} "
+                    f"val_f1={val_metrics['f1_macro']:.4f} "
+                    f"train_kappa={train_metrics['kappa']:.4f} "
+                    f"val_kappa={val_metrics['kappa']:.4f}"
+                )
 
                 save_checkpoint(checkpoint_dir / "last.pt", model=model, optimizer=optimizer, epoch=epoch, metrics=val_metrics, extra={"fold": fold})
-                if val_metrics["f1_macro"] > best_f1:
-                    best_f1, best_epoch, stale = val_metrics["f1_macro"], epoch, 0
-                    save_checkpoint(checkpoint_dir / "best.pt", model=model, optimizer=optimizer, epoch=epoch, metrics=val_metrics, extra={"fold": fold})
+               
+                current_metric = float(val_metrics[args.monitor])
+
+                if current_metric > best_metric:
+                    best_metric = current_metric
+                    best_epoch = epoch
+                    stale = 0
+                    best_metrics = dict(val_metrics)
+
+                    save_checkpoint( checkpoint_dir / "best.pt", model=model, optimizer=optimizer,
+                        epoch=epoch, metrics=val_metrics,
+                        extra={
+                            "fold": fold,
+                            "monitor": args.monitor,
+                            "monitor_value": current_metric,
+                        },
+                    )
+
+                    logger.info( f"Fold {fold}: novo melhor checkpoint "
+                        f"na época {epoch}, "
+                        f"{args.monitor}={current_metric:.4f}"
+                    )
                 else:
                     stale += 1
+
                 if stale >= args.patience:
                     logger.info(f"Fold {fold}: early stopping na época {epoch}.")
                     break
 
             parquet_path = prediction_logger.close()
-            plot_training_curves(history, figures_dir / "training_curves.png", f1_key="f1_macro", title=f"Staging - Fold {fold}")
+            plot_training_curves( history, figures_dir / "training_curves.png", f1_key="f1_macro",  kappa_key="kappa", title=f"Staging - Fold {fold}")
             predictions = pd.read_parquet(parquet_path, filters=[("epoch", "=", best_epoch)])
             plot_confusion_matrix(
                 predictions["expected"].to_numpy(), predictions["prediction"].to_numpy(),
@@ -149,8 +185,22 @@ def main() -> None:
                 labels=[0, 1, 2, 3, 4], display_labels=["W", "N1", "N2", "N3", "REM"],
                 title=f"Staging normalized confusion matrix - Fold {fold} - Epoch {best_epoch}", normalize="true",
             )
-            fold_summaries.append({"fold": fold, "best_epoch": best_epoch, "best_val_f1_macro": best_f1})
-
+            
+            fold_summaries.append(
+                {
+                    "fold": fold,
+                    "best_epoch": best_epoch,
+                    "monitor": args.monitor,
+                    "best_monitor_value": best_metric,
+                    "best_val_loss": best_metrics.get("loss"),
+                    "best_val_f1_macro": best_metrics.get("f1_macro"),
+                    "best_val_kappa": best_metrics.get("kappa"),
+                    "best_val_balanced_accuracy": best_metrics.get(
+                        "balanced_accuracy"
+                    ),
+                }
+            )
+            
         logger.finalize(status="completed", summary={"folds": fold_summaries})
 
 
