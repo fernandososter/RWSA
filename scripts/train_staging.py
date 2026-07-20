@@ -4,7 +4,7 @@ import argparse
 from pathlib import Path
 
 import torch
-import tqdm
+from tqdm import tqdm
 from torch.utils.data import DataLoader
 
 from sleep_rswa import SleepAnalysisDataset, SleepStagingNet, collate_sleep_analysis_exams
