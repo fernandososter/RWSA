@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from contextlib import nullcontext
 from typing import Any
-
+from tqdm import tqdm
 import numpy as np
 import torch
 from torch.nn.utils import clip_grad_norm_
@@ -48,7 +48,8 @@ def run_staging_epoch(
             raise ValueError("epoch é obrigatório quando prediction_logger é informado.")
         prediction_logger.start_epoch(epoch)
 
-    for batch in loader:
+  
+    for batch in tqdm(loader, desc="Running staging epoch"):
         signals = batch["signals"].to(device, non_blocking=True)
         targets = batch["sleep_stages"].to(device, non_blocking=True)
         padding_mask = batch["padding_mask"].to(device, non_blocking=True)
