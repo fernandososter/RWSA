@@ -2,8 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from contextlib import nullcontext
-from typing import Any, cast
-from tqdm import tqdm
+from typing import Any
 
 import numpy as np
 import torch
@@ -33,6 +32,8 @@ def run_staging_epoch(
     optimizer: torch.optim.Optimizer | None = None,
     amp: bool = True,
     grad_clip: float | None = 1.0,
+    prediction_logger: Any | None = None,
+    epoch: int | None = None,
 ) -> dict[str, float]:
     training = optimizer is not None
     model.train(training)
@@ -40,7 +41,14 @@ def run_staging_epoch(
     all_targets: list[torch.Tensor] = []
     all_predictions: list[torch.Tensor] = []
 
-    for batch in tqdm(loader, desc="Época", unit="batch"):
+    if prediction_logger is not None:
+        if training:
+            raise ValueError("prediction_logger deve ser usado somente na validação.")
+        if epoch is None:
+            raise ValueError("epoch é obrigatório quando prediction_logger é informado.")
+        prediction_logger.start_epoch(epoch)
+
+    for batch in loader:
         signals = batch["signals"].to(device, non_blocking=True)
         targets = batch["sleep_stages"].to(device, non_blocking=True)
         padding_mask = batch["padding_mask"].to(device, non_blocking=True)
@@ -67,6 +75,17 @@ def run_staging_epoch(
         losses.append(float(loss.detach().cpu()))
         all_targets.append(targets[valid_mask].detach().cpu())
         all_predictions.append(predictions[valid_mask].detach().cpu())
+
+        if prediction_logger is not None:
+            prediction_logger.log_staging_batch(
+                subject_ids=batch["subject_ids"],
+                valid_mask=valid_mask,
+                expected=targets,
+                prediction=predictions,
+            )
+
+    if prediction_logger is not None:
+        prediction_logger.end_epoch()
 
     if not all_targets:
         raise RuntimeError("Nenhum rótulo válido de staging foi encontrado nesta época.")
@@ -212,3 +231,43 @@ def evaluate_joint(
         metrics.update({f"rswa_{k}": float(v) for k, v in rswa.items()})
         metrics["rswa_loss"] = _safe_mean(rswa_losses)
     return metrics
+
+
+def collect_rswa_predictions(
+    model: torch.nn.Module,
+    loader: Iterable[dict[str, Any]],
+    device: torch.device,
+    *,
+    amp: bool = True,
+    threshold: float = 0.5,
+) -> dict[str, np.ndarray]:
+    model.eval()
+    tonic_expected: list[torch.Tensor] = []
+    tonic_prediction: list[torch.Tensor] = []
+    phasic_expected: list[torch.Tensor] = []
+    phasic_prediction: list[torch.Tensor] = []
+
+    with torch.no_grad():
+        for batch in loader:
+            emg = batch["emg_center"].to(device, non_blocking=True)
+            padding_mask = batch["padding_mask"].to(device, non_blocking=True)
+            valid_mask = batch["rswa_valid"].to(device, non_blocking=True) & padding_mask
+            if not valid_mask.any():
+                continue
+            with _autocast_context(device, amp):
+                outputs = model(emg, mask=padding_mask)
+            tonic_pred = (torch.sigmoid(outputs["tonic_logits"]) >= threshold).long()
+            phasic_pred = (torch.sigmoid(outputs["phasic_logits"]) >= threshold).long()
+            tonic_expected.append(batch["tonic_labels"].to(device)[valid_mask].long().cpu())
+            tonic_prediction.append(tonic_pred[valid_mask].cpu())
+            phasic_expected.append(batch["phasic_labels"].to(device)[valid_mask].long().cpu())
+            phasic_prediction.append(phasic_pred[valid_mask].cpu())
+
+    if not tonic_expected:
+        raise RuntimeError("Nenhuma predição RSWA válida foi encontrada.")
+    return {
+        "tonic_expected": torch.cat(tonic_expected).numpy(),
+        "tonic_prediction": torch.cat(tonic_prediction).numpy(),
+        "phasic_expected": torch.cat(phasic_expected).numpy(),
+        "phasic_prediction": torch.cat(phasic_prediction).numpy(),
+    }

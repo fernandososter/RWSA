@@ -1,6 +1,4 @@
-from sleep_rswa.models.staging import SleepStagingNet
-from sleep_rswa.models.rswa import RSWADetectionNet
-from sleep_rswa.models.system import SleepStagingRSWASystem
+from sleep_rswa import SleepStagingNet, RSWADetectionNet, SleepStagingRSWASystem
 
 staging=SleepStagingNet(); rswa=RSWADetectionNet(); system=SleepStagingRSWASystem(staging,rswa)
 print(f"Staging: {staging.n_params():,} parâmetros")

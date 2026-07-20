@@ -2,28 +2,33 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+from time import perf_counter
 
 import torch
 from torch.utils.data import DataLoader
 
 from sleep_rswa import RSWADetectionNet, SleepAnalysisDataset, collate_sleep_analysis_exams
+from sleep_rswa.data import load_subject_directory
 from sleep_rswa.training import (
+    ExperimentLogger,
     RSWALoss,
-    load_train_val_subjects,
+    collect_rswa_predictions,
+    load_checkpoint,
+    plot_confusion_matrix,
+    plot_training_curves,
     resolve_device,
     run_rswa_epoch,
     save_checkpoint,
     seed_everything,
-    write_history,
+    stratified_group_folds,
 )
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Treina o modelo de detecção de RSWA.")
-    parser.add_argument("--data-dir", type=Path)
-    parser.add_argument("--train-dir", type=Path)
-    parser.add_argument("--val-dir", type=Path)
-    parser.add_argument("--val-fraction", type=float, default=0.2)
+    parser = argparse.ArgumentParser(description="Treina RSWA com StratifiedGroupKFold.")
+    parser.add_argument("--data-dir", type=Path, required=True)
+    parser.add_argument("--n-splits", type=int, default=5)
+    parser.add_argument("--fold", type=int, default=None, help="Executa apenas este fold; padrão: todos.")
     parser.add_argument("--epochs", type=int, default=30)
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--num-workers", type=int, default=2)
@@ -32,102 +37,99 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--grad-clip", type=float, default=1.0)
     parser.add_argument("--threshold", type=float, default=0.5)
     parser.add_argument("--min-confidence", type=float, default=0.0)
-    parser.add_argument("--all-stages", action="store_true", help="Não restringe o RSWA às miniépocas REM.")
+    parser.add_argument("--all-stages", action="store_true")
     parser.add_argument("--tonic-pos-weight", type=float)
     parser.add_argument("--phasic-pos-weight", type=float)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", default="auto")
     parser.add_argument("--no-amp", action="store_true")
-    parser.add_argument("--checkpoint-dir", type=Path, default=Path("checkpoints/rswa"))
+    parser.add_argument("--run-dir", type=Path, default=Path("runs/rswa"))
+    parser.add_argument("--experiment-name", default="rswa_stratified_kfold")
+    parser.add_argument("--notes", default=None)
+    parser.add_argument("--tags", nargs="*", default=[])
     parser.add_argument("--patience", type=int, default=15)
     return parser.parse_args()
 
 
-def make_loader(dataset: SleepAnalysisDataset, args: argparse.Namespace, shuffle: bool, device: torch.device) -> DataLoader:
-    return DataLoader(
-        dataset,
-        batch_size=args.batch_size,
-        shuffle=shuffle,
-        num_workers=args.num_workers,
-        collate_fn=collate_sleep_analysis_exams,
-        pin_memory=device.type == "cuda",
-        persistent_workers=args.num_workers > 0,
-    )
+def make_loader(subjects, args, shuffle, device):
+    ds = SleepAnalysisDataset(subjects, min_confidence=args.min_confidence, rem_mask_only=not args.all_stages)
+    return DataLoader(ds, batch_size=args.batch_size, shuffle=shuffle, num_workers=args.num_workers,
+                      collate_fn=collate_sleep_analysis_exams, pin_memory=device.type == "cuda",
+                      persistent_workers=args.num_workers > 0)
 
 
 def main() -> None:
     args = parse_args()
     seed_everything(args.seed)
     device = resolve_device(args.device)
-    train_subjects, val_subjects = load_train_val_subjects(
-        data_dir=args.data_dir,
-        train_dir=args.train_dir,
-        val_dir=args.val_dir,
-        val_fraction=args.val_fraction,
-        seed=args.seed,
-    )
+    subjects = load_subject_directory(args.data_dir)
+    folds = list(stratified_group_folds(subjects, n_splits=args.n_splits, seed=args.seed, task="rswa"))
+    if args.fold is not None:
+        folds = [item for item in folds if item[0] == args.fold]
+        if not folds:
+            raise ValueError(f"Fold {args.fold} não existe para n_splits={args.n_splits}.")
 
-    ds_kwargs = {"min_confidence": args.min_confidence, "rem_mask_only": not args.all_stages}
-    train_loader = make_loader(SleepAnalysisDataset(train_subjects, **ds_kwargs), args, True, device)
-    val_loader = make_loader(SleepAnalysisDataset(val_subjects, **ds_kwargs), args, False, device)
+    with ExperimentLogger(task="rswa", experiment_name=args.experiment_name, root_dir=args.run_dir,
+                          device=device, args=vars(args), notes=args.notes, tags=args.tags) as logger:
+        fold_summaries = []
+        for fold, train_subjects, val_subjects in folds:
+            seed_everything(args.seed + fold)
+            fold_dir = logger.run_dir / f"fold_{fold}"
+            checkpoint_dir = fold_dir / "checkpoints"
+            figures_dir = fold_dir / "figures"
+            checkpoint_dir.mkdir(parents=True, exist_ok=True)
+            figures_dir.mkdir(parents=True, exist_ok=True)
+            train_loader = make_loader(train_subjects, args, True, device)
+            val_loader = make_loader(val_subjects, args, False, device)
+            model = RSWADetectionNet().to(device)
+            tonic_weight = torch.tensor(args.tonic_pos_weight, device=device) if args.tonic_pos_weight else None
+            phasic_weight = torch.tensor(args.phasic_pos_weight, device=device) if args.phasic_pos_weight else None
+            criterion = RSWALoss(tonic_pos_weight=tonic_weight, phasic_pos_weight=phasic_weight)
+            optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+            logger.log_subject_split(train_subjects, val_subjects, filename=f"fold_{fold}_split.json")
+            best_f1, best_epoch, stale = float("-inf"), 0, 0
+            history: list[dict[str, float]] = []
 
-    model = RSWADetectionNet().to(device)
-    tonic_weight = None if args.tonic_pos_weight is None else torch.tensor(args.tonic_pos_weight, device=device)
-    phasic_weight = None if args.phasic_pos_weight is None else torch.tensor(args.phasic_pos_weight, device=device)
-    criterion = RSWALoss(tonic_weight, phasic_weight)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+            for epoch in range(1, args.epochs + 1):
+                epoch_start = perf_counter()
+                train_start = perf_counter()
+                train_metrics = run_rswa_epoch(model, train_loader, criterion, device, optimizer, amp=not args.no_amp,
+                                               grad_clip=args.grad_clip, threshold=args.threshold)
+                train_time = perf_counter() - train_start
+                val_start = perf_counter()
+                val_metrics = run_rswa_epoch(model, val_loader, criterion, device, amp=not args.no_amp,
+                                             threshold=args.threshold)
+                val_time = perf_counter() - val_start
+                row = {"fold": fold, "epoch": epoch, "train_time_sec": train_time, "val_time_sec": val_time,
+                       "epoch_time_sec": perf_counter() - epoch_start, "learning_rate": optimizer.param_groups[0]["lr"],
+                       **{f"train_{k}": v for k, v in train_metrics.items()},
+                       **{f"val_{k}": v for k, v in val_metrics.items()}}
+                history.append(row)
+                logger.log_epoch(row)
+                logger.info(f"fold={fold} ep={epoch:03d} train_loss={train_metrics['loss']:.4f} val_loss={val_metrics['loss']:.4f} val_f1={val_metrics['rswa_f1_macro']:.4f}")
+                save_checkpoint(checkpoint_dir / "last.pt", model=model, optimizer=optimizer, epoch=epoch, metrics=val_metrics, extra={"fold": fold})
+                if val_metrics["rswa_f1_macro"] > best_f1:
+                    best_f1, best_epoch, stale = val_metrics["rswa_f1_macro"], epoch, 0
+                    save_checkpoint(checkpoint_dir / "best.pt", model=model, optimizer=optimizer, epoch=epoch, metrics=val_metrics, extra={"fold": fold})
+                else:
+                    stale += 1
+                if stale >= args.patience:
+                    logger.info(f"Fold {fold}: early stopping na época {epoch}.")
+                    break
 
-    print(f"Dispositivo: {device}")
-    print(f"Treino: {len(train_subjects)} sujeitos | Validação: {len(val_subjects)} sujeitos")
-    print(f"Parâmetros treináveis: {model.n_params():,}")
+            plot_training_curves(history, figures_dir / "training_curves.png", f1_key="rswa_f1_macro", title=f"RSWA - Fold {fold}")
+            load_checkpoint(checkpoint_dir / "best.pt", model, device)
+            final = collect_rswa_predictions(model, val_loader, device, amp=not args.no_amp, threshold=args.threshold)
+            for name, display in (("tonic", "Tonic"), ("phasic", "Phasic")):
+                plot_confusion_matrix(final[f"{name}_expected"], final[f"{name}_prediction"],
+                                      figures_dir / f"confusion_matrix_{name}.png", labels=[0, 1],
+                                      display_labels=["Negative", "Positive"], title=f"{display} confusion matrix - Fold {fold}")
+                plot_confusion_matrix(final[f"{name}_expected"], final[f"{name}_prediction"],
+                                      figures_dir / f"confusion_matrix_{name}_normalized.png", labels=[0, 1],
+                                      display_labels=["Negative", "Positive"], title=f"{display} normalized confusion matrix - Fold {fold}", normalize="true")
+            fold_summaries.append({"fold": fold, "best_epoch": best_epoch, "best_val_rswa_f1_macro": best_f1})
 
-    history: list[dict[str, float | int]] = []
-    best_f1 = float("-inf")
-    stale_epochs = 0
-
-    for epoch in range(1, args.epochs + 1):
-        train_metrics = run_rswa_epoch(
-            model, train_loader, criterion, device, optimizer,
-            amp=not args.no_amp, grad_clip=args.grad_clip, threshold=args.threshold,
-        )
-        val_metrics = run_rswa_epoch(
-            model, val_loader, criterion, device,
-            amp=not args.no_amp, threshold=args.threshold,
-        )
-        row = {
-            "epoch": epoch,
-            **{f"train_{k}": v for k, v in train_metrics.items()},
-            **{f"val_{k}": v for k, v in val_metrics.items()},
-        }
-        history.append(row)
-        print(
-            f"ep={epoch:03d} "
-            f"train loss={train_metrics['loss']:.4f} rswa_f1={train_metrics['rswa_f1_macro']:.4f} "
-            f"tonic={train_metrics['tonic_f1']:.4f} phasic={train_metrics['phasic_f1']:.4f} | "
-            f"val loss={val_metrics['loss']:.4f} rswa_f1={val_metrics['rswa_f1_macro']:.4f} "
-            f"tonic={val_metrics['tonic_f1']:.4f} phasic={val_metrics['phasic_f1']:.4f}"
-        )
-
-        save_checkpoint(
-            args.checkpoint_dir / "last.pt",
-            model=model, optimizer=optimizer, epoch=epoch, metrics=val_metrics,
-            extra={"task": "rswa", "args": vars(args)},
-        )
-        if val_metrics["rswa_f1_macro"] > best_f1:
-            best_f1 = val_metrics["rswa_f1_macro"]
-            stale_epochs = 0
-            save_checkpoint(
-                args.checkpoint_dir / "best.pt",
-                model=model, optimizer=optimizer, epoch=epoch, metrics=val_metrics,
-                extra={"task": "rswa", "args": vars(args)},
-            )
-        else:
-            stale_epochs += 1
-
-        write_history(args.checkpoint_dir / "history.json", history)
-        if stale_epochs >= args.patience:
-            print(f"Early stopping após {args.patience} épocas sem melhora.")
-            break
+        logger.finalize(status="completed", summary={"folds": fold_summaries})
 
 
 if __name__ == "__main__":

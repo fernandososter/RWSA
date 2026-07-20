@@ -1,12 +1,12 @@
-import os
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
+import os
+from concurrent.futures import ThreadPoolExecutor
+from tqdm import tqdm
 from typing import Sequence
 
 import torch
 from torch.utils.data import Dataset
-from tqdm import tqdm   
 
 from .config import RSWAConfig, SignalConfig
 
@@ -56,6 +56,7 @@ def load_subject_file(path: str | Path) -> SubjectData:
         rswa_conf=conf,
         emg_signals=emg,
     )
+
 
 
 def load_subject_directory(directory: str | Path, max_workers: int | None = None) -> list[SubjectData]:

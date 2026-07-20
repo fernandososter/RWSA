@@ -127,21 +127,39 @@ python scripts/predict.py \
   --output outputs/predictions.csv
 ```
 
-# comandos para instalar
+## Logger de experimentos e ablation
+
+Os scripts de treino criam uma pasta independente por execução em `runs/<task>/`.
+Use `--experiment-name`, `--notes` e `--tags` para identificar as variantes.
+
+Exemplo:
 
 ```bash
-cd /Users/fernandososter/Documents/sleep_staging_rswa_project
-
-conda deactivate
-source .venv/bin/activate
-
-python -m pip uninstall -y sleep-staging-rswa
-rm -rf src/*.egg-info
-find . -name "__pycache__" -type d -exec rm -rf {} +
-
-python -m pip install --no-cache-dir -e .
-
-python -c "import sys; print(sys.executable)"
-python -c "import sleep_rswa; print(sleep_rswa.__file__)"
-python scripts/inspect_models.py
+python scripts/train_staging.py \
+  --data-dir /dados/tensors \
+  --experiment-name no_mamba \
+  --tags ablation staging no-mamba \
+  --notes "Ablation removendo o bloco Mamba"
 ```
+
+Cada run contém `run.json`, `data_split.json`, descrição do modelo, `metrics.csv`,
+`metrics.jsonl`, `history.json`, `training.log`, `best.json`, `summary.json` e checkpoints.
+
+## Validação cruzada estratificada e figuras
+
+Os scripts `train_staging.py` e `train_rswa.py` usam `StratifiedGroupKFold` por padrão com 5 folds. A estratificação considera os rótulos das mini-épocas e o agrupamento mantém todas as mini-épocas de um sujeito no mesmo fold.
+
+Executar todos os folds:
+
+```bash
+python scripts/train_staging.py --data-dir /caminho/tensors --n-splits 5
+python scripts/train_rswa.py --data-dir /caminho/tensors --n-splits 5
+```
+
+Executar somente um fold:
+
+```bash
+python scripts/train_staging.py --data-dir /caminho/tensors --n-splits 5 --fold 2
+```
+
+Cada fold gera `training_curves.png`. Staging gera matrizes de confusão absoluta e normalizada da melhor época. RSWA gera matrizes separadas para tonic e phasic.
