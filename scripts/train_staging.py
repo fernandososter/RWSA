@@ -88,7 +88,7 @@ def main() -> None:
     best_f1 = float("-inf")
     stale_epochs = 0
 
-    for epoch in tqdm(range(1, args.epochs + 1)):
+    for epoch in tqdm(range(1, args.epochs + 1), desc="Treinando", unit="época"):
         train_metrics = run_staging_epoch(
             model, train_loader, criterion, device, optimizer,
             amp=not args.no_amp, grad_clip=args.grad_clip,
