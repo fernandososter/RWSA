@@ -4,6 +4,7 @@ from typing import Sequence
 
 import torch
 from torch.utils.data import Dataset
+from tqdm import tqdm   
 
 from .config import RSWAConfig, SignalConfig
 
@@ -59,7 +60,7 @@ def load_subject_directory(directory: str | Path) -> list[SubjectData]:
     paths = sorted(Path(directory).glob("*.pt"))
     if not paths:
         raise FileNotFoundError(f"Nenhum arquivo .pt em {directory}")
-    return [load_subject_file(path) for path in paths]
+    return [load_subject_file(path) for path in tqdm(paths, desc="Carregando sujeitos", unit="arquivo")]
 
 
 def _zscore_per_channel(signals: torch.Tensor) -> torch.Tensor:
