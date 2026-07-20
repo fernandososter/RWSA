@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from contextlib import nullcontext
-from typing import Any
+from typing import Any, cast
+from tqdm import tqdm
 
 import numpy as np
 import torch
@@ -39,7 +40,7 @@ def run_staging_epoch(
     all_targets: list[torch.Tensor] = []
     all_predictions: list[torch.Tensor] = []
 
-    for batch in loader:
+    for batch in tqdm(loader, desc="Época", unit="batch"):
         signals = batch["signals"].to(device, non_blocking=True)
         targets = batch["sleep_stages"].to(device, non_blocking=True)
         padding_mask = batch["padding_mask"].to(device, non_blocking=True)
