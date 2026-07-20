@@ -8,6 +8,14 @@ import pandas as pd
 import torch
 from torch.utils.data import DataLoader
 
+import numpy as np
+
+from sklearn.metrics import (
+    balanced_accuracy_score,
+    cohen_kappa_score,
+    f1_score,
+)
+
 from sleep_rswa import SleepAnalysisDataset, SleepStagingNet, collate_sleep_analysis_exams
 from sleep_rswa.data import load_subject_directory
 from sleep_rswa.training import (
@@ -81,7 +89,14 @@ def main() -> None:
         notes=args.notes,
         tags=args.tags,
     ) as logger:
+        
+        
         fold_summaries = []
+        # out of folds - usado para acumular as previsões de validação de todos os folds para avaliação final
+        all_oof_expected: list[int] = []
+        all_oof_predictions: list[int] = []
+
+
         for fold, train_subjects, val_subjects in folds:
             seed_everything(args.seed + fold)
             fold_dir = logger.run_dir / f"fold_{fold}"
@@ -173,6 +188,10 @@ def main() -> None:
             parquet_path = prediction_logger.close()
             plot_training_curves( history, figures_dir / "training_curves.png", f1_key="f1_macro",  kappa_key="kappa", title=f"Staging - Fold {fold}")
             predictions = pd.read_parquet(parquet_path, filters=[("epoch", "=", best_epoch)])
+          
+            all_oof_expected.extend(predictions["expected"].to_numpy().astype(int).tolist())
+            all_oof_predictions.extend(predictions["prediction"].to_numpy().astype(int).tolist())
+
             plot_confusion_matrix(
                 predictions["expected"].to_numpy(), predictions["prediction"].to_numpy(),
                 figures_dir / "confusion_matrix_best_epoch.png",
@@ -185,6 +204,8 @@ def main() -> None:
                 labels=[0, 1, 2, 3, 4], display_labels=["W", "N1", "N2", "N3", "REM"],
                 title=f"Staging normalized confusion matrix - Fold {fold} - Epoch {best_epoch}", normalize="true",
             )
+
+
             
             fold_summaries.append(
                 {
@@ -200,8 +221,63 @@ def main() -> None:
                     ),
                 }
             )
-            
-        logger.finalize(status="completed", summary={"folds": fold_summaries})
+
+
+
+        
+        oof_expected = np.asarray(all_oof_expected, dtype=np.int64)
+        oof_predictions = np.asarray( all_oof_predictions, dtype=np.int64)
+
+        # gerando métricas globais de validação usando todas as previsões de validação de todos os folds
+        global_f1_macro = f1_score( oof_expected, oof_predictions, average="macro", zero_division=0)
+        global_kappa = cohen_kappa_score( oof_expected, oof_predictions )
+        global_balanced_accuracy = balanced_accuracy_score( oof_expected, oof_predictions )
+
+        global_figures_dir = logger.run_dir / "figures"
+        global_figures_dir.mkdir( parents=True,exist_ok=True)
+
+        plot_confusion_matrix( oof_expected, oof_predictions, global_figures_dir / "confusion_matrix_oof.png",
+            labels=[0, 1, 2, 3, 4], display_labels=["W", "N1", "N2", "N3", "REM"], normalize=None,
+            title="Staging - Out-of-fold confusion matrix")
+
+        plot_confusion_matrix( oof_expected, oof_predictions, global_figures_dir / "confusion_matrix_oof_normalized.png",
+            labels=[0, 1, 2, 3, 4], display_labels=["W", "N1", "N2", "N3", "REM"], normalize="true",
+            title=(
+                "Staging - Out-of-fold normalized "
+                "confusion matrix"
+            ),
+        )
+
+        
+        fold_f1_values = np.asarray(
+            [ fold["best_val_f1_macro"] for fold in fold_summaries], dtype=np.float64,
+        )
+
+        fold_f1_mean = float(fold_f1_values.mean())
+        fold_f1_std = float(  fold_f1_values.std(ddof=1)
+            if len(fold_f1_values) > 1
+            else 0.0
+        )
+
+        logger.finalize(
+            status="completed",
+            summary={
+                "folds": fold_summaries,
+                "cross_validation": {
+                    "n_folds": len(fold_summaries),
+                    "f1_macro_mean": fold_f1_mean,
+                    "f1_macro_std": fold_f1_std,
+                },
+                "out_of_fold": {
+                    "n_samples": int(oof_expected.size),
+                    "f1_macro": float(global_f1_macro),
+                    "kappa": float(global_kappa),
+                    "balanced_accuracy": float(
+                        global_balanced_accuracy
+                    ),
+                },
+            },
+        )
 
 
 if __name__ == "__main__":
