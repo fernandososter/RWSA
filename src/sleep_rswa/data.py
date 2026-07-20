@@ -1,3 +1,5 @@
+import os
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Sequence
@@ -56,11 +58,22 @@ def load_subject_file(path: str | Path) -> SubjectData:
     )
 
 
-def load_subject_directory(directory: str | Path) -> list[SubjectData]:
+def load_subject_directory(directory: str | Path, max_workers: int | None = None) -> list[SubjectData]:
     paths = sorted(Path(directory).glob("*.pt"))
     if not paths:
         raise FileNotFoundError(f"Nenhum arquivo .pt em {directory}")
-    return [load_subject_file(path) for path in tqdm(paths, desc="Carregando sujeitos", unit="arquivo")]
+
+    # torch.load e leitura de disco se beneficiam de paralelismo por threads.
+    workers = max_workers or min(32, max(1, (os.cpu_count() or 1) * 2))
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        return list(
+            tqdm(
+                executor.map(load_subject_file, paths),
+                total=len(paths),
+                desc="Carregando sujeitos",
+                unit="arquivo",
+            )
+        )
 
 
 def _zscore_per_channel(signals: torch.Tensor) -> torch.Tensor:
