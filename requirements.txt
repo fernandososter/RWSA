@@ -1,0 +1,16 @@
+torch
+torchvision
+torchaudio
+numpy
+pandas
+scipy
+scikit-learn
+matplotlib
+mne
+einops
+#mamba-ssm
+tqdm
+python-dotenv
+jupyter
+ipykernel
+pytest

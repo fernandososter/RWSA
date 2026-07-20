@@ -1,0 +1,17 @@
+Metadata-Version: 2.4
+Name: sleep-staging-rswa
+Version: 0.1.0
+Summary: Sleep staging and RSWA detection in synchronized 3-second mini-epochs
+Requires-Python: >=3.10
+Requires-Dist: torch>=2.3
+Requires-Dist: numpy>=1.26
+Requires-Dist: scikit-learn>=1.4
+Requires-Dist: python-dotenv>=1.0
+Requires-Dist: pandas>=2.0
+Requires-Dist: matplotlib>=3.8
+Requires-Dist: tqdm>=4.66
+Provides-Extra: mamba
+Requires-Dist: mamba-ssm>=2.2; extra == "mamba"
+Provides-Extra: dev
+Requires-Dist: pytest>=8; extra == "dev"
+Requires-Dist: ruff>=0.5; extra == "dev"
