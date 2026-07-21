@@ -1,5 +1,5 @@
 from __future__ import annotations
-
+from collections.abc import Iterable, Mapping
 import argparse
 from pathlib import Path
 from time import perf_counter
@@ -9,6 +9,8 @@ import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 import numpy as np
+
+from sleep_rswa.utils import print_experiment_summary
 
 from sklearn.metrics import (
     balanced_accuracy_score,
@@ -66,13 +68,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model", choices=available_staging_models(),default="cnn_bimamba",help="Arquitetura usada no experimento.")
     parser.add_argument("--lstm-hidden-size", type=int, default=None)
     parser.add_argument( "--lstm-layers", type=int, default=1)
+    parser.add_argument("--summary", action="store_true", help=("Mostra um resumo do experimento e a estrutura completa ")) 
+
+    parser.add_argument( "--log-stage-distribution", action="store_true",
+        help=(
+            "Registra a distribuição dos rótulos e das "
+            "predições em cada época."
+        ),
+    )
 
     return parser.parse_args()
 
 
 def make_loader(subjects, args, shuffle, device):
-    return DataLoader(
-        SleepAnalysisDataset(subjects),
+
+    dataset = SleepAnalysisDataset(subjects)
+
+    loader = DataLoader(
+        dataset,
         batch_size=args.batch_size,
         shuffle=shuffle,
         num_workers=args.num_workers,
@@ -80,6 +93,9 @@ def make_loader(subjects, args, shuffle, device):
         pin_memory=device.type == "cuda",
         persistent_workers=args.num_workers > 0,
     )
+
+    return loader
+
 
 
 def main() -> None:
@@ -92,6 +108,11 @@ def main() -> None:
         folds = [item for item in folds if item[0] == args.fold]
         if not folds:
             raise ValueError(f"Fold {args.fold} não existe para n_splits={args.n_splits}.")
+
+    if args.experiment_name == "staging_stratified_kfold":
+        args.experiment_name = (
+            f"staging_{args.model}_stratified_kfold"
+        )
 
     with ExperimentLogger(
         task="staging",
@@ -109,6 +130,25 @@ def main() -> None:
         all_oof_expected: list[int] = []
         all_oof_predictions: list[int] = []
 
+        if args.summary:
+            print_experiment_summary(
+                model=model,
+                model_name=args.model,
+                experiment_name=args.experiment_name,
+                device=str(device),
+                training_config={
+                    "epochs": args.epochs,
+                    "batch_size": args.batch_size,
+                    "learning_rate": args.learning_rate,
+                    "weight_decay": args.weight_decay,
+                    "num_workers": args.num_workers,
+                },
+                cross_validation_config={
+                    "n_splits": args.n_splits,
+                    "seed": args.seed,
+                },
+            ) 
+
 
         for fold, train_subjects, val_subjects in folds:
             seed_everything(args.seed + fold)
@@ -120,8 +160,44 @@ def main() -> None:
 
             train_loader = make_loader(train_subjects, args, True, device)
             val_loader = make_loader(val_subjects, args, False, device)
-            
-            
+
+            if args.summary:
+                train_distribution = (
+                    train_loader.dataset
+                    .stage_distribution()
+                    .as_dict()
+                )
+
+                val_distribution = (
+                    val_loader.dataset
+                    .stage_distribution()
+                    .as_dict()
+                )
+
+                print_stage_distribution(
+                    f"Fold {fold} - Train stage distribution",
+                    train_distribution,
+                )
+
+                print_stage_distribution(
+                    f"Fold {fold} - Validation stage distribution",
+                    val_distribution,
+                )
+
+                print_split_summary(
+                    split_name="Train",
+                    subjects=train_subjects,
+                    dataset=train_loader.dataset,
+                    loader=train_loader,
+                )
+
+                print_split_summary(
+                    split_name="Validation",
+                    subjects=val_subjects,
+                    dataset=val_loader.dataset,
+                    loader=val_loader,
+                )
+                
             model_kwargs = {}
 
             if args.model in { "cnn_lstm", "cnn_bilstm" }:
@@ -133,6 +209,29 @@ def main() -> None:
                 )
 
             model = build_staging_model( args.model, **model_kwargs).to(device)
+
+            if args.summary:
+                print()
+                print("=" * 80)
+                print(f"FOLD {fold}/{args.n_splits}")
+                print("=" * 80)
+
+                print_split_summary(
+                    split_name="Train",
+                    subjects=train_subjects,
+                    dataset=train_loader.dataset,
+                    loader=train_loader,
+                )
+
+                print_split_summary(
+                    split_name="Validation",
+                    subjects=val_subjects,
+                    dataset=val_loader.dataset,
+                    loader=val_loader,
+                )
+
+
+
 
             logger.info(
                 f"Modelo: {args.model} | "
@@ -155,8 +254,7 @@ def main() -> None:
 
             history: list[dict[str, float]] = []
 
-            for epoch in tqdm(range(1, args.epochs + 1), desc=f"Fold {fold} training", unit="epoch"):
-
+            for epoch in range(1, args.epochs + 1):
 
                 epoch_start = perf_counter()
                 train_start = perf_counter()
@@ -178,6 +276,7 @@ def main() -> None:
                 history.append(row)
                 logger.log_epoch(row)
                 
+
                 logger.info(
                     f"ep={epoch:03d} -- "
                     f"{GREEN}"
@@ -191,6 +290,47 @@ def main() -> None:
                     f"val_kappa={val_metrics['kappa']:.4f}"
                     f"{RESET}"
                 )
+
+                if args.log_stage_distribution:
+                    train_targets = format_stage_distribution(
+                        train_metrics["target_distribution"]
+                    )
+
+                    train_predictions = format_stage_distribution(
+                        train_metrics["prediction_distribution"]
+                    )
+
+                    val_targets = format_stage_distribution(
+                        val_metrics["target_distribution"]
+                    )
+
+                    val_predictions = format_stage_distribution(
+                        val_metrics["prediction_distribution"]
+                    )
+
+                    logger.info(
+                        "ep=%03d train_targets[%s]",
+                        epoch,
+                        train_targets,
+                    )
+
+                    logger.info(
+                        "ep=%03d train_predictions[%s]",
+                        epoch,
+                        train_predictions,
+                    )
+
+                    logger.info(
+                        "ep=%03d val_targets[%s]",
+                        epoch,
+                        val_targets,
+                    )
+
+                    logger.info(
+                        "ep=%03d val_predictions[%s]",
+                        epoch,
+                        val_predictions,
+                    )
 
                 save_checkpoint(checkpoint_dir / "last.pt", model=model, optimizer=optimizer, epoch=epoch, metrics=val_metrics, extra={"fold": fold})
                
@@ -316,6 +456,24 @@ def main() -> None:
             },
         )
 
+
+def format_stage_distribution(
+    distribution: Mapping[
+        str,
+        Mapping[str, Any],
+    ],
+    ) -> str:
+    parts = []
+
+    for stage, values in distribution.items():
+        count = int(values["count"])
+        percentage = float(values["percentage"])
+
+        parts.append(
+            f"{stage}={count:,}({percentage:.1f}%)"
+        )
+
+    return " | ".join(parts)
 
 if __name__ == "__main__":
     main()
