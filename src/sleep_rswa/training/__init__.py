@@ -2,6 +2,7 @@ from .cross_validation import stratified_group_folds
 from .engine import collect_rswa_predictions, evaluate_joint, run_rswa_epoch, run_staging_epoch
 from .logger import ExperimentLogger
 from .losses import RSWALoss, StagingLoss
+from .distribution import StagingDistribution
 from .plots import plot_confusion_matrix, plot_training_curves
 from .prediction_logger import ValidationPredictionLogger
 from .utils import (
@@ -18,6 +19,7 @@ __all__ = [
     "ExperimentLogger",
     "ValidationPredictionLogger",
     "StagingLoss",
+    "StagingDistribution",
     "RSWALoss",
     "run_staging_epoch",
     "run_rswa_epoch",

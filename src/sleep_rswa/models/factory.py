@@ -49,7 +49,6 @@ def register_staging_model(
 
     _STAGING_MODELS[normalized_name] = builder
 
-
 def build_staging_model(
     name: str,
     *,
@@ -70,8 +69,6 @@ def build_staging_model(
             f"Modelos disponíveis: {available}."
         ) from error
 
-    # cnn_lstm e cnn_bilstm usam a mesma classe,
-    # mudando apenas o parâmetro bidirectional.
     if normalized_name == "cnn_lstm":
         model_kwargs.setdefault(
             "bidirectional",
@@ -84,7 +81,11 @@ def build_staging_model(
             True,
         )
 
-    return builder(
+    model = builder(
         config=config,
         **model_kwargs,
     )
+
+    model.model_name = normalized_name
+
+    return model

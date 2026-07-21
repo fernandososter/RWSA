@@ -7,6 +7,9 @@ from tqdm import tqdm
 import numpy as np
 import torch
 from torch.nn.utils import clip_grad_norm_
+from sleep_rswa.training.stage_distribution import (
+    StageDistribution,
+)
 
 from ..metrics import rswa_metrics, staging_metrics
 from .losses import RSWALoss, StagingLoss
@@ -34,12 +37,16 @@ def run_staging_epoch(
     grad_clip: float | None = 1.0,
     prediction_logger: Any | None = None,
     epoch: int | None = None,
-) -> dict[str, float]:
+) -> dict[str, Any]:
+    
     training = optimizer is not None
     model.train(training)
     losses: list[float] = []
     all_targets: list[torch.Tensor] = []
     all_predictions: list[torch.Tensor] = []
+
+    target_distribution = StageDistribution()
+    prediction_distribution = StageDistribution()
 
     if prediction_logger is not None:
         if training:
@@ -77,6 +84,16 @@ def run_staging_epoch(
         all_targets.append(targets[valid_mask].detach().cpu())
         all_predictions.append(predictions[valid_mask].detach().cpu())
 
+        target_distribution.update(
+            targets,
+            mask=valid_mask,
+        )
+
+        prediction_distribution.update(
+            predictions,
+            mask=valid_mask,
+        )
+
         if prediction_logger is not None:
             prediction_logger.log_staging_batch(
                 subject_ids=batch["subject_ids"],
@@ -94,7 +111,18 @@ def run_staging_epoch(
     targets_np = torch.cat(all_targets).numpy()
     predictions_np = torch.cat(all_predictions).numpy()
     result = staging_metrics(targets_np, predictions_np)
-    return {"loss": _safe_mean(losses), **{k: float(v) for k, v in result.items()}}
+    
+    metrics: dict[str, Any] = {
+        "loss": _safe_mean(losses),
+        **{
+            key: float(value)
+            for key, value in result.items()
+        },
+        "target_distribution": target_distribution.as_dict(),
+        "prediction_distribution": prediction_distribution.as_dict(),
+    }
+
+    return metrics
 
 
 def run_rswa_epoch(
@@ -272,3 +300,4 @@ def collect_rswa_predictions(
         "phasic_expected": torch.cat(phasic_expected).numpy(),
         "phasic_prediction": torch.cat(phasic_prediction).numpy(),
     }
+

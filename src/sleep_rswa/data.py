@@ -136,6 +136,34 @@ class SleepAnalysisDataset(Dataset):
             emg = signals[:, index:index + 1, :].clone()
         return _zscore_per_channel(emg)[:, :, : self.signal_config.samples_per_epoch]
 
+
+
+
+
+    def stage_distribution(self) -> StageDistribution:
+        distribution = StageDistribution()
+
+        for subject_path in self.subjects:
+            exam = torch.load(
+                subject_path,
+                map_location="cpu",
+                weights_only=False,
+            )
+
+            counts = exam["metadata"]["stage_counts"]
+
+            for class_id, count in counts.items():
+                distribution.counts[int(class_id)] += int(count)
+
+        return distribution
+
+    def summary(self) -> dict[str, int]:
+        return {
+            "exams": len(self.subjects),
+            "items": len(self),
+        }
+    
+
     def __getitem__(self, idx: int) -> dict[str, torch.Tensor | str]:
         subject = self.subjects[idx]
         signals = self._extract_staging_signals(subject)
