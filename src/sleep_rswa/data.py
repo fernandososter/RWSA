@@ -7,7 +7,7 @@ from typing import Sequence
 
 import torch
 from torch.utils.data import Dataset
-from .training.distribution import StageDistribution
+from .distribution import StageDistribution
 
 from .config import RSWAConfig, SignalConfig
 
