@@ -49,7 +49,7 @@ def run_staging_epoch(
         prediction_logger.start_epoch(epoch)
 
   
-    for batch in loader:
+    for batch in tqdm(loader, desc="Running staging epoch", unit="batch"):
         signals = batch["signals"].to(device, non_blocking=True)
         targets = batch["sleep_stages"].to(device, non_blocking=True)
         padding_mask = batch["padding_mask"].to(device, non_blocking=True)
@@ -115,7 +115,7 @@ def run_rswa_epoch(
     phasic_targets_all: list[torch.Tensor] = []
     phasic_preds_all: list[torch.Tensor] = []
 
-    for batch in loader:
+    for batch in tqdm(loader, desc="Running RSWA epoch", unit="batch"):
         emg = batch["emg_center"].to(device, non_blocking=True)
         tonic_targets = batch["tonic_labels"].to(device, non_blocking=True)
         phasic_targets = batch["phasic_labels"].to(device, non_blocking=True)
@@ -183,7 +183,7 @@ def evaluate_joint(
     phasic_preds_all: list[torch.Tensor] = []
 
     with torch.no_grad():
-        for batch in loader:
+        for batch in tqdm(loader, desc="Evaluating joint", unit="batch"):
             signals = batch["signals"].to(device, non_blocking=True)
             emg = batch["emg_center"].to(device, non_blocking=True)
             padding_mask = batch["padding_mask"].to(device, non_blocking=True)
