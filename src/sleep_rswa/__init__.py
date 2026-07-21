@@ -22,6 +22,7 @@ from .models import (
     build_staging_model,
     register_staging_model,
 )
+from .distribution import StageDistribution
 
 
 __all__ = [
@@ -43,4 +44,5 @@ __all__ = [
     "register_staging_model",
     "RSWADetectionNet",
     "SleepStagingRSWASystem",
+    "StageDistribution",
 ]
