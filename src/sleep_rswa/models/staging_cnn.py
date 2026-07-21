@@ -4,19 +4,25 @@ import torch
 import torch.nn as nn
 
 from ..config import ModelConfig
-from .mamba import MambaStack
 from .staging_base import BaseStagingModel
 from .staging_encoder import StagingCNNEncoder
 
 
-class SleepStagingBiMamba(BaseStagingModel):
+class SleepStagingCNN(BaseStagingModel):
     """
-    Modelo CNN + BiMamba para sleep staging.
+    Modelo CNN-only.
 
-    Mantém o mesmo comportamento do SleepStagingNet anterior.
+    A CNN processa cada mini-época individualmente.
+    Não existe comunicação temporal entre posições da sequência.
+
+    Entrada:
+        [B, T, C, N]
+
+    Saída:
+        [B, T, num_classes]
     """
 
-    model_name = "cnn_bimamba"
+    model_name = "cnn"
 
     def __init__(
         self,
@@ -33,13 +39,6 @@ class SleepStagingBiMamba(BaseStagingModel):
         self.encoder = StagingCNNEncoder(
             config=self.cfg,
             use_se=use_se,
-        )
-
-        self.temporal = MambaStack(
-            self.encoder.output_dim,
-            self.cfg.staging_mamba_layers,
-            self.cfg.d_state,
-            self.cfg.dropout,
         )
 
         self.classifier = nn.Sequential(
@@ -60,15 +59,8 @@ class SleepStagingBiMamba(BaseStagingModel):
         signals: torch.Tensor,
         mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        del mask
+
         features = self.encoder(signals)
 
-        temporal_features = self.temporal(
-            features,
-            mask,
-        )
-
-        return self.classifier(temporal_features)
-
-
-# Alias temporário para não quebrar scripts antigos.
-SleepStagingNet = SleepStagingBiMamba
+        return self.classifier(features)

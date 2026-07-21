@@ -163,3 +163,25 @@ python scripts/train_staging.py --data-dir /caminho/tensors --n-splits 5 --fold 
 ```
 
 Cada fold gera `training_curves.png`. Staging gera matrizes de confusão absoluta e normalizada da melhor época. RSWA gera matrizes separadas para tonic e phasic.
+
+
+# COMANDOS PARA ABLATION
+python scripts/train_staging.py \
+    --data-dir /caminho/dos/dados \
+    --model cnn
+
+python scripts/train_staging.py \
+    --data-dir /caminho/dos/dados \
+    --model cnn_lstm \
+    --lstm-hidden-size 128 \
+    --lstm-layers 1
+
+python scripts/train_staging.py \
+    --data-dir /caminho/dos/dados \
+    --model cnn_bilstm \
+    --lstm-hidden-size 128 \
+    --lstm-layers 1
+
+python scripts/train_staging.py \
+    --data-dir /caminho/dos/dados \
+    --model cnn_bimamba

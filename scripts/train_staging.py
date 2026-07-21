@@ -16,7 +16,12 @@ from sklearn.metrics import (
     f1_score,
 )
 
-from sleep_rswa import SleepAnalysisDataset, SleepStagingNet, collate_sleep_analysis_exams
+from sleep_rswa import (
+    SleepAnalysisDataset,
+    available_staging_models,
+    build_staging_model,
+    collate_sleep_analysis_exams,
+)
 from sleep_rswa.data import load_subject_directory
 from sleep_rswa.training import (
     ExperimentLogger,
@@ -58,6 +63,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--patience", type=int, default=20)
     parser.add_argument("--class-weights", type=float, nargs=5, default=None)
     parser.add_argument("--monitor", choices=["f1_macro", "kappa"],default="f1_macro",  help="Métrica de validação usada para selecionar o melhor checkpoint.")
+    parser.add_argument("--model", choices=available_staging_models(),default="cnn_bimamba",help="Arquitetura usada no experimento.")
+    parser.add_argument("--lstm-hidden-size", type=int, default=None)
+    parser.add_argument( "--lstm-layers", type=int, default=1)
+
     return parser.parse_args()
 
 
@@ -111,7 +120,26 @@ def main() -> None:
 
             train_loader = make_loader(train_subjects, args, True, device)
             val_loader = make_loader(val_subjects, args, False, device)
-            model = SleepStagingNet().to(device)
+            
+            
+            model_kwargs = {}
+
+            if args.model in { "cnn_lstm", "cnn_bilstm" }:
+                model_kwargs.update(
+                    {
+                        "hidden_size": args.lstm_hidden_size,
+                        "num_layers": args.lstm_layers,
+                    }
+                )
+
+            model = build_staging_model( args.model, **model_kwargs).to(device)
+
+            logger.info(
+                f"Modelo: {args.model} | "
+                f"parâmetros treináveis: {model.n_params():,}"
+            )
+
+
             weights = torch.tensor(args.class_weights, dtype=torch.float32, device=device) if args.class_weights else None
             criterion = StagingLoss(class_weights=weights)
             optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
@@ -163,7 +191,7 @@ def main() -> None:
                     f"val_kappa={val_metrics['kappa']:.4f}"
                     f"{RESET}"
                 )
-                
+
                 save_checkpoint(checkpoint_dir / "last.pt", model=model, optimizer=optimizer, epoch=epoch, metrics=val_metrics, extra={"fold": fold})
                
                 current_metric = float(val_metrics[args.monitor])
