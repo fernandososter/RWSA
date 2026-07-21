@@ -10,7 +10,11 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 import numpy as np
 
-from sleep_rswa.utils import print_experiment_summary
+from sleep_rswa.utils import (
+    print_experiment_summary,
+    print_split_summary,
+    print_stage_distribution,
+)
 
 from sklearn.metrics import (
     balanced_accuracy_score,
@@ -130,58 +134,84 @@ def main() -> None:
         all_oof_expected: list[int] = []
         all_oof_predictions: list[int] = []
 
-        if args.summary:
-            print_experiment_summary(
-                model=model,
-                model_name=args.model,
-                experiment_name=args.experiment_name,
-                device=str(device),
-                training_config={
-                    "epochs": args.epochs,
-                    "batch_size": args.batch_size,
-                    "learning_rate": args.learning_rate,
-                    "weight_decay": args.weight_decay,
-                    "num_workers": args.num_workers,
-                },
-                cross_validation_config={
-                    "n_splits": args.n_splits,
-                    "seed": args.seed,
-                },
-            ) 
-
-
         for fold, train_subjects, val_subjects in folds:
             seed_everything(args.seed + fold)
+
             fold_dir = logger.run_dir / f"fold_{fold}"
             checkpoint_dir = fold_dir / "checkpoints"
             figures_dir = fold_dir / "figures"
-            checkpoint_dir.mkdir(parents=True, exist_ok=True)
-            figures_dir.mkdir(parents=True, exist_ok=True)
 
-            train_loader = make_loader(train_subjects, args, True, device)
-            val_loader = make_loader(val_subjects, args, False, device)
+            checkpoint_dir.mkdir(
+                parents=True,
+                exist_ok=True,
+            )
+            figures_dir.mkdir(
+                parents=True,
+                exist_ok=True,
+            )
+
+            train_loader = make_loader(
+                train_subjects,
+                args,
+                True,
+                device,
+            )
+
+            val_loader = make_loader(
+                val_subjects,
+                args,
+                False,
+                device,
+            )
+
+            model_kwargs = {}
+
+            if args.model in {"cnn_lstm", "cnn_bilstm"}:
+                model_kwargs.update(
+                    {
+                        "hidden_size": args.lstm_hidden_size,
+                        "num_layers": args.lstm_layers,
+                    }
+                )
+
+            model = build_staging_model(
+                args.model,
+                **model_kwargs,
+            ).to(device)
 
             if args.summary:
-                train_distribution = (
-                    train_loader.dataset
-                    .stage_distribution()
-                    .as_dict()
-                )
+                if fold == folds[0][0]:
+                    print_experiment_summary(
+                        model=model,
+                        model_name=args.model,
+                        experiment_name=args.experiment_name,
+                        device=str(device),
+                        training_config={
+                            "epochs": args.epochs,
+                            "batch_size": args.batch_size,
+                            "learning_rate": args.lr,
+                            "weight_decay": args.weight_decay,
+                            "num_workers": args.num_workers,
+                        },
+                        cross_validation_config={
+                            "n_splits": args.n_splits,
+                            "seed": args.seed,
+                        },
+                    )
 
-                val_distribution = (
-                    val_loader.dataset
-                    .stage_distribution()
-                    .as_dict()
-                )
+                print()
+                print("=" * 80)
+                print(f"FOLD {fold}/{args.n_splits}")
+                print("=" * 80)
 
                 print_stage_distribution(
                     f"Fold {fold} - Train stage distribution",
-                    train_distribution,
+                    train_loader.dataset.stage_distribution().as_dict(),
                 )
 
                 print_stage_distribution(
                     f"Fold {fold} - Validation stage distribution",
-                    val_distribution,
+                    val_loader.dataset.stage_distribution().as_dict(),
                 )
 
                 print_split_summary(
@@ -198,41 +228,7 @@ def main() -> None:
                     loader=val_loader,
                 )
                 
-            model_kwargs = {}
-
-            if args.model in { "cnn_lstm", "cnn_bilstm" }:
-                model_kwargs.update(
-                    {
-                        "hidden_size": args.lstm_hidden_size,
-                        "num_layers": args.lstm_layers,
-                    }
-                )
-
-            model = build_staging_model( args.model, **model_kwargs).to(device)
-
-            if args.summary:
-                print()
-                print("=" * 80)
-                print(f"FOLD {fold}/{args.n_splits}")
-                print("=" * 80)
-
-                print_split_summary(
-                    split_name="Train",
-                    subjects=train_subjects,
-                    dataset=train_loader.dataset,
-                    loader=train_loader,
-                )
-
-                print_split_summary(
-                    split_name="Validation",
-                    subjects=val_subjects,
-                    dataset=val_loader.dataset,
-                    loader=val_loader,
-                )
-
-
-
-
+            
             logger.info(
                 f"Modelo: {args.model} | "
                 f"parâmetros treináveis: {model.n_params():,}"
@@ -263,6 +259,7 @@ def main() -> None:
                 val_start = perf_counter()
                 val_metrics = run_staging_epoch(model, val_loader, criterion, device, amp=not args.no_amp, prediction_logger=prediction_logger, epoch=epoch)
                 val_time = perf_counter() - val_start
+
                 row = {
                     "fold": fold,
                     "epoch": epoch,
@@ -270,9 +267,16 @@ def main() -> None:
                     "val_time_sec": val_time,
                     "epoch_time_sec": perf_counter() - epoch_start,
                     "learning_rate": optimizer.param_groups[0]["lr"],
-                    **{f"train_{k}": v for k, v in train_metrics.items()},
-                    **{f"val_{k}": v for k, v in val_metrics.items()},
+                    **{
+                        f"train_{key}": value
+                        for key, value in scalar_metrics(train_metrics).items()
+                    },
+                    **{
+                        f"val_{key}": value
+                        for key, value in scalar_metrics(val_metrics).items()
+                    },
                 }
+
                 history.append(row)
                 logger.log_epoch(row)
                 
@@ -309,27 +313,23 @@ def main() -> None:
                     )
 
                     logger.info(
-                        "ep=%03d train_targets[%s]",
-                        epoch,
-                        train_targets,
+                        f"ep={epoch:03d} "
+                        f"train_targets[{train_targets}]"
                     )
 
                     logger.info(
-                        "ep=%03d train_predictions[%s]",
-                        epoch,
-                        train_predictions,
+                        f"ep={epoch:03d} "
+                        f"train_predictions[{train_predictions}]"
                     )
 
                     logger.info(
-                        "ep=%03d val_targets[%s]",
-                        epoch,
-                        val_targets,
+                        f"ep={epoch:03d} "
+                        f"val_targets[{val_targets}]"
                     )
 
                     logger.info(
-                        "ep=%03d val_predictions[%s]",
-                        epoch,
-                        val_predictions,
+                        f"ep={epoch:03d} "
+                        f"val_predictions[{val_predictions}]"
                     )
 
                 save_checkpoint(checkpoint_dir / "last.pt", model=model, optimizer=optimizer, epoch=epoch, metrics=val_metrics, extra={"fold": fold})
@@ -456,6 +456,12 @@ def main() -> None:
             },
         )
 
+def scalar_metrics(metrics: dict[str, Any]) -> dict[str, float]:
+    return {
+        key: float(value)
+        for key, value in metrics.items()
+        if isinstance(value, (int, float))
+    }
 
 def format_stage_distribution(
     distribution: Mapping[

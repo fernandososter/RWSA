@@ -7,6 +7,7 @@ from typing import Sequence
 
 import torch
 from torch.utils.data import Dataset
+from .training.distribution import StageDistribution
 
 from .config import RSWAConfig, SignalConfig
 
@@ -137,23 +138,13 @@ class SleepAnalysisDataset(Dataset):
         return _zscore_per_channel(emg)[:, :, : self.signal_config.samples_per_epoch]
 
 
-
-
-
     def stage_distribution(self) -> StageDistribution:
         distribution = StageDistribution()
 
-        for subject_path in self.subjects:
-            exam = torch.load(
-                subject_path,
-                map_location="cpu",
-                weights_only=False,
+        for subject in self.subjects:
+            distribution.update(
+                subject.sleep_stages,
             )
-
-            counts = exam["metadata"]["stage_counts"]
-
-            for class_id, count in counts.items():
-                distribution.counts[int(class_id)] += int(count)
 
         return distribution
 

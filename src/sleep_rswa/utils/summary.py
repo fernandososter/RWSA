@@ -1,22 +1,14 @@
+from __future__ import annotations
+
+from collections.abc import Mapping
+from typing import Any
+
+import torch.nn as nn
 from torch.utils.data import (
     DataLoader,
     Dataset,
     RandomSampler,
 )
-
-from collections.abc import Mapping
-from typing import Any
-
-
-from __future__ import annotations
-
-from collections.abc import Mapping
-from typing import Any
-from torch.utils.data import Dataset, DataLoader
-from torch.utils.data.sampler import RandomSampler
-
-import torch.nn as nn
-
 
 def _format_value(value: Any) -> str:
     if isinstance(value, float):

@@ -7,9 +7,7 @@ from tqdm import tqdm
 import numpy as np
 import torch
 from torch.nn.utils import clip_grad_norm_
-from sleep_rswa.training.stage_distribution import (
-    StageDistribution,
-)
+from .distribution import StageDistribution
 
 from ..metrics import rswa_metrics, staging_metrics
 from .losses import RSWALoss, StagingLoss
