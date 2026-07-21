@@ -49,7 +49,7 @@ def run_staging_epoch(
         prediction_logger.start_epoch(epoch)
 
   
-    for batch in tqdm(loader, desc="Running staging epoch"):
+    for batch in loader:
         signals = batch["signals"].to(device, non_blocking=True)
         targets = batch["sleep_stages"].to(device, non_blocking=True)
         padding_mask = batch["padding_mask"].to(device, non_blocking=True)

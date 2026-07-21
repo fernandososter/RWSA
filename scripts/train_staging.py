@@ -7,7 +7,7 @@ from time import perf_counter
 import pandas as pd
 import torch
 from torch.utils.data import DataLoader
-
+from tqdm import tqdm
 import numpy as np
 
 from sklearn.metrics import (
@@ -32,6 +32,10 @@ from sleep_rswa.training import (
     stratified_group_folds,
 )
 
+
+GREEN  = "\033[92m"
+YELLOW = "\033[93m"
+RESET  = "\033[0m"
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Treina staging com StratifiedGroupKFold.")
@@ -123,7 +127,9 @@ def main() -> None:
 
             history: list[dict[str, float]] = []
 
-            for epoch in range(1, args.epochs + 1):
+            for epoch in tqdm(range(1, args.epochs + 1), desc=f"Fold {fold} training", unit="epoch"):
+
+
                 epoch_start = perf_counter()
                 train_start = perf_counter()
                 train_metrics = run_staging_epoch(model, train_loader, criterion, device, optimizer, amp=not args.no_amp, grad_clip=args.grad_clip)
@@ -145,16 +151,19 @@ def main() -> None:
                 logger.log_epoch(row)
                 
                 logger.info(
-                    f"fold={fold} "
-                    f"ep={epoch:03d} "
+                    f"ep={epoch:03d} -- "
+                    f"{GREEN}"
                     f"train_loss={train_metrics['loss']:.4f} "
-                    f"val_loss={val_metrics['loss']:.4f} "
                     f"train_f1={train_metrics['f1_macro']:.4f} "
+                    f"train_kappa={train_metrics['kappa']:.4f}"
+                    f"{RESET} -- "
+                    f"{YELLOW}"
+                    f"val_loss={val_metrics['loss']:.4f} "
                     f"val_f1={val_metrics['f1_macro']:.4f} "
-                    f"train_kappa={train_metrics['kappa']:.4f} "
                     f"val_kappa={val_metrics['kappa']:.4f}"
+                    f"{RESET}"
                 )
-
+                
                 save_checkpoint(checkpoint_dir / "last.pt", model=model, optimizer=optimizer, epoch=epoch, metrics=val_metrics, extra={"fold": fold})
                
                 current_metric = float(val_metrics[args.monitor])
