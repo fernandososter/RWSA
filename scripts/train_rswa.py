@@ -114,7 +114,6 @@ def main() -> None:
                 history.append(row)
                 logger.log_epoch(row)
                 
-                
                 logger.info(
                     f"fold={fold} "
                     f"ep={epoch:03d} "

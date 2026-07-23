@@ -20,6 +20,10 @@ class SubjectData:
     rswa_labels: torch.Tensor
     rswa_conf: torch.Tensor
     emg_signals: torch.Tensor | None = None
+    # Rotulos multi-rotulo por cabeca (opcionais). Se ausentes, sao derivados
+    # de rswa_labels no load (retrocompatibilidade com .pt mono-rotulo antigos).
+    tonic_labels: torch.Tensor | None = None
+    phasic_labels: torch.Tensor | None = None
     n_epochs: int = field(init=False)
 
     def __post_init__(self) -> None:
@@ -49,6 +53,11 @@ def load_subject_file(path: str | Path) -> SubjectData:
     rswa = obj.get("rswa_labels", torch.zeros_like(stages))
     conf = obj.get("rswa_conf", torch.zeros_like(stages, dtype=torch.float32))
     emg = obj.get("emg_signals", obj.get("emg", obj.get("emg_center")))
+    # Rotulos multi-rotulo por cabeca, se o .pt os gravou (parser novo).
+    # Se ausentes (.pt antigo mono-rotulo), ficam None e sao derivados de
+    # rswa_labels no __getitem__.
+    tonic = obj.get("tonic_labels")
+    phasic = obj.get("phasic_labels")
     return SubjectData(
         subject_id=str(obj.get("subject_id", path.stem)),
         signals=signals,
@@ -56,6 +65,8 @@ def load_subject_file(path: str | Path) -> SubjectData:
         rswa_labels=rswa,
         rswa_conf=conf,
         emg_signals=emg,
+        tonic_labels=tonic,
+        phasic_labels=phasic,
     )
 
 
@@ -181,6 +192,20 @@ class SleepAnalysisDataset(Dataset):
         valid_rswa = confidence > self.min_confidence
         if self.rem_mask_only:
             valid_rswa &= labels.eq(self.rswa_config.rem_stage)
+
+        # Rotulos multi-rotulo por cabeca. Se o .pt os traz explicitos, usa-os
+        # (permite co-ocorrencia tonico+fasico na mesma mini-epoca); senao,
+        # deriva do inteiro rswa_labels (retrocompat com .pt mono-rotulo).
+        if subject.tonic_labels is not None and subject.phasic_labels is not None:
+            tonic_labels = subject.tonic_labels.float().clone()
+            phasic_labels = subject.phasic_labels.float().clone()
+        else:
+            tonic_labels = rswa_labels.eq(self.rswa_config.tonic_label).float()
+            phasic_labels = rswa_labels.eq(self.rswa_config.phasic_label).float()
+
+        # Zera rotulos fora da mascara de validade (cada cabeca independente).
+        tonic_labels[~valid_rswa] = 0.0
+        phasic_labels[~valid_rswa] = 0.0
         rswa_labels[~valid_rswa] = self.rswa_config.none_label
 
         return {
@@ -189,8 +214,8 @@ class SleepAnalysisDataset(Dataset):
             "sleep_stages": labels,
             "staging_valid": valid_ctx,
             "rswa_labels": rswa_labels,
-            "phasic_labels": rswa_labels.eq(self.rswa_config.phasic_label).float(),
-            "tonic_labels": rswa_labels.eq(self.rswa_config.tonic_label).float(),
+            "phasic_labels": phasic_labels,
+            "tonic_labels": tonic_labels,
             "rswa_valid": valid_rswa,
             "rswa_conf": confidence,
             "subject_id": subject.subject_id,
