@@ -299,3 +299,71 @@ def collect_rswa_predictions(
         "phasic_prediction": torch.cat(phasic_prediction).numpy(),
     }
 
+
+def collect_staging_predictions(
+    model: torch.nn.Module,
+    loader: Iterable[dict[str, Any]],
+    device: torch.device,
+    *,
+    amp: bool = True,
+    num_classes: int = 5,
+) -> dict[str, np.ndarray]:
+    """Coleta predições de staging de um modelo já treinado num loader.
+
+    Diferente de :func:`run_staging_epoch`, não calcula loss nem depende de
+    critério: percorre o loader em modo avaliação e devolve, por mini-época
+    válida, o rótulo esperado, a predição (argmax) e as **probabilidades**
+    softmax por classe. As probabilidades permitem ensemble (média entre folds)
+    antes do argmax final.
+
+    Retorna arrays alinhados por mini-época válida:
+      - ``expected``      [N]         int64
+      - ``prediction``    [N]         int64
+      - ``probabilities`` [N, C]      float32
+      - ``subject_id``    [N]         str (object array)
+      - ``mini_epoch_index`` [N]      int64
+    """
+    model.eval()
+    expected: list[np.ndarray] = []
+    probabilities: list[np.ndarray] = []
+    subject_ids: list[str] = []
+    mini_indices: list[np.ndarray] = []
+
+    with torch.no_grad():
+        for batch in loader:
+            signals = batch["signals"].to(device, non_blocking=True)
+            targets = batch["sleep_stages"].to(device, non_blocking=True)
+            padding_mask = batch["padding_mask"].to(device, non_blocking=True)
+            valid_mask = batch["staging_valid"].to(device, non_blocking=True) & padding_mask
+            if not valid_mask.any():
+                continue
+            with _autocast_context(device, amp):
+                logits = model(signals, mask=padding_mask)
+            probs = torch.softmax(logits.float(), dim=-1)
+
+            valid_cpu = valid_mask.detach().cpu()
+            probs_cpu = probs.detach().cpu()
+            targets_cpu = targets.detach().cpu()
+            batch_subject_ids = batch["subject_ids"]
+
+            for b, subject_id in enumerate(batch_subject_ids):
+                idx = torch.nonzero(valid_cpu[b], as_tuple=False).flatten()
+                if idx.numel() == 0:
+                    continue
+                expected.append(targets_cpu[b, idx].numpy().astype(np.int64, copy=False))
+                probabilities.append(probs_cpu[b, idx].numpy().astype(np.float32, copy=False))
+                subject_ids.extend([str(subject_id)] * int(idx.numel()))
+                mini_indices.append(idx.numpy().astype(np.int64, copy=False))
+
+    if not expected:
+        raise RuntimeError("Nenhuma predição válida de staging foi encontrada.")
+
+    prob_arr = np.concatenate(probabilities, axis=0)
+    return {
+        "expected": np.concatenate(expected),
+        "prediction": prob_arr.argmax(axis=1).astype(np.int64, copy=False),
+        "probabilities": prob_arr,
+        "subject_id": np.asarray(subject_ids, dtype=object),
+        "mini_epoch_index": np.concatenate(mini_indices),
+    }
+

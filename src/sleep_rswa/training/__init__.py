@@ -1,5 +1,11 @@
-from .cross_validation import stratified_group_folds
-from .engine import collect_rswa_predictions, evaluate_joint, run_rswa_epoch, run_staging_epoch
+from .cross_validation import stratified_group_folds, stratified_group_holdout
+from .engine import (
+    collect_rswa_predictions,
+    collect_staging_predictions,
+    evaluate_joint,
+    run_rswa_epoch,
+    run_staging_epoch,
+)
 from .logger import ExperimentLogger
 from .losses import RSWALoss, StagingLoss
 from .plots import plot_confusion_matrix, plot_training_curves
@@ -22,7 +28,9 @@ __all__ = [
     "run_rswa_epoch",
     "evaluate_joint",
     "collect_rswa_predictions",
+    "collect_staging_predictions",
     "stratified_group_folds",
+    "stratified_group_holdout",
     "plot_training_curves",
     "plot_confusion_matrix",
     "seed_everything",

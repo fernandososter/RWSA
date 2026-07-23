@@ -60,3 +60,57 @@ def stratified_group_folds(
         train_subjects = [subjects[i] for i in train_subject_indices]
         val_subjects = [subjects[i] for i in val_subject_indices]
         yield fold, train_subjects, val_subjects
+
+
+def stratified_group_holdout(
+    subjects: Sequence[SubjectData],
+    *,
+    test_fraction: float,
+    seed: int = 42,
+    task: str = "staging",
+) -> tuple[list[SubjectData], list[SubjectData]]:
+    """Separa um conjunto de teste fixo a nível de sujeito, antes da CV.
+
+    A separação usa StratifiedGroupKFold internamente (mesma lógica dos folds):
+    escolhe ``n_splits = round(1 / test_fraction)`` e usa a partição de
+    validação do primeiro fold como teste. Isso garante que:
+      - nenhum sujeito aparece simultaneamente no teste e no pool de CV
+        (agrupamento por sujeito);
+      - a distribuição de estágios do teste é aproximadamente a do dataset
+        (estratificação em nível de mini-época).
+
+    Retorna ``(train_pool, test_subjects)``. O ``train_pool`` é o que deve ser
+    passado a :func:`stratified_group_folds` para a CV.
+    """
+    subjects = list(subjects)
+    if not 0.0 < test_fraction < 1.0:
+        raise ValueError("test_fraction deve estar entre 0 e 1 (exclusivo).")
+
+    n_splits = max(2, round(1.0 / test_fraction))
+    if len(subjects) < n_splits:
+        raise ValueError(
+            f"test_fraction={test_fraction} exige ao menos {n_splits} sujeitos, "
+            f"mas há apenas {len(subjects)}. Aumente test_fraction ou use "
+            f"--test-dir para um conjunto de teste externo."
+        )
+
+    y_parts: list[np.ndarray] = []
+    group_parts: list[np.ndarray] = []
+    for index, subject in enumerate(subjects):
+        targets = _subject_targets(subject, task)
+        if targets.size == 0:
+            raise ValueError(f"{subject.subject_id}: nenhum rótulo válido para {task}.")
+        y_parts.append(targets)
+        group_parts.append(np.full(targets.shape[0], index, dtype=np.int32))
+
+    y = np.concatenate(y_parts)
+    groups = np.concatenate(group_parts)
+    x = np.zeros(y.shape[0], dtype=np.uint8)
+
+    splitter = StratifiedGroupKFold(n_splits=n_splits, shuffle=True, random_state=seed)
+    train_idx, test_idx = next(iter(splitter.split(x, y, groups)))
+    train_subject_indices = sorted(set(groups[train_idx].tolist()))
+    test_subject_indices = sorted(set(groups[test_idx].tolist()))
+    train_pool = [subjects[i] for i in train_subject_indices]
+    test_subjects = [subjects[i] for i in test_subject_indices]
+    return train_pool, test_subjects
