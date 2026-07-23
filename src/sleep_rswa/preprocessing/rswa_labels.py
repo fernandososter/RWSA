@@ -42,13 +42,13 @@ def rasterize_rswa_annotations(
         rswa_conf                   : (T,) float32   {0,1}  VALIDADE (1=escorada)
         tonic_cov, phasic_cov       : (T,) float32   fracao 0..1 (diagnostico / soft target)
     """
-    csv_path = Path(csv_path)
+    csv_path = Path(csv_path) if csv_path is not None else None
     T = int(len(stages_mini))
     tonic_cov  = np.zeros(T, dtype=np.float64)
     phasic_cov = np.zeros(T, dtype=np.float64)
 
-    if csv_path is not None and Path(csv_path).exists():
-        with Path(csv_path).open("r", encoding="utf-8-sig", newline="") as fh:
+    if csv_path is not None and csv_path.exists():
+        with csv_path.open("r", encoding="utf-8-sig", newline="") as fh:
             for row in csv.DictReader(fh):
                 if str(row.get("subject_id", "")).strip() != subject_id:
                     continue

@@ -4,17 +4,22 @@ from datetime import datetime, timezone
 import importlib
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 
-def load_parser_module(tmp_path):
+def load_preprocessing_module(tmp_path, module_name: str):
     os.environ["MNE_USE_NUMBA"] = "false"
     os.environ["_MNE_FAKE_HOME_DIR"] = str(tmp_path)
     os.environ["MNE_DONTWRITE_HOME"] = "true"
     src_dir = Path(__file__).resolve().parents[1] / "src"
     if str(src_dir) not in sys.path:
         sys.path.insert(0, str(src_dir))
-    return importlib.import_module("sleep_rswa.preprocessing.annotations")
+    return importlib.import_module(module_name)
+
+
+def load_parser_module(tmp_path):
+    return load_preprocessing_module(tmp_path, "sleep_rswa.preprocessing.annotations")
 
 
 def test_load_subject_annotations_from_csv_filters_and_sorts(tmp_path):
@@ -152,3 +157,26 @@ def test_csv_annotations_can_merge_with_relative_edf_timebase(tmp_path):
 
     assert len(merged) == 2
     assert merged.orig_time is None
+
+
+def test_rasterize_rswa_annotations_handles_missing_csv(tmp_path):
+    rswa_module = load_preprocessing_module(
+        tmp_path,
+        "sleep_rswa.preprocessing.rswa_labels",
+    )
+
+    stages_mini = np.array([4, 4, -1, 2], dtype=np.int64)
+    rswa = rswa_module.rasterize_rswa_annotations(
+        csv_path=None,
+        subject_id="brux2",
+        stages_mini=stages_mini,
+        annot_start=10.0,
+    )
+
+    assert np.array_equal(rswa["tonic_labels"], np.zeros(4, dtype=np.float32))
+    assert np.array_equal(rswa["phasic_labels"], np.zeros(4, dtype=np.float32))
+    assert np.array_equal(rswa["rswa_labels"], np.zeros(4, dtype=np.int64))
+    assert np.array_equal(
+        rswa["rswa_conf"],
+        np.array([1.0, 1.0, 0.0, 1.0], dtype=np.float32),
+    )
