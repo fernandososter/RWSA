@@ -4,8 +4,9 @@ preprocess.py — Pre-processamento de exames PSG (EDF -> tensores PyTorch).
 Convertido do notebook Parser_Exames (celula 12), com DUAS mudancas em relacao
 ao notebook:
 
-  1. Ordem de canais corrigida (ver parser/config.py): [3 EEG, EOG, EMG] para
-     casar com src/sleep_rswa/config.py (staging=(0,1,2,3), emg_channel_index=4).
+  1. Ordem de canais corrigida (ver sleep_rswa/preprocessing/config.py):
+     [3 EEG, EOG, EMG] para casar com src/sleep_rswa/config.py
+     (staging=(0,1,2,3), emg_channel_index=4).
 
   2. Rasterizacao de RSWA integrada: apos expandir os estagios para mini-epocas
      de 3 s, os eventos do CSV (<subject>_rswa.csv) sao convertidos em rotulos

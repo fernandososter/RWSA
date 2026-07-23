@@ -3,6 +3,7 @@ from collections.abc import Iterable, Mapping
 import argparse
 from pathlib import Path
 from time import perf_counter
+from typing import Any
 
 import pandas as pd
 import torch

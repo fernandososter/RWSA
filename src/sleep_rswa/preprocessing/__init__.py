@@ -7,12 +7,15 @@ Versao modular do notebook Parser_Exames. Diferencas em relacao ao notebook:
 
 Uso rapido
 ──────────
-    from parser import run_preprocessing
+    from sleep_rswa.preprocessing import run_preprocessing
     run_preprocessing(edf_dir=..., out_dir=..., mat_dir=..., rswa_dir=...)
 
     # ou, para um exame:
-    from parser import preprocess_exam
+    from sleep_rswa.preprocessing import preprocess_exam
     result = preprocess_exam(edf_path, mat_dir=..., rswa_dir=...)
+
+    # ou via CLI:
+    python -m sleep_rswa.preprocessing --edf-dir ...
 """
 from .config import PathConfig, PSGConfig, FS_TARGET, EPOCH_SEC, N_CHANNELS
 from .preprocess import preprocess_exam, run_preprocessing

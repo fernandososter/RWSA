@@ -22,5 +22,8 @@ dependencies = [
 mamba = ["mamba-ssm>=2.2"]
 dev = ["pytest>=8", "ruff>=0.5"]
 
+[project.scripts]
+sleep-rswa-preprocess = "sleep_rswa.preprocessing.__main__:main"
+
 [tool.setuptools.packages.find]
 where = ["src"]

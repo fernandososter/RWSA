@@ -1,6 +1,7 @@
 import os
+import sys
 from datetime import datetime, timezone
-from importlib.util import module_from_spec, spec_from_file_location
+import importlib
 from pathlib import Path
 
 import pytest
@@ -10,12 +11,10 @@ def load_parser_module(tmp_path):
     os.environ["MNE_USE_NUMBA"] = "false"
     os.environ["_MNE_FAKE_HOME_DIR"] = str(tmp_path)
     os.environ["MNE_DONTWRITE_HOME"] = "true"
-    module_path = Path(__file__).resolve().parents[1] / "parser" / "parser.py"
-    spec = spec_from_file_location("parser_module", module_path)
-    module = module_from_spec(spec)
-    assert spec.loader is not None
-    spec.loader.exec_module(module)
-    return module
+    src_dir = Path(__file__).resolve().parents[1] / "src"
+    if str(src_dir) not in sys.path:
+        sys.path.insert(0, str(src_dir))
+    return importlib.import_module("sleep_rswa.preprocessing.annotations")
 
 
 def test_load_subject_annotations_from_csv_filters_and_sorts(tmp_path):
