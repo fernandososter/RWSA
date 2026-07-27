@@ -20,3 +20,6 @@ classifier/
   train_final.py      treino final nos 4 exames
   predict_movements.py    inferência: novo .pt -> CSV de movimentos
 ```
+
+# executar: 
+python classifier/predict_movements.py caminho/EXAME.pt -o EXAME_movimentos.csv

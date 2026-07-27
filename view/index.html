@@ -1,0 +1,646 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Revisor de movimento — EMG</title>
+<style>
+  :root {
+    --bg:#0f1720; --panel:#182430; --ink:#e8eef4; --muted:#8aa0b4;
+    --move:#ff8a3d; --movebg:rgba(255,138,61,.18);
+    --tonic:#4da3ff; --phasic:#c77dff; --del:#ff5d6c; --ok:#39d98a;
+    --manual:#ffd166; --line:#7fd4ff; --grid:#243444;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; font:14px/1.4 -apple-system,Segoe UI,Roboto,sans-serif;
+         background:var(--bg); color:var(--ink); }
+  header { display:flex; gap:14px; align-items:center; padding:10px 16px;
+           background:var(--panel); border-bottom:1px solid var(--grid); flex-wrap:wrap; }
+  header h1 { font-size:15px; margin:0 12px 0 0; font-weight:600; }
+  select, button, input { font:inherit; color:var(--ink); background:#22303d;
+                   border:1px solid var(--grid); border-radius:6px; padding:6px 10px; cursor:pointer; }
+  button:hover { border-color:var(--muted); }
+  .pill { padding:2px 8px; border-radius:20px; font-size:12px; background:#22303d; color:var(--muted); }
+  .warn { color:#ffcf6b; }
+  main { display:grid; grid-template-columns: 1fr 320px; gap:0; height:calc(100vh - 52px); }
+  #plotwrap { position:relative; padding:12px 16px; overflow:hidden; }
+  #canvas { width:100%; height:340px; background:#0b1219; border-radius:8px; border:1px solid var(--grid); cursor:crosshair; }
+  #hyp { width:100%; height:64px; margin-top:8px; background:#0b1219; border-radius:8px; border:1px solid var(--grid); cursor:pointer; }
+  .navrow { display:flex; align-items:center; gap:10px; margin-top:12px; flex-wrap:wrap; }
+  .navrow[hidden] { display:none; }
+  .evinfo { font-size:13px; color:var(--muted); }
+  .evinfo b { color:var(--ink); }
+  .modetabs { display:inline-flex; border:1px solid var(--grid); border-radius:8px; overflow:hidden; }
+  .modetabs button { border:0; border-radius:0; background:#141f29; padding:6px 14px; }
+  .modetabs button.active { background:var(--line); color:#04121f; font-weight:600; }
+  .winw button { padding:5px 9px; }
+  .winw button.active { background:var(--line); color:#04121f; font-weight:600; }
+  #winslider { flex:1; min-width:160px; cursor:pointer; padding:0; }
+  aside { background:var(--panel); border-left:1px solid var(--grid); overflow:auto; padding:12px; }
+  .actions { display:flex; gap:8px; margin:10px 0 10px; }
+  .actions button { flex:1; font-weight:600; }
+  .btn-tonic { background:var(--tonic); color:#04121f; border-color:var(--tonic); }
+  .btn-phasic { background:var(--phasic); color:#180a24; border-color:var(--phasic); }
+  .btn-del { background:var(--del); color:#210307; border-color:var(--del); }
+  .btn-add { background:var(--manual); color:#241c00; border-color:var(--manual); }
+  .btn-edit.active { background:var(--ok); color:#04120b; border-color:var(--ok); font-weight:600; }
+  .btn-restore { flex:0 0 auto !important; }
+  .etag { font-size:10px; color:var(--del); border:1px solid var(--del); border-radius:8px; padding:0 4px; margin-left:4px; }
+  .evlist { display:flex; flex-direction:column; gap:4px; }
+  .evrow { display:grid; grid-template-columns: 30px 1fr auto; gap:6px; align-items:center;
+           padding:6px 8px; border-radius:6px; background:#141f29; cursor:pointer; border:1px solid transparent; }
+  .evrow:hover { border-color:var(--grid); }
+  .evrow.active { border-color:var(--move); background:#20140a; }
+  .evrow .lab { font-size:11px; padding:1px 6px; border-radius:10px; text-align:center; }
+  .lab.tonic { background:var(--tonic); color:#04121f; }
+  .lab.phasic { background:var(--phasic); color:#180a24; }
+  .lab.deleted { background:#3a2225; color:var(--del); text-decoration:line-through; }
+  .lab.movement { background:#33251a; color:var(--move); }
+  .mtag { font-size:10px; color:var(--manual); border:1px solid var(--manual); border-radius:8px; padding:0 4px; margin-left:4px; }
+  .progress { font-size:12px; color:var(--muted); margin-bottom:8px; }
+  kbd { background:#22303d; border:1px solid var(--grid); border-bottom-width:2px; border-radius:4px;
+        padding:1px 6px; font-size:11px; }
+  .legend { display:flex; gap:12px; font-size:12px; color:var(--muted); margin-top:6px; flex-wrap:wrap; }
+  .legend span::before { content:"■ "; }
+  .lg-move::before { color:var(--move); } .lg-line::before{ color:var(--line); }
+  .lg-tonic::before{ color:var(--tonic); } .lg-phasic::before{ color:var(--phasic); }
+  .lg-manual::before{ color:var(--manual); }
+  .lg-excluded::before{ color:var(--del); }
+  .cfgpanel { position:fixed; inset:0; background:rgba(0,0,0,.55); display:flex;
+              align-items:flex-start; justify-content:center; z-index:50; padding-top:70px; }
+  .cfgpanel[hidden] { display:none; }  /* o hidden precisa vencer o display:flex acima */
+  .cfgcard { background:var(--panel); border:1px solid var(--grid); border-radius:10px;
+             width:min(520px,92vw); padding:18px 20px; box-shadow:0 12px 40px rgba(0,0,0,.5); }
+  .cfgtitle { font-size:15px; font-weight:600; margin-bottom:8px; }
+  .cfghint { font-size:12px; color:var(--muted); margin:4px 0 12px; line-height:1.5; }
+  .cfghint code { background:#0b1219; padding:1px 5px; border-radius:4px; }
+  .cfgrow { display:flex; align-items:center; justify-content:space-between; gap:12px;
+            padding:8px 0; border-top:1px solid var(--grid); }
+  .cfgrow label { color:var(--muted); }
+  .cfgrow input { background:#0b1219; border:1px solid var(--grid); color:var(--ink);
+                  border-radius:6px; padding:6px 10px; width:130px; text-align:center; }
+  .mono { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
+  .cfgactions { display:flex; gap:8px; align-items:center; margin-top:14px; }
+  .btn-ok { background:var(--ok); color:#04120b; border-color:var(--ok); font-weight:600; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Revisor de movimento</h1>
+  <select id="exam"></select>
+  <span id="meta" class="pill">—</span>
+  <span id="offmeta" class="pill"></span>
+  <span style="flex:1"></span>
+  <button id="cfgbtn" title="Configurar tempo do EDF">⚙ Config</button>
+  <button id="save">Salvar CSV revisado</button>
+  <span id="savemsg" class="pill"></span>
+</header>
+<div id="cfgpanel" class="cfgpanel" hidden>
+  <div class="cfgcard">
+    <div class="cfgtitle">Tempo do EDF — exame <b id="cfgexam">—</b></div>
+    <p class="cfghint">Informe a hora em que o registro EDF começou (<b>meas_date</b>, do
+       cabeçalho do EDF). O início do estagiamento é lido do hipnograma
+       (<code>view/mat/hyp_&lt;exame&gt;.mat</code>) e o offset
+       <code>annot_start = início&nbsp;hipnograma − meas_date</code> é calculado e salvo
+       por exame. Com ele, o CSV revisado sai no tempo do EDF.</p>
+    <div class="cfgrow"><label>Início do hipnograma (.mat)</label><span id="cfghipno" class="mono">—</span></div>
+    <div class="cfgrow"><label for="cfgmeas">Início do EDF (meas_date)</label>
+      <input id="cfgmeas" placeholder="HH:MM:SS" maxlength="8" class="mono"></div>
+    <div class="cfgrow"><label>Offset resultante (annot_start)</label><span id="cfgoff" class="mono">—</span></div>
+    <div id="cfgmatwarn" class="cfghint warn" hidden>⚠ hyp_&lt;exame&gt;.mat não encontrado em view/mat/ — o offset não pode ser calculado.</div>
+    <div class="cfgactions">
+      <button id="cfgclear">Limpar</button>
+      <span style="flex:1"></span>
+      <button id="cfgcancel">Fechar</button>
+      <button id="cfgsave" class="btn-ok">Salvar offset</button>
+    </div>
+    <div id="cfgmsg" class="cfghint"></div>
+  </div>
+</div>
+<main>
+  <section id="plotwrap">
+    <canvas id="canvas"></canvas>
+    <canvas id="hyp"></canvas>
+    <div class="legend">
+      <span class="lg-line">EMG (z-score)</span>
+      <span class="lg-move">movimento (modelo)</span>
+      <span class="lg-tonic">tônico</span>
+      <span class="lg-phasic">fásico</span>
+      <span class="lg-manual">manual</span>
+      <span class="lg-excluded">janela excluída do evento</span>
+    </div>
+
+    <div class="navrow">
+      <span class="modetabs">
+        <button id="mode-events" class="active">Eventos</button>
+        <button id="mode-full">Traçado completo</button>
+      </span>
+      <span class="evinfo" id="evinfo">—</span>
+    </div>
+
+    <!-- navegacao no modo Eventos -->
+    <div class="navrow" id="navEvents">
+      <button id="prev">◀ Anterior</button>
+      <button id="next">Próximo ▶</button>
+      <span class="evinfo">Atalhos: <kbd>←</kbd>/<kbd>→</kbd> navegar</span>
+    </div>
+
+    <!-- navegacao no modo Traçado completo -->
+    <div class="navrow" id="navFull" hidden>
+      <button id="pgprev">◀</button>
+      <input id="winslider" type="range" min="0" max="0" value="0">
+      <button id="pgnext">▶</button>
+      <span class="winw" style="display:inline-flex;gap:4px">
+        <button data-w="10">30s</button>
+        <button data-w="20" class="active">60s</button>
+        <button data-w="40">2min</button>
+        <button data-w="100">5min</button>
+      </span>
+    </div>
+
+    <div class="actions">
+      <button class="btn-tonic" id="bt">Tônico <kbd>T</kbd></button>
+      <button class="btn-phasic" id="bp">Fásico <kbd>F</kbd></button>
+      <button class="btn-del" id="bd">Apagar <kbd>D</kbd></button>
+      <button class="btn-add" id="badd" title="Adiciona um evento na janela atual">+ Evento <kbd>A</kbd></button>
+      <button class="btn-edit" id="bedit" title="Incluir/excluir mini-épocas dentro de um evento">✂ Editar janelas <kbd>E</kbd></button>
+      <button class="btn-restore" id="brestore" title="Restaura todas as janelas do evento selecionado">Restaurar evento <kbd>R</kbd></button>
+    </div>
+    <div class="evinfo" id="hint">Atalhos: <kbd>T</kbd> tônico · <kbd>F</kbd> fásico · <kbd>D</kbd> apagar · <kbd>A</kbd> adicionar evento · <kbd>E</kbd> editar janelas · <kbd>R</kbd> restaurar</div>
+    <div class="evinfo" id="editHint" hidden>✂ <b>Modo edição de janelas</b>: clique numa mini-época dentro de um evento para incluí-la/excluí-la. Ao salvar, cada trecho contínuo restante do evento vira uma linha própria no CSV.</div>
+  </section>
+  <aside>
+    <div class="progress" id="progress">—</div>
+    <div class="evlist" id="evlist"></div>
+  </aside>
+</main>
+<script>
+const S = { exam:null, info:null, events:[], decisions:{}, cur:0, sig:null,
+            mode:"events", winEp:0, winW:20, nextId:100000, drag:null,
+            editMode:false, excluded:{} };  // excluded: eventId -> Set(epoch_abs) removidas de dentro do evento
+const $ = s => document.querySelector(s);
+const cv = $("#canvas"), hyp = $("#hyp");
+const CTX = cv.getContext("2d"), HG = hyp.getContext("2d");
+const PAD = 2; // mini-epocas de contexto em cada lado no modo Eventos
+
+async function jget(u){ const r = await fetch(u); if(!r.ok) throw new Error((await r.json()).error||r.status); return r.json(); }
+async function jpost(u,b){ const r = await fetch(u,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(b)});
+  if(!r.ok) throw new Error((await r.json()).error||r.status); return r.json(); }
+
+async function loadExams(){
+  const {exams} = await jget("/api/exams");
+  const sel = $("#exam"); sel.innerHTML = "";
+  exams.forEach(e => { const o=document.createElement("option"); o.value=o.textContent=e; sel.appendChild(o); });
+  if(exams.length) await selectExam(exams[0]);
+}
+
+async function selectExam(name){
+  S.exam = name; $("#exam").value = name;
+  $("#meta").textContent = "carregando…";
+  const info = await jget("/api/exam?name="+encodeURIComponent(name));
+  S.info = info; S.events = info.events.slice(); S.decisions = {}; S.cur = 0; S.winEp = 0; S.excluded = {};
+  info.events.forEach(e => { e.manual=false; S.decisions[e.id] = e.suggestion; }); // pre-sugestao do .pt
+  $("#meta").textContent = `${info.subject_id} · ${info.hours} h · ${info.n_events} eventos · limiar ${info.threshold}`;
+  $("#offmeta").className = "pill" + (info.has_offset ? "" : " warn");
+  $("#offmeta").textContent = info.has_offset
+      ? `tempo EDF ✓ (annot_start=${info.annot_start.toFixed(1)}s)`
+      : "⚠ sem offset — CSV sairá em tempo do .pt";
+  // slider da noite toda (em epocas)
+  const maxStart = Math.max(0, info.n_epochs - S.winW);
+  $("#winslider").max = maxStart;
+  renderList();
+  if(S.mode==="events") await selectEvent(0, true);
+  else await loadWindow();
+}
+
+function decLabel(id){ return S.decisions[id] || "movement"; }
+function labColor(lab){ return lab==="tonic"?getCss("--tonic"):lab==="phasic"?getCss("--phasic")
+                              :lab==="deleted"?getCss("--del"):getCss("--move"); }
+
+// ---------- edicao de janelas dentro de um evento ----------
+// S.excluded: eventId -> Set(epoch_abs) removidas de dentro do evento (evento fundido pode ter
+// mini-epocas que nao sao movimento de verdade; aqui vc mantem umas e exclui outras).
+function isEpochExcluded(ep){
+  for(const e of S.events){
+    const set = S.excluded[e.id];
+    if(set && set.size && ep>=e.epoch_start && ep<e.epoch_end && set.has(ep)) return true;
+  }
+  return false;
+}
+function setExcludeRange(e, ep0, ep1, exclude){
+  if(!S.excluded[e.id]) S.excluded[e.id] = new Set();
+  const set = S.excluded[e.id];
+  for(let ep=ep0; ep<ep1; ep++){ if(exclude) set.add(ep); else set.delete(ep); }
+  if(set.size===0) delete S.excluded[e.id];
+  draw(); drawHyp(); renderList();
+}
+// Divide um evento em trechos contiguos mantidos (exclui as mini-epocas descartadas).
+// Sem exclusoes -> devolve o evento inteiro como antes (compatibilidade total).
+function segmentsForEvent(e){
+  const es = S.info.epoch_sec;
+  const excl = S.excluded[e.id];
+  if(!excl || excl.size===0) return [{onset_s:e.onset_s, duration_s:e.duration_s}];
+  const segs=[]; let segStart=null;
+  for(let ep=e.epoch_start; ep<e.epoch_end; ep++){
+    if(!excl.has(ep)){ if(segStart===null) segStart=ep; }
+    else if(segStart!==null){ segs.push([segStart,ep]); segStart=null; }
+  }
+  if(segStart!==null) segs.push([segStart,e.epoch_end]);
+  return segs.map(([a,b])=>({onset_s:a*es, duration_s:(b-a)*es}));
+}
+function fmt(s){ const m=Math.floor(s/60), ss=(s%60).toFixed(0).padStart(2,"0"); return `${m}:${ss}`; }
+function getCss(v){ return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+
+function renderList(){
+  const box = $("#evlist"); box.innerHTML = "";
+  S.events.forEach((e,idx) => {
+    const row = document.createElement("div");
+    row.className = "evrow" + (idx===S.cur ? " active":"");
+    const lab = decLabel(e.id);
+    const labcls = lab==="deleted"?"deleted":lab;
+    const tedf = e.onset_edf!=null ? ` · EDF ${fmt(e.onset_edf)}` : "";
+    const sc = e.score==null ? "—" : e.score;
+    const mtag = e.manual ? `<span class="mtag">manual</span>` : "";
+    const nexcl = S.excluded[e.id] ? S.excluded[e.id].size : 0;
+    const etag = nexcl ? `<span class="etag">${nexcl} janela${nexcl>1?"s":""} excluída${nexcl>1?"s":""}</span>` : "";
+    row.innerHTML = `<span class="lab ${labcls}">${lab==="deleted"?"✕":lab[0].toUpperCase()}</span>
+      <span>#${idx+1} · ${fmt(e.onset_s)} (${e.duration_s}s)${mtag}${etag}<br><small style="color:var(--muted)">${e.stage}${tedf} · score ${sc}</small></span>
+      <span style="color:var(--muted)">›</span>`;
+    row.onclick = () => selectEvent(idx, true);
+    box.appendChild(row);
+  });
+  const done = Object.values(S.decisions).filter(v=>v!=="movement").length;
+  const kept = Object.values(S.decisions).filter(v=>v==="tonic"||v==="phasic").length;
+  const nman = S.events.filter(e=>e.manual).length;
+  $("#progress").textContent = `${done}/${S.events.length} revisados · ${kept} mantidos (tônico/fásico)` + (nman?` · ${nman} manuais`:"");
+}
+
+// ---------- carregamento de janela / desenho ----------
+async function fetchSignal(t0,t1){
+  S.sig = await jget(`/api/signal?name=${encodeURIComponent(S.exam)}&t0=${t0}&t1=${t1}`);
+}
+
+// Modo Eventos: janela em torno do evento idx. Modo Full: garante que o evento apareça.
+async function selectEvent(idx, moveView){
+  if(idx<0 || idx>=S.events.length) return;
+  S.cur = idx;
+  const e = S.events[idx];
+  const es = S.info.epoch_sec;
+  if(S.mode==="events"){
+    const t0 = Math.max(0, e.epoch_start - PAD) * es;
+    const t1 = (e.epoch_end + PAD) * es;
+    await fetchSignal(t0, t1);
+  } else if(moveView){
+    // centra a janela no evento se ele estiver fora dela
+    if(e.epoch_start < S.winEp || e.epoch_end > S.winEp + S.winW){
+      S.winEp = Math.max(0, Math.min(e.epoch_start - Math.floor(S.winW/2), S.info.n_epochs - S.winW));
+      $("#winslider").value = S.winEp;
+      await loadWindow(false);
+    }
+  }
+  updateInfo(); draw(); drawHyp(); renderList();
+}
+
+async function loadWindow(updateInfoToo=true){
+  const es = S.info.epoch_sec;
+  const t0 = S.winEp * es, t1 = (S.winEp + S.winW) * es;
+  await fetchSignal(t0, t1);
+  if(updateInfoToo) updateInfo();
+  draw(); drawHyp();
+}
+
+function updateInfo(){
+  if(S.mode==="events"){
+    const e=S.events[S.cur];
+    if(!e){ $("#evinfo").textContent="sem eventos"; return; }
+    const tedf = e.onset_edf!=null ? ` · <b>EDF ${fmt(e.onset_edf)}</b>` : "";
+    const sc = e.score==null?"—":e.score;
+    $("#evinfo").innerHTML = `Evento <b>#${S.cur+1}</b>/${S.events.length} · início <b>${fmt(e.onset_s)}</b> · ${e.duration_s}s · estágio <b>${e.stage}</b> · score <b>${sc}</b>${tedf} · atual: <b>${decLabel(e.id)}</b>`;
+  } else {
+    const t0=S.winEp*S.info.epoch_sec, t1=(S.winEp+S.winW)*S.info.epoch_sec;
+    const sel=S.events[S.cur];
+    const selTxt = sel? ` · selecionado #${S.cur+1} (${decLabel(sel.id)})` : "";
+    $("#evinfo").innerHTML = `Janela <b>${fmt(t0)}–${fmt(t1)}</b> de ${fmt(S.info.n_epochs*S.info.epoch_sec)} · <b>clique e arraste</b> no traçado p/ adicionar evento${selTxt}`;
+  }
+}
+
+function draw(){
+  const w=cv.width=cv.clientWidth*devicePixelRatio, h=cv.height=340*devicePixelRatio;
+  CTX.clearRect(0,0,w,h); CTX.save();
+  const sig=S.sig; if(!sig || !sig.samples.length){ CTX.restore(); return; }
+  const es=S.info.epoch_sec, fs=sig.fs_eff, dur=sig.t1-sig.t0;
+  const x = t => (t - sig.t0)/dur * w;
+  // fundo: mini-epocas marcadas pelo modelo + rotulo de estagio
+  sig.stages.forEach((st,i)=>{
+    const ep=sig.epoch_start+i, xa=x(ep*es), xb=x((ep+1)*es);
+    if(sig.movemask[i]){ CTX.fillStyle=getCss("--movebg"); CTX.fillRect(xa,0,xb-xa,h); }
+    if(isEpochExcluded(ep)){
+      CTX.fillStyle="rgba(255,93,108,.30)"; CTX.fillRect(xa,0,xb-xa,h);
+      CTX.strokeStyle=getCss("--del"); CTX.lineWidth=1*devicePixelRatio;
+      CTX.beginPath(); CTX.moveTo(xa,2); CTX.lineTo(xb,h-2); CTX.stroke();
+    }
+    CTX.fillStyle=getCss("--muted"); CTX.font=`${11*devicePixelRatio}px sans-serif`;
+    CTX.fillText(st, xa+3*devicePixelRatio, 14*devicePixelRatio);
+  });
+  // contornos dos eventos na janela, coloridos pelo rotulo atual
+  S.events.forEach((e,idx)=>{
+    const a=Math.max(sig.t0, e.onset_s), b=Math.min(sig.t1, e.onset_s+e.duration_s);
+    if(b<=a) return;
+    const lab=decLabel(e.id);
+    CTX.strokeStyle=labColor(lab);
+    CTX.lineWidth=(idx===S.cur?2.6:1.4)*devicePixelRatio;
+    if(lab==="deleted") CTX.setLineDash([6*devicePixelRatio,4*devicePixelRatio]); else CTX.setLineDash([]);
+    CTX.strokeRect(x(a), 2, x(b)-x(a), h-4);
+    if(e.manual){ CTX.fillStyle=getCss("--manual"); CTX.fillRect(x(a),0,3*devicePixelRatio,h); }
+  });
+  CTX.setLineDash([]);
+  // linha de base
+  CTX.strokeStyle=getCss("--grid"); CTX.lineWidth=1*devicePixelRatio;
+  CTX.beginPath(); CTX.moveTo(0,h/2); CTX.lineTo(w,h/2); CTX.stroke();
+  // traçado EMG
+  let mn=Infinity,mx=-Infinity; for(const v of sig.samples){ if(v<mn)mn=v; if(v>mx)mx=v; }
+  const amp=Math.max(Math.abs(mn),Math.abs(mx),1e-6);
+  CTX.strokeStyle=getCss("--line"); CTX.lineWidth=1.1*devicePixelRatio; CTX.beginPath();
+  const n=sig.samples.length;
+  for(let i=0;i<n;i++){
+    const t=sig.t0 + i/fs, px=x(t), py=h/2 - (sig.samples[i]/amp)*(h/2-10*devicePixelRatio);
+    i?CTX.lineTo(px,py):CTX.moveTo(px,py);
+  }
+  CTX.stroke();
+  // retangulo de selecao (arraste em andamento)
+  if(S.drag){
+    const a=Math.min(S.drag.t0,S.drag.t1), b=Math.max(S.drag.t0,S.drag.t1);
+    CTX.fillStyle="rgba(255,209,102,.22)"; CTX.strokeStyle=getCss("--manual");
+    CTX.lineWidth=1.5*devicePixelRatio;
+    CTX.fillRect(x(a),0,x(b)-x(a),h); CTX.strokeRect(x(a),0,x(b)-x(a),h);
+  }
+  CTX.restore();
+}
+
+function drawHyp(){
+  const w=hyp.width=hyp.clientWidth*devicePixelRatio, h=hyp.height=64*devicePixelRatio;
+  HG.clearRect(0,0,w,h);
+  const N=S.info.n_epochs;
+  // marcas de eventos (cor pelo rotulo)
+  S.events.forEach(e=>{ HG.fillStyle=labColor(decLabel(e.id)); const px=e.epoch_start/N*w; HG.fillRect(px,4,Math.max(1,devicePixelRatio),h-8); });
+  // janela visivel (modo full)
+  if(S.mode==="full"){
+    HG.fillStyle="rgba(127,212,255,.18)";
+    HG.fillRect(S.winEp/N*w,0,S.winW/N*w,h);
+    HG.strokeStyle=getCss("--line"); HG.lineWidth=1*devicePixelRatio;
+    HG.strokeRect(S.winEp/N*w,0,S.winW/N*w,h);
+  }
+  // cursor do evento selecionado
+  const cur=S.events[S.cur];
+  if(cur){ HG.fillStyle=getCss("--ok"); const cx=cur.epoch_start/N*w; HG.fillRect(cx-1.5*devicePixelRatio,0,3*devicePixelRatio,h); }
+  HG.fillStyle=getCss("--muted"); HG.font=`${10*devicePixelRatio}px sans-serif`;
+  HG.fillText("noite toda → (clique para ir)", 6*devicePixelRatio, h-6*devicePixelRatio);
+}
+
+// ---------- rotulagem e adicao ----------
+function setLabel(lab){
+  const e=S.events[S.cur]; if(!e) return;
+  S.decisions[e.id]=lab;
+  if(S.mode==="events" && lab!=="deleted" && S.cur < S.events.length-1){ selectEvent(S.cur+1, true); }
+  else { updateInfo(); draw(); drawHyp(); renderList(); }
+}
+
+function domStageForEpochs(ep0,ep1){
+  // usa os estagios da janela carregada, se cobrir
+  const sig=S.sig; if(!sig) return "?";
+  const cnt={};
+  for(let ep=ep0; ep<ep1; ep++){
+    const i=ep-sig.epoch_start;
+    if(i>=0 && i<sig.stages.length){ const s=sig.stages[i]; cnt[s]=(cnt[s]||0)+1; }
+  }
+  let best="?",bc=-1; for(const k in cnt){ if(cnt[k]>bc){bc=cnt[k];best=k;} }
+  return best;
+}
+
+function addEvent(ep0, ep1){
+  const es=S.info.epoch_sec;
+  ep0=Math.max(0,Math.floor(ep0)); ep1=Math.min(S.info.n_epochs, Math.max(ep0+1, Math.ceil(ep1)));
+  const onset_s=ep0*es, duration_s=(ep1-ep0)*es;
+  const onset_edf = S.info.has_offset ? Math.round((onset_s+S.info.annot_start)*10)/10 : null;
+  const id=S.nextId++;
+  const e={ id, onset_s, onset_edf, duration_s, score:null, epoch_start:ep0, epoch_end:ep1,
+            stage:domStageForEpochs(ep0,ep1), suggestion:"phasic", manual:true };
+  S.events.push(e);
+  S.events.sort((a,b)=>a.onset_s-b.onset_s);
+  S.decisions[id]="phasic"; // manual entra como mantido; ajuste com T/F ou apague com D
+  S.cur=S.events.findIndex(x=>x.id===id);
+  updateInfo(); draw(); drawHyp(); renderList();
+  $("#savemsg").textContent=`evento manual adicionado em ${fmt(onset_s)} (${duration_s}s) — ajuste T/F ou apague`;
+}
+
+// ---------- modos ----------
+async function setMode(m){
+  S.mode=m;
+  $("#mode-events").classList.toggle("active", m==="events");
+  $("#mode-full").classList.toggle("active", m==="full");
+  $("#navEvents").hidden = m!=="events";
+  $("#navFull").hidden = m!=="full";
+  if(m==="events"){ await selectEvent(Math.max(0,S.cur), true); }
+  else {
+    // posiciona a janela no evento selecionado
+    const e=S.events[S.cur];
+    if(e) S.winEp=Math.max(0, Math.min(e.epoch_start-Math.floor(S.winW/2), S.info.n_epochs-S.winW));
+    $("#winslider").value=S.winEp;
+    await loadWindow();
+  }
+}
+
+async function setWinW(wep){
+  const es=S.info.epoch_sec, center=S.winEp + S.winW/2;
+  S.winW=wep;
+  document.querySelectorAll(".winw button").forEach(b=>b.classList.toggle("active", +b.dataset.w===wep));
+  const maxStart=Math.max(0, S.info.n_epochs - S.winW);
+  $("#winslider").max=maxStart;
+  S.winEp=Math.max(0, Math.min(Math.round(center - S.winW/2), maxStart));
+  $("#winslider").value=S.winEp;
+  await loadWindow();
+}
+
+async function pageBy(dir){
+  const maxStart=Math.max(0, S.info.n_epochs - S.winW);
+  S.winEp=Math.max(0, Math.min(S.winEp + dir*Math.round(S.winW*0.9), maxStart));
+  $("#winslider").value=S.winEp;
+  await loadWindow();
+}
+
+// ---------- interacao no canvas (selecionar / arrastar p/ adicionar) ----------
+function canvasTime(evt){
+  const r=cv.getBoundingClientRect();
+  const frac=Math.min(1,Math.max(0,(evt.clientX-r.left)/r.width));
+  return S.sig.t0 + frac*(S.sig.t1-S.sig.t0);
+}
+cv.addEventListener("mousedown", evt=>{
+  if(!S.sig) return;
+  S.drag={t0:canvasTime(evt), t1:canvasTime(evt)};
+});
+cv.addEventListener("mousemove", evt=>{
+  if(!S.drag) return;
+  S.drag.t1=canvasTime(evt); draw();
+});
+window.addEventListener("mouseup", evt=>{
+  if(!S.drag) return;
+  const a=Math.min(S.drag.t0,S.drag.t1), b=Math.max(S.drag.t0,S.drag.t1);
+  const es=S.info.epoch_sec, span=b-a;
+  S.drag=null;
+  if(S.editMode){
+    // modo edicao: clique/arraste alterna inclusao/exclusao de mini-epocas DENTRO do evento atual
+    const e=S.events[S.cur];
+    if(!e){ $("#savemsg").textContent="selecione um evento antes de editar as janelas."; draw(); return; }
+    const ep0=Math.floor(a/es), ep1=Math.max(ep0+1, Math.ceil(b/es));
+    const already = S.excluded[e.id] && S.excluded[e.id].has(Math.max(e.epoch_start,ep0));
+    setExcludeRange(e, ep0, ep1, !already);
+    return;
+  }
+  if(span < es*0.5){
+    // clique: seleciona o evento sob o cursor, se houver
+    const idx=S.events.findIndex(e=> a>=e.onset_s && a<=e.onset_s+e.duration_s);
+    if(idx>=0){ selectEvent(idx, false); } else { draw(); }
+  } else {
+    addEvent(a/es, b/es); // arraste: novo evento snap p/ mini-epocas
+  }
+});
+
+// ---------- botoes / eventos ----------
+$("#mode-events").onclick=()=>setMode("events");
+$("#mode-full").onclick=()=>setMode("full");
+$("#prev").onclick=()=>selectEvent(S.cur-1, true);
+$("#next").onclick=()=>selectEvent(S.cur+1, true);
+$("#pgprev").onclick=()=>pageBy(-1);
+$("#pgnext").onclick=()=>pageBy(1);
+$("#winslider").oninput=e=>{ S.winEp=+e.target.value; loadWindow(); };
+document.querySelectorAll(".winw button").forEach(b=> b.onclick=()=>setWinW(+b.dataset.w));
+$("#bt").onclick=()=>setLabel("tonic");
+$("#bp").onclick=()=>setLabel("phasic");
+$("#bd").onclick=()=>setLabel("deleted");
+$("#badd").onclick=()=>{ // adiciona 1 mini-epoca no centro da janela atual
+  const es=S.info.epoch_sec;
+  const centerEp = S.mode==="full" ? S.winEp+Math.floor(S.winW/2)
+                 : (S.events[S.cur]? S.events[S.cur].epoch_start : 0);
+  addEvent(centerEp, centerEp+1);
+};
+$("#exam").onchange=e=>selectExam(e.target.value);
+function setEditMode(on){
+  S.editMode = on;
+  $("#bedit").classList.toggle("active", on);
+  $("#editHint").hidden = !on;
+  cv.style.cursor = on ? "cell" : "crosshair";
+}
+$("#bedit").onclick=()=>setEditMode(!S.editMode);
+$("#brestore").onclick=()=>{
+  const e=S.events[S.cur]; if(!e) return;
+  delete S.excluded[e.id];
+  draw(); drawHyp(); renderList();
+  $("#savemsg").textContent=`evento #${S.cur+1}: todas as janelas restauradas.`;
+};
+hyp.addEventListener("click", evt=>{
+  const r=hyp.getBoundingClientRect();
+  const frac=(evt.clientX-r.left)/r.width, ep=Math.floor(frac*S.info.n_epochs);
+  if(S.mode==="full"){
+    S.winEp=Math.max(0, Math.min(ep-Math.floor(S.winW/2), S.info.n_epochs-S.winW));
+    $("#winslider").value=S.winEp; loadWindow();
+  } else {
+    // vai ao evento mais proximo
+    let best=0,bd=1e9; S.events.forEach((e,i)=>{ const d=Math.abs(e.epoch_start-ep); if(d<bd){bd=d;best=i;} });
+    selectEvent(best, true);
+  }
+});
+$("#save").onclick=async()=>{
+  // cada evento vira 1+ linhas: um trecho por segmento contiguo que restou apos exclusoes de janela
+  // (sem exclusoes, e exatamente 1 linha = comportamento anterior, sem quebra de compatibilidade)
+  const decisions = [];
+  S.events.forEach(e=>{
+    const lab = S.decisions[e.id]||"movement";
+    segmentsForEvent(e).forEach(seg=>{
+      decisions.push({onset_s:seg.onset_s, duration_s:seg.duration_s, label:lab, score:e.score});
+    });
+  });
+  const r = await jpost("/api/save",{exam:S.exam, decisions});
+  $("#savemsg").textContent = `salvo: ${r.n_kept} mantidos, ${r.n_deleted} descartados (${r.time_ref==="edf"?"tempo EDF":"tempo .pt"})`;
+};
+
+// ---- painel de configuracoes (tempo do EDF) ----
+function hmsToSec(s){
+  if(!s) return null;
+  const p=s.trim().split(":").map(Number);
+  if(p.some(isNaN)||!p.length) return null;
+  return (p[0]||0)*3600+(p[1]||0)*60+(p[2]||0);
+}
+function secToHms(x){
+  if(x==null) return "—";
+  x=Math.round(x)%86400; if(x<0)x+=86400;
+  const h=Math.floor(x/3600), m=Math.floor((x%3600)/60), s=x%60;
+  return `${String(h).padStart(2,"0")}:${String(m).padStart(2,"0")}:${String(s).padStart(2,"0")}`;
+}
+function cfgPreview(){
+  const hs = S.info ? hmsToSec(S.info.hipno_start) : null;
+  const ms = hmsToSec($("#cfgmeas").value);
+  let off=null;
+  if(hs!=null && ms!=null){ off=hs-ms; if(off<0)off+=86400; }
+  $("#cfgoff").textContent = off==null ? "—" : `${off.toFixed(0)} s  (${secToHms(off)})`;
+}
+function openCfg(){
+  if(!S.info) return;
+  $("#cfgexam").textContent = S.exam;
+  $("#cfghipno").textContent = S.info.hipno_start || "—";
+  $("#cfgmeas").value = S.info.meas_date || "";
+  $("#cfgmatwarn").hidden = !!S.info.has_mat;
+  $("#cfgmsg").textContent = "";
+  cfgPreview();
+  $("#cfgpanel").hidden = false;
+  $("#cfgmeas").focus();
+}
+function closeCfg(){ $("#cfgpanel").hidden = true; }
+async function saveCfg(meas_date){
+  return await jpost("/api/config", {exam:S.exam, meas_date});
+}
+async function reloadExamSafe(){
+  try { await selectExam(S.exam); }
+  catch(e){ console.error("reload apos config:", e); $("#savemsg").textContent="⚠ erro ao recarregar: "+e.message; }
+}
+$("#cfgbtn").onclick=openCfg;
+$("#cfgcancel").onclick=closeCfg;
+$("#cfgpanel").onclick=e=>{ if(e.target.id==="cfgpanel") closeCfg(); };
+$("#cfgmeas").addEventListener("input",cfgPreview);
+$("#cfgsave").onclick=async()=>{
+  const md=$("#cfgmeas").value.trim();
+  if(hmsToSec(md)==null){ $("#cfgmsg").textContent="Formato inválido — use HH:MM:SS."; return; }
+  let r;
+  try { r=await saveCfg(md); }
+  catch(e){ $("#cfgmsg").textContent="Erro ao salvar: "+e.message; return; }
+  $("#cfgmsg").innerHTML = r.has_offset
+    ? `✓ offset salvo: annot_start=${r.annot_start.toFixed(0)}s. CSV sairá em tempo do EDF.`
+    : "⚠ Não foi possível calcular (falta hyp_&lt;exame&gt;.mat em view/mat/).";
+  closeCfg();
+  reloadExamSafe();
+};
+$("#cfgclear").onclick=async()=>{
+  $("#cfgmeas").value="";
+  try { await saveCfg(null); }
+  catch(e){ $("#cfgmsg").textContent="Erro: "+e.message; return; }
+  $("#cfgmsg").textContent="Offset removido — CSV voltará ao tempo do .pt.";
+  closeCfg();
+  reloadExamSafe();
+};
+
+document.addEventListener("keydown",ev=>{
+  if($("#cfgpanel") && !$("#cfgpanel").hidden){ if(ev.key==="Escape")closeCfg(); return; }
+  if(ev.target && ev.target.tagName==="INPUT") return;
+  if(ev.key==="ArrowLeft"){ S.mode==="full"?pageBy(-1):selectEvent(S.cur-1,true); }
+  else if(ev.key==="ArrowRight"){ S.mode==="full"?pageBy(1):selectEvent(S.cur+1,true); }
+  else if(ev.key.toLowerCase()==="t")setLabel("tonic");
+  else if(ev.key.toLowerCase()==="f")setLabel("phasic");
+  else if(ev.key.toLowerCase()==="d")setLabel("deleted");
+  else if(ev.key.toLowerCase()==="a"){ ev.preventDefault(); $("#badd").click(); }
+  else if(ev.key.toLowerCase()==="e"){ setEditMode(!S.editMode); }
+  else if(ev.key.toLowerCase()==="r"){ $("#brestore").click(); }
+});
+window.addEventListener("resize",()=>{ if(S.sig){ draw(); drawHyp(); } });
+loadExams().catch(e=>{ $("#meta").textContent="erro: "+e.message; });
+</script>
+</body>
+</html>
