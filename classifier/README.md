@@ -21,5 +21,22 @@ classifier/
   predict_movements.py    inferência: novo .pt -> CSV de movimentos
 ```
 
-# executar: 
+
+# PASSOS PARA TREINAR E EXECUTAR O MODELO: 
+
+# 1 - ADICIONAR LABELS AO .PT
+python classifier/apply_labels.py --dry-run     # confere antes, nao grava nada
+python classifier/apply_labels.py               # aplica de fato, com backup automatico
+
+# 2 - TRAIN LOSO
+python classifier/train_loso.py
+
+# 3 - EVALUATE
+python classifier/evaluate_loso.py
+
+# 4 - TREINAMENTO FINAL
+python classifier/train_final.py
+
+
+# 5 - INFERENCIA: 
 python classifier/predict_movements.py caminho/EXAME.pt -o EXAME_movimentos.csv

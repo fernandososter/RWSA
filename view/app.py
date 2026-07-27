@@ -278,15 +278,17 @@ class Handler(BaseHTTPRequestHandler):
                     seg = seg[::step]
                 else:
                     step = 1
-                # estagios por mini-epoca na janela
+                # estagios/mascara/score (probabilidade do modelo) por mini-epoca na janela
                 e0 = int(t0 // EPOCH_SEC); e1 = int(np.ceil(t1 / EPOCH_SEC))
                 stages = [STAGE_NAMES.get(int(s), "?") for s in st["stages"][e0:e1]]
                 movemask = [bool(x) for x in st["mask"][e0:e1]]
+                scores = [round(float(x), 4) for x in st["scores"][e0:e1]]
                 return self._send(200, {
                     "t0": t0, "t1": t1, "fs_eff": fs / step,
                     "samples": seg.round(3).tolist(),
                     "epoch_start": e0,
-                    "stages": stages, "movemask": movemask,
+                    "stages": stages, "movemask": movemask, "scores": scores,
+                    "threshold": st["threshold"],
                 })
         except Exception as e:
             import traceback

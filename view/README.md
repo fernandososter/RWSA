@@ -23,6 +23,14 @@ Cada evento já vem pré-rotulado a partir dos `tonic_labels`/`phasic_labels` do
 (quando existem). Eventos que o modelo detectou mas o `.pt` não marcava aparecem
 como `movement` — são os candidatos novos a revisar.
 
+### Faixa de probabilidade
+Abaixo do traçado de EMG, uma segunda faixa mostra a **probabilidade contínua do
+modelo** (0–1) por mini-época — não só o rótulo binário acima/abaixo do limiar.
+As barras acima da linha tracejada (o limiar atual, ex. 0.2) ficam na cor cheia;
+abaixo, ficam esmaecidas. Útil para ver o quão "no limite" foi uma detecção antes
+de decidir tônico/fásico/apagar, e para notar mini-épocas com score alto que o
+limiar atual deixou de fora (candidatos a evento manual).
+
 ### Dois modos de visualização
 - **Eventos** — pula de evento a evento (o fluxo padrão de revisão).
 - **Traçado completo** — rola a noite inteira do EMG contínuo, com controles de

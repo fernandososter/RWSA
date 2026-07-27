@@ -9,7 +9,7 @@
     --bg:#0f1720; --panel:#182430; --ink:#e8eef4; --muted:#8aa0b4;
     --move:#ff8a3d; --movebg:rgba(255,138,61,.18);
     --tonic:#4da3ff; --phasic:#c77dff; --del:#ff5d6c; --ok:#39d98a;
-    --manual:#ffd166; --line:#7fd4ff; --grid:#243444;
+    --manual:#ffd166; --line:#7fd4ff; --grid:#243444; --prob:#5eead4;
   }
   * { box-sizing:border-box; }
   body { margin:0; font:14px/1.4 -apple-system,Segoe UI,Roboto,sans-serif;
@@ -25,6 +25,7 @@
   main { display:grid; grid-template-columns: 1fr 320px; gap:0; height:calc(100vh - 52px); }
   #plotwrap { position:relative; padding:12px 16px; overflow:hidden; }
   #canvas { width:100%; height:340px; background:#0b1219; border-radius:8px; border:1px solid var(--grid); cursor:crosshair; }
+  #probstrip { width:100%; height:56px; margin-top:6px; background:#0b1219; border-radius:8px; border:1px solid var(--grid); cursor:crosshair; }
   #hyp { width:100%; height:64px; margin-top:8px; background:#0b1219; border-radius:8px; border:1px solid var(--grid); cursor:pointer; }
   .navrow { display:flex; align-items:center; gap:10px; margin-top:12px; flex-wrap:wrap; }
   .navrow[hidden] { display:none; }
@@ -66,6 +67,7 @@
   .lg-tonic::before{ color:var(--tonic); } .lg-phasic::before{ color:var(--phasic); }
   .lg-manual::before{ color:var(--manual); }
   .lg-excluded::before{ color:var(--del); }
+  .lg-prob::before{ color:var(--prob,#7fd4ff); }
   .cfgpanel { position:fixed; inset:0; background:rgba(0,0,0,.55); display:flex;
               align-items:flex-start; justify-content:center; z-index:50; padding-top:70px; }
   .cfgpanel[hidden] { display:none; }  /* o hidden precisa vencer o display:flex acima */
@@ -120,6 +122,7 @@
 <main>
   <section id="plotwrap">
     <canvas id="canvas"></canvas>
+    <canvas id="probstrip"></canvas>
     <canvas id="hyp"></canvas>
     <div class="legend">
       <span class="lg-line">EMG (z-score)</span>
@@ -128,6 +131,7 @@
       <span class="lg-phasic">fásico</span>
       <span class="lg-manual">manual</span>
       <span class="lg-excluded">janela excluída do evento</span>
+      <span class="lg-prob">probabilidade do modelo (0–1)</span>
     </div>
 
     <div class="navrow">
@@ -179,8 +183,8 @@ const S = { exam:null, info:null, events:[], decisions:{}, cur:0, sig:null,
             mode:"events", winEp:0, winW:20, nextId:100000, drag:null,
             editMode:false, excluded:{} };  // excluded: eventId -> Set(epoch_abs) removidas de dentro do evento
 const $ = s => document.querySelector(s);
-const cv = $("#canvas"), hyp = $("#hyp");
-const CTX = cv.getContext("2d"), HG = hyp.getContext("2d");
+const cv = $("#canvas"), hyp = $("#hyp"), probstrip = $("#probstrip");
+const CTX = cv.getContext("2d"), HG = hyp.getContext("2d"), PB = probstrip.getContext("2d");
 const PAD = 2; // mini-epocas de contexto em cada lado no modo Eventos
 
 async function jget(u){ const r = await fetch(u); if(!r.ok) throw new Error((await r.json()).error||r.status); return r.json(); }
@@ -327,7 +331,7 @@ function updateInfo(){
 function draw(){
   const w=cv.width=cv.clientWidth*devicePixelRatio, h=cv.height=340*devicePixelRatio;
   CTX.clearRect(0,0,w,h); CTX.save();
-  const sig=S.sig; if(!sig || !sig.samples.length){ CTX.restore(); return; }
+  const sig=S.sig; if(!sig || !sig.samples.length){ CTX.restore(); drawProb(); return; }
   const es=S.info.epoch_sec, fs=sig.fs_eff, dur=sig.t1-sig.t0;
   const x = t => (t - sig.t0)/dur * w;
   // fundo: mini-epocas marcadas pelo modelo + rotulo de estagio
@@ -375,6 +379,32 @@ function draw(){
     CTX.fillRect(x(a),0,x(b)-x(a),h); CTX.strokeRect(x(a),0,x(b)-x(a),h);
   }
   CTX.restore();
+  drawProb();
+}
+
+// Faixa de probabilidade: score continuo (0-1) do modelo por mini-epoca, com linha de limiar.
+function drawProb(){
+  const w=probstrip.width=probstrip.clientWidth*devicePixelRatio, h=probstrip.height=56*devicePixelRatio;
+  PB.clearRect(0,0,w,h);
+  const sig=S.sig; if(!sig || !sig.scores || !sig.scores.length) return;
+  const es=S.info.epoch_sec, dur=sig.t1-sig.t0;
+  const x = t => (t - sig.t0)/dur * w;
+  const y = p => h - Math.max(0,Math.min(1,p))*(h-4) - 2;
+  const thr = sig.threshold!=null ? sig.threshold : 0.2;
+  // barras por mini-epoca, coloridas por score (mais alto = mais proximo de --move)
+  sig.scores.forEach((p,i)=>{
+    const ep=sig.epoch_start+i, xa=x(ep*es), xb=x((ep+1)*es);
+    const yTop=y(p);
+    PB.fillStyle = p>=thr ? getCss("--prob") : "rgba(94,234,212,.35)";
+    PB.fillRect(xa, yTop, Math.max(1,xb-xa-1*devicePixelRatio), h-yTop-2);
+  });
+  // linha do limiar
+  PB.strokeStyle=getCss("--del"); PB.setLineDash([4*devicePixelRatio,3*devicePixelRatio]);
+  PB.lineWidth=1*devicePixelRatio;
+  PB.beginPath(); PB.moveTo(0,y(thr)); PB.lineTo(w,y(thr)); PB.stroke(); PB.setLineDash([]);
+  PB.fillStyle=getCss("--muted"); PB.font=`${10*devicePixelRatio}px sans-serif`;
+  PB.fillText(`limiar ${thr}`, 4*devicePixelRatio, y(thr)-3*devicePixelRatio);
+  PB.fillText("prob. movimento", 4*devicePixelRatio, 12*devicePixelRatio);
 }
 
 function drawHyp(){

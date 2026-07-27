@@ -1,0 +1,57 @@
+{
+  "rbd1": {
+    "meas_date": "20:32:49",
+    "annot_start": 9270.0,
+    "hipno_start": "23:07:19"
+  },
+  "rbd9": {
+    "meas_date": "21:56:00",
+    "annot_start": 0.0,
+    "hipno_start": "21:56:00"
+  },
+  "rbd3": {
+    "meas_date": "22:01:37",
+    "annot_start": 0.0,
+    "hipno_start": "22:01:37"
+  },
+  "rbd5": {
+    "meas_date": "21:54:03",
+    "annot_start": 30.0,
+    "hipno_start": "21:54:33"
+  },
+  "rbd2": {
+    "meas_date": "21:45:55",
+    "annot_start": 0.0,
+    "hipno_start": "21:45:55"
+  },
+  "rbd4": {
+    "meas_date": "18:46:00",
+    "annot_start": 5940.0,
+    "hipno_start": "20:25:00"
+  },
+  "rbd7": {
+    "meas_date": "22:03:29",
+    "annot_start": 210.0,
+    "hipno_start": "22:06:59"
+  },
+  "rbd8": {
+    "meas_date": "22:09:09",
+    "annot_start": 270.0,
+    "hipno_start": "22:13:39"
+  },
+  "rbd6": {
+    "meas_date": "16:50:51",
+    "annot_start": 19200.0,
+    "hipno_start": "22:10:51"
+  },
+  "rbd11": {
+    "meas_date": "22:09:22",
+    "annot_start": 30.0,
+    "hipno_start": "22:09:52"
+  },
+  "rbd12": {
+    "meas_date": "21:52:54",
+    "annot_start": 240.0,
+    "hipno_start": "21:56:54"
+  }
+}
