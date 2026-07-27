@@ -2,7 +2,8 @@
 Motor de treino isolado para o detector de movimento.
 
 Treina a MovementCNN com focal loss, early stopping por PR-AUC de validacao.
-Roda em CPU. Nao importa nada de src/sleep_rswa.
+Roda em CPU ou CUDA (--device nos scripts train_loso.py/train_final.py/
+predict_movements.py). Nao importa nada de src/sleep_rswa.
 """
 from __future__ import annotations
 
@@ -13,6 +14,38 @@ import torch
 
 from .model import MovementCNN, FocalLoss, count_params
 from .metrics import pr_auc
+
+
+def resolve_device(choice: str = "auto") -> str:
+    """Resolve a string de device pedida (via --device) para uma valida.
+
+    "auto"      -> "cuda" se torch.cuda.is_available(), senao "cpu"
+    "cpu"       -> "cpu"
+    "cuda"/"cuda:N" -> valida disponibilidade; erro claro se nao houver GPU
+    """
+    choice = (choice or "auto").lower()
+    if choice == "auto":
+        dev = "cuda" if torch.cuda.is_available() else "cpu"
+        print(f"[device] auto -> {dev}" + ("" if dev == "cpu" else f" ({torch.cuda.get_device_name(0)})"))
+        return dev
+    if choice == "cpu":
+        return "cpu"
+    if choice.startswith("cuda"):
+        if not torch.cuda.is_available():
+            raise RuntimeError(
+                f"--device {choice} pedido, mas torch.cuda.is_available()==False "
+                f"(sem GPU visivel ou build do torch sem suporte CUDA nesta maquina)."
+            )
+        idx = 0
+        if ":" in choice:
+            idx = int(choice.split(":", 1)[1])
+        if idx >= torch.cuda.device_count():
+            raise RuntimeError(
+                f"--device {choice} pedido, mas so ha {torch.cuda.device_count()} GPU(s) visivel(is)."
+            )
+        print(f"[device] {choice} -> {torch.cuda.get_device_name(idx)}")
+        return choice
+    raise ValueError(f"--device invalido: {choice!r} (use auto, cpu, cuda ou cuda:N)")
 
 
 @dataclass

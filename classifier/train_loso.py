@@ -4,10 +4,11 @@ Validacao leave-one-subject-out do detector de movimento.
 Treina em 3 exames, testa no 4o, rotaciona. Salva:
   outputs/loso_predictions.npz   scores out-of-fold por sujeito (y, score, stages, hours)
   outputs/loso_history.json      curvas de treino por fold
-Uso: python classifier/train_loso.py
+Uso: python classifier/train_loso.py [--device auto|cpu|cuda|cuda:N]
 """
 from __future__ import annotations
 
+import argparse
 import json
 import sys
 import time
@@ -22,7 +23,7 @@ if str(PROJ) not in sys.path:
 
 from classifier.movement_clf.dataio import load_dir
 from classifier.movement_clf.dataset import make_loaders
-from classifier.movement_clf.engine import TrainConfig, train_one, predict_scores
+from classifier.movement_clf.engine import TrainConfig, train_one, predict_scores, resolve_device
 
 DATA = HERE / "data"
 OUT = HERE / "outputs"
@@ -33,10 +34,16 @@ def main():
     import functools
     global print
     print = functools.partial(print, flush=True)
+
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--device", default="auto", help="auto (default), cpu, cuda ou cuda:N")
+    args = ap.parse_args()
+    device = resolve_device(args.device)
+
     cfg = TrainConfig()
     exams = load_dir(DATA, require_labels=True)
     subjects = [e.subject_id for e in exams]
-    print(f"exames: {subjects} | params/modelo config window={cfg.window_epochs}")
+    print(f"exames: {subjects} | params/modelo config window={cfg.window_epochs} | device={device}")
 
     preds = {}
     history = {}
@@ -48,8 +55,8 @@ def main():
         tr, va, tl, vl = make_loaders(train_ex, [test_ex],
                                       window_epochs=cfg.window_epochs,
                                       batch_size=cfg.batch_size)
-        model, hist, _, best_auc = train_one(tl, vl, cfg, device="cpu", verbose=True)
-        y, score = predict_scores(model, vl, device="cpu")
+        model, hist, _, best_auc = train_one(tl, vl, cfg, device=device, verbose=True)
+        y, score = predict_scores(model, vl, device=device)
         preds[sid] = dict(y=y.astype(np.float32), score=score.astype(np.float32),
                           stages=test_ex.stages.astype(np.int64),
                           hours=float(test_ex.hours))

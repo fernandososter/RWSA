@@ -14,6 +14,7 @@ como pre-anotacao para revisao humana / rodar junto com o estagiamento.
 Uso:
     python classifier/predict_movements.py EXAME.pt [-o SAIDA.csv]
                  [--model CKPT.pt] [--threshold 0.5] [--min-epochs 1]
+                 [--device auto|cpu|cuda|cuda:N]
 
 Este modulo NAO importa nada de src/sleep_rswa.
 """
@@ -35,41 +36,47 @@ if str(PROJ) not in sys.path:
 from classifier.movement_clf.dataio import load_exam, zscore_emg, events_from_binary, EPOCH_SEC
 from classifier.movement_clf.dataset import build_tensors
 from classifier.movement_clf.model import MovementCNN
+from classifier.movement_clf.engine import resolve_device
 
 DEFAULT_MODEL = HERE / "outputs" / "movement_cnn_final.pt"
 
 
-def load_model(ckpt_path: Path):
+def load_model(ckpt_path: Path, device: str = "cpu"):
+    # o checkpoint guarda state_dict em CPU (train_final.py garante isso), entao
+    # map_location="cpu" aqui e sempre seguro mesmo se quem treinou usou CUDA;
+    # so depois movemos o modelo para o device pedido.
     ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     window = ckpt.get("window_epochs", 5)
     model = MovementCNN(window_epochs=window)
     model.load_state_dict(ckpt["state_dict"])
+    model.to(device)
     model.eval()
     return model, ckpt
 
 
 @torch.no_grad()
-def score_exam(model, exam, window_epochs: int, batch_size: int = 512) -> np.ndarray:
+def score_exam(model, exam, window_epochs: int, batch_size: int = 512, device: str = "cpu") -> np.ndarray:
     """Score por mini-epoca (probabilidade de movimento) para o exame inteiro."""
     from torch.utils.data import DataLoader, TensorDataset
     X, y = build_tensors([exam], window_epochs=window_epochs)
     loader = DataLoader(TensorDataset(X, y), batch_size=batch_size, shuffle=False)
     scores = []
     for x, _ in loader:
+        x = x.to(device)
         scores.append(torch.sigmoid(model(x)).cpu().numpy())
     return np.concatenate(scores)
 
 
 def predict_to_csv(pt_path, out_csv, model_path=DEFAULT_MODEL, threshold=None,
-                   min_epochs: int = 1, verbose: bool = True):
-    model, ckpt = load_model(Path(model_path))
+                   min_epochs: int = 1, verbose: bool = True, device: str = "cpu"):
+    model, ckpt = load_model(Path(model_path), device=device)
     window = ckpt.get("window_epochs", 5)
     if threshold is None:
         threshold = ckpt.get("threshold", 0.5)
 
     # exame novo pode nao ter rotulos -> require_labels=False
     exam = load_exam(pt_path, require_labels=False)
-    scores = score_exam(model, exam, window)
+    scores = score_exam(model, exam, window, device=device)
     mask = scores >= threshold
 
     events = events_from_binary(mask, scores=scores, subject_id=exam.subject_id,
@@ -100,12 +107,14 @@ def main():
     ap.add_argument("--model", default=str(DEFAULT_MODEL), help="checkpoint do modelo")
     ap.add_argument("--threshold", type=float, default=None, help="limiar (default: do checkpoint)")
     ap.add_argument("--min-epochs", type=int, default=1, help="duracao minima do evento em mini-epocas")
+    ap.add_argument("--device", default="auto", help="auto (default), cpu, cuda ou cuda:N")
     args = ap.parse_args()
+    device = resolve_device(args.device)
 
     pt = Path(args.pt)
     out = args.out or str(pt.with_name(pt.stem + "_movimentos.csv"))
     predict_to_csv(pt, out, model_path=args.model, threshold=args.threshold,
-                   min_epochs=args.min_epochs)
+                   min_epochs=args.min_epochs, device=device)
 
 
 if __name__ == "__main__":
