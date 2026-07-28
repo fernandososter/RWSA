@@ -22,6 +22,8 @@
   button:hover { border-color:var(--muted); }
   .pill { padding:2px 8px; border-radius:20px; font-size:12px; background:#22303d; color:var(--muted); }
   .warn { color:#ffcf6b; }
+  #loadsaved.has-saved { border-color:var(--ok); color:var(--ok); font-weight:600; }
+  button:disabled, button.gate-disabled { opacity:.4; cursor:not-allowed; }
   main { display:grid; grid-template-columns: 1fr 320px; gap:0; height:calc(100vh - 52px); }
   #plotwrap { position:relative; padding:12px 16px; overflow:hidden; }
   #canvas { width:100%; height:340px; background:#0b1219; border-radius:8px; border:1px solid var(--grid); cursor:crosshair; }
@@ -94,6 +96,7 @@
   <span id="offmeta" class="pill"></span>
   <span style="flex:1"></span>
   <button id="cfgbtn" title="Configurar tempo do EDF">⚙ Config</button>
+  <button id="loadsaved" title="Substitui a lista de eventos pelas anotações já salvas em view/revisado/">📂 Abrir anotações salvas</button>
   <button id="save">Salvar CSV revisado</button>
   <span id="savemsg" class="pill"></span>
 </header>
@@ -110,6 +113,8 @@
       <input id="cfgmeas" placeholder="HH:MM:SS" maxlength="8" class="mono"></div>
     <div class="cfgrow"><label>Offset resultante (annot_start)</label><span id="cfgoff" class="mono">—</span></div>
     <div id="cfgmatwarn" class="cfghint warn" hidden>⚠ hyp_&lt;exame&gt;.mat não encontrado em view/mat/ — o offset não pode ser calculado.</div>
+    <div id="cfgreqmsg" class="cfghint warn" hidden>⚠ Este exame ainda não tem <b>meas_date</b> preenchido. É obrigatório informá-lo
+      antes de revisar/salvar — sem ele os onsets do CSV ficam ambíguos entre exames.</div>
     <div class="cfgactions">
       <button id="cfgclear">Limpar</button>
       <span style="flex:1"></span>
@@ -181,7 +186,8 @@
 <script>
 const S = { exam:null, info:null, events:[], decisions:{}, cur:0, sig:null,
             mode:"events", winEp:0, winW:20, nextId:100000, drag:null,
-            editMode:false, excluded:{} };  // excluded: eventId -> Set(epoch_abs) removidas de dentro do evento
+            editMode:false, excluded:{}, cfgRequired:false };  // excluded: eventId -> Set(epoch_abs) removidas de dentro do evento
+                                                                // cfgRequired: meas_date obrigatorio e ainda nao preenchido p/ este exame
 const $ = s => document.querySelector(s);
 const cv = $("#canvas"), hyp = $("#hyp"), probstrip = $("#probstrip");
 const CTX = cv.getContext("2d"), HG = hyp.getContext("2d"), PB = probstrip.getContext("2d");
@@ -209,6 +215,13 @@ async function selectExam(name){
   $("#offmeta").textContent = info.has_offset
       ? `tempo EDF ✓ (annot_start=${info.annot_start.toFixed(1)}s)`
       : "⚠ sem offset — CSV sairá em tempo do .pt";
+  $("#loadsaved").classList.toggle("has-saved", !!info.has_saved);
+  $("#loadsaved").title = info.has_saved
+      ? "Substitui a lista de eventos pelas anotações já salvas em view/revisado/ (existe um CSV salvo para este exame)"
+      : "Nenhuma anotação salva encontrada para este exame ainda";
+  S.cfgRequired = !info.meas_date;
+  updateCfgGate();
+  if(S.cfgRequired) openCfg(true);
   // slider da noite toda (em epocas)
   const maxStart = Math.max(0, info.n_epochs - S.winW);
   $("#winslider").max = maxStart;
@@ -591,7 +604,29 @@ $("#save").onclick=async()=>{
   });
   const r = await jpost("/api/save",{exam:S.exam, decisions});
   $("#savemsg").textContent = `salvo: ${r.n_kept} mantidos, ${r.n_deleted} descartados (${r.time_ref==="edf"?"tempo EDF":"tempo .pt"})`;
+  $("#loadsaved").classList.add("has-saved");
 };
+
+// ---- abrir anotacoes ja salvas (view/revisado/<exame>_revisado.csv) em vez das
+// sugestoes originais do .pt — substitui S.events pelos eventos ja confirmados ----
+async function loadSavedAnnotations(){
+  if(!S.exam) return;
+  const r = await jget("/api/saved?name="+encodeURIComponent(S.exam));
+  if(!r.exists){
+    $("#savemsg").textContent = `nenhuma anotação salva encontrada para ${S.exam} (${'view/revisado/'+S.exam+'_revisado.csv'} não existe).`;
+    return;
+  }
+  if(!confirm(`Substituir a lista de eventos atual pelas ${r.events.length} anotações já salvas para ${S.exam}?\nIsso descarta qualquer revisão não salva feita nesta sessão.`)) return;
+  S.events = r.events.slice();
+  S.decisions = {}; S.excluded = {}; S.cur = 0;
+  r.events.forEach(e => { e.manual=false; S.decisions[e.id] = e.suggestion; });
+  S.nextId = Math.max(1000, ...r.events.map(e=>e.id+1));
+  $("#savemsg").textContent = `${r.events.length} anotações carregadas de ${r.path}.`;
+  renderList();
+  if(S.mode==="events") await selectEvent(0, true);
+  else { updateInfo(); await loadWindow(); }
+}
+$("#loadsaved").onclick = loadSavedAnnotations;
 
 // ---- painel de configuracoes (tempo do EDF) ----
 function hmsToSec(s){
@@ -613,7 +648,23 @@ function cfgPreview(){
   if(hs!=null && ms!=null){ off=hs-ms; if(off<0)off+=86400; }
   $("#cfgoff").textContent = off==null ? "—" : `${off.toFixed(0)} s  (${secToHms(off)})`;
 }
-function openCfg(){
+// ---- meas_date obrigatorio: enquanto S.cfgRequired, o painel de config nao
+// pode ser fechado sem preencher, e Salvar/Abrir anotações ficam bloqueados ----
+function updateCfgGate(){
+  const req = S.cfgRequired;
+  [$("#save"), $("#loadsaved")].forEach(b=>{
+    b.disabled = req;
+    b.classList.toggle("gate-disabled", req);
+  });
+  if(req){
+    $("#save").title = "Preencha o meas_date do exame (botão ⚙ Config) antes de salvar.";
+    $("#loadsaved").title = "Preencha o meas_date do exame (botão ⚙ Config) antes de continuar.";
+  }
+  $("#cfgcancel").hidden = req;
+  $("#cfgclear").hidden = req;
+  $("#cfgreqmsg").hidden = !req;
+}
+function openCfg(forced){
   if(!S.info) return;
   $("#cfgexam").textContent = S.exam;
   $("#cfghipno").textContent = S.info.hipno_start || "—";
@@ -621,10 +672,14 @@ function openCfg(){
   $("#cfgmatwarn").hidden = !!S.info.has_mat;
   $("#cfgmsg").textContent = "";
   cfgPreview();
+  updateCfgGate();
   $("#cfgpanel").hidden = false;
   $("#cfgmeas").focus();
 }
-function closeCfg(){ $("#cfgpanel").hidden = true; }
+function closeCfg(){
+  if(S.cfgRequired){ $("#cfgmsg").textContent = "meas_date é obrigatório para este exame — preencha antes de continuar."; return; }
+  $("#cfgpanel").hidden = true;
+}
 async function saveCfg(meas_date){
   return await jpost("/api/config", {exam:S.exam, meas_date});
 }
@@ -632,23 +687,27 @@ async function reloadExamSafe(){
   try { await selectExam(S.exam); }
   catch(e){ console.error("reload apos config:", e); $("#savemsg").textContent="⚠ erro ao recarregar: "+e.message; }
 }
-$("#cfgbtn").onclick=openCfg;
+$("#cfgbtn").onclick=()=>openCfg(false);
 $("#cfgcancel").onclick=closeCfg;
 $("#cfgpanel").onclick=e=>{ if(e.target.id==="cfgpanel") closeCfg(); };
 $("#cfgmeas").addEventListener("input",cfgPreview);
 $("#cfgsave").onclick=async()=>{
   const md=$("#cfgmeas").value.trim();
+  if(!md){ $("#cfgmsg").textContent="meas_date é obrigatório — informe HH:MM:SS."; return; }
   if(hmsToSec(md)==null){ $("#cfgmsg").textContent="Formato inválido — use HH:MM:SS."; return; }
   let r;
   try { r=await saveCfg(md); }
   catch(e){ $("#cfgmsg").textContent="Erro ao salvar: "+e.message; return; }
   $("#cfgmsg").innerHTML = r.has_offset
     ? `✓ offset salvo: annot_start=${r.annot_start.toFixed(0)}s. CSV sairá em tempo do EDF.`
-    : "⚠ Não foi possível calcular (falta hyp_&lt;exame&gt;.mat em view/mat/).";
-  closeCfg();
+    : "⚠ meas_date salvo, mas não foi possível calcular o offset (falta hyp_&lt;exame&gt;.mat em view/mat/). CSV sairá em tempo do .pt.";
+  S.cfgRequired = false;
+  updateCfgGate();
+  $("#cfgpanel").hidden = true;
   reloadExamSafe();
 };
 $("#cfgclear").onclick=async()=>{
+  if(S.cfgRequired) return;  // nao deveria ser clicavel neste estado (botao escondido), guarda extra
   $("#cfgmeas").value="";
   try { await saveCfg(null); }
   catch(e){ $("#cfgmsg").textContent="Erro: "+e.message; return; }
@@ -658,7 +717,7 @@ $("#cfgclear").onclick=async()=>{
 };
 
 document.addEventListener("keydown",ev=>{
-  if($("#cfgpanel") && !$("#cfgpanel").hidden){ if(ev.key==="Escape")closeCfg(); return; }
+  if($("#cfgpanel") && !$("#cfgpanel").hidden){ if(ev.key==="Escape" && !S.cfgRequired)closeCfg(); return; }
   if(ev.target && ev.target.tagName==="INPUT") return;
   if(ev.key==="ArrowLeft"){ S.mode==="full"?pageBy(-1):selectEvent(S.cur-1,true); }
   else if(ev.key==="ArrowRight"){ S.mode==="full"?pageBy(1):selectEvent(S.cur+1,true); }

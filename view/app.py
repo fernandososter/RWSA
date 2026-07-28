@@ -180,6 +180,63 @@ def _prepare(exam_name):
     return st
 
 
+def _load_saved_events(exam_name):
+    """Le view/revisado/<exame>_revisado.csv (se existir) e devolve os eventos
+    ja mantidos (tonico/fasico) convertidos para tempo do .pt, no mesmo formato
+    de _events_payload (id, onset_s, onset_edf, duration_s, score, epoch_start,
+    epoch_end, stage, suggestion) — pronto pra virar S.events no frontend.
+
+    Mesma convencao de offset do classifier/apply_labels.py: se o annot_start
+    do exame e conhecido AGORA, assume-se que o CSV foi salvo em tempo do EDF
+    (pt_onset = onset_s - annot_start); senao, assume-se que onset_s ja esta
+    em tempo do .pt (o CSV so sai em tempo do .pt quando nao havia offset
+    conhecido no momento do save — mesmo caso do apply_labels.py --time-ref auto).
+    Devolve None se o arquivo nao existe.
+    """
+    path = CFG["out_dir"] / f"{exam_name}_revisado.csv"
+    if not path.exists():
+        return None
+    st = _prepare(exam_name)
+    a0 = st.get("annot_start")
+    es = EPOCH_SEC
+    T = st["n_epochs"]
+    raw = []
+    with open(path, newline="") as f:
+        for d in csv.DictReader(f):
+            if d.get("type") not in ("tonic", "phasic"):
+                continue
+            onset_s = float(d["onset_s"])
+            pt_onset = onset_s - a0 if a0 is not None else onset_s
+            score = d.get("score")
+            raw.append({
+                "onset_s": pt_onset,
+                "duration_s": float(d["duration_s"]),
+                "type": d["type"],
+                "score": float(score) if score not in (None, "") else None,
+            })
+    raw.sort(key=lambda r: r["onset_s"])
+
+    out = []
+    for i, r in enumerate(raw):
+        e0 = max(0, int(round(r["onset_s"] / es)))
+        e1 = min(T, max(e0 + 1, int(round((r["onset_s"] + r["duration_s"]) / es))))
+        stages = st["stages"][e0:e1]
+        vals, cnts = np.unique(stages, return_counts=True) if len(stages) else ([], [])
+        dom = int(vals[np.argmax(cnts)]) if len(vals) else -1
+        onset_edf = round(r["onset_s"] + a0, 1) if a0 is not None else None
+        out.append({
+            "id": i,
+            "onset_s": round(r["onset_s"], 1),
+            "onset_edf": onset_edf,
+            "duration_s": round(r["duration_s"], 1),
+            "score": round(r["score"], 3) if r["score"] is not None else None,
+            "epoch_start": e0, "epoch_end": e1,
+            "stage": STAGE_NAMES.get(dom, "?"),
+            "suggestion": r["type"],
+        })
+    return out
+
+
 STAGE_NAMES = {0: "W", 1: "N1", 2: "N2", 3: "N3", 4: "REM", -1: "?"}
 
 
@@ -247,6 +304,7 @@ class Handler(BaseHTTPRequestHandler):
             if u.path == "/api/exam":
                 name = q["name"][0]
                 st = _prepare(name)
+                saved_path = CFG["out_dir"] / f"{name}_revisado.csv"
                 return self._send(200, {
                     "subject_id": st["subject_id"],
                     "n_epochs": st["n_epochs"],
@@ -259,8 +317,17 @@ class Handler(BaseHTTPRequestHandler):
                     "has_mat": st.get("has_mat", False),
                     "hipno_start": _sec_to_hms(st.get("hipno_start")),
                     "meas_date": st.get("meas_date"),
+                    "has_saved": saved_path.exists(),
                     "events": _events_payload(st),
                 })
+
+            if u.path == "/api/saved":
+                name = q["name"][0]
+                rows = _load_saved_events(name)
+                if rows is None:
+                    return self._send(200, {"exists": False, "events": []})
+                return self._send(200, {"exists": True, "events": rows,
+                                        "path": str(CFG["out_dir"] / f"{name}_revisado.csv")})
 
             if u.path == "/api/signal":
                 name = q["name"][0]
@@ -331,6 +398,10 @@ class Handler(BaseHTTPRequestHandler):
                 name = payload["exam"]
                 decisions = payload["decisions"]  # [{onset_s,duration_s,label,score}]
                 st = _prepare(name)
+                if not st.get("meas_date"):
+                    return self._send(400, {
+                        "error": "meas_date obrigatorio e ainda nao preenchido para este exame. "
+                                 "Configure em \u2699 Config antes de salvar."})
                 a0 = st.get("annot_start")
                 CFG["out_dir"].mkdir(parents=True, exist_ok=True)
                 out = CFG["out_dir"] / f"{name}_revisado.csv"

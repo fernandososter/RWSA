@@ -23,6 +23,19 @@ Cada evento já vem pré-rotulado a partir dos `tonic_labels`/`phasic_labels` do
 (quando existem). Eventos que o modelo detectou mas o `.pt` não marcava aparecem
 como `movement` — são os candidatos novos a revisar.
 
+### 📂 Abrir anotações salvas
+Ao abrir um `.pt`, a app sempre parte das sugestões originais (rótulos do `.pt` +
+detecções do modelo) — **não** carrega automaticamente uma revisão salva anteriormente.
+Se você já salvou um CSV para aquele exame (`view/revisado/<exame>_revisado.csv`),
+o botão **📂 Abrir anotações salvas** no topo fica destacado (borda verde) e, ao
+clicar, substitui a lista de eventos atual pelas anotações tônico/fásico já
+confirmadas naquele CSV (após confirmação, pois descarta qualquer edição não
+salva feita na sessão atual). Os onsets são reconvertidos para o tempo do `.pt`
+usando o mesmo `annot_start` do exame — a mesma lógica de offset usada pelo
+`classifier/apply_labels.py`. Eventos manuais e mini-épocas com score alto que
+ficaram fora do CSV salvo (porque foram descartadas na revisão) não voltam —
+o CSV é a fonte da verdade de "o que foi confirmado".
+
 ### Faixa de probabilidade
 Abaixo do traçado de EMG, uma segunda faixa mostra a **probabilidade contínua do
 modelo** (0–1) por mini-época — não só o rótulo binário acima/abaixo do limiar.
@@ -82,8 +95,19 @@ ponto onde o preprocessamento cortou o sinal.
   `view/exam_config.json`. O offset é calculado na hora.
 
 Não há passo externo nem arquivo de offsets a pré-gerar: abriu o exame → digitou o
-`meas_date` → o CSV já sai no tempo do EDF. Enquanto o `meas_date` não for informado,
-a app funciona normalmente mas **avisa** ("⚠ sem offset") e o CSV sai em tempo do `.pt`.
+`meas_date` → o CSV já sai no tempo do EDF.
+
+**`meas_date` é obrigatório.** Ao abrir um exame que ainda não tem `meas_date`
+salvo em `view/exam_config.json`, o painel **⚙ Config** abre automaticamente e
+**não pode ser fechado** (nem por "Fechar", nem por `Esc`, nem clicando fora)
+até você informar o horário. Enquanto isso, os botões **Salvar CSV revisado** e
+**📂 Abrir anotações salvas** ficam desabilitados — evita revisar um exame
+inteiro e só descobrir depois, na hora de salvar, que faltava o offset. O
+backend (`/api/save`) também recusa a gravação (HTTP 400) se `meas_date` não
+estiver preenchido, mesmo que a checagem do frontend seja contornada.
+Se o `.mat` do hipnograma não existir em `view/mat/`, o `meas_date` ainda é
+salvo (fica registrado), mas o offset não pode ser calculado — o CSV sai em
+tempo do `.pt` com aviso, como antes. do `.pt`.
 
 > Onde achar o `meas_date`: é o horário no cabeçalho do EDF. Se não souber de cabeça:
 > `python -c "import mne;print(mne.io.read_raw_edf('rbd1.edf',preload=False).info['meas_date'])"`

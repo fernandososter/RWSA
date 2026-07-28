@@ -53,5 +53,105 @@
     "meas_date": "21:52:54",
     "annot_start": 240.0,
     "hipno_start": "21:56:54"
+  },
+  "rbd13": {
+    "meas_date": "22:19:06",
+    "annot_start": 0.0,
+    "hipno_start": "22:19:06"
+  },
+  "rbd14": {
+    "meas_date": "22:10:58",
+    "annot_start": 86370.0,
+    "hipno_start": "22:10:28"
+  },
+  "rbd15": {
+    "meas_date": "18:01:25",
+    "annot_start": 16200.0,
+    "hipno_start": "22:31:25"
+  },
+  "rbd16": {
+    "meas_date": "22:15:16",
+    "annot_start": 30.0,
+    "hipno_start": "22:15:46"
+  },
+  "rbd17": {
+    "meas_date": "21:54:31",
+    "annot_start": 120.0,
+    "hipno_start": "21:56:31"
+  },
+  "rbd18": {
+    "meas_date": "22:02:52",
+    "annot_start": 2880.0,
+    "hipno_start": "22:50:52"
+  },
+  "rbd19": {
+    "meas_date": "22:07:54",
+    "annot_start": 90.0,
+    "hipno_start": "22:09:24"
+  },
+  "rbd20": {
+    "meas_date": "22:26:03",
+    "annot_start": 1380.0,
+    "hipno_start": "22:49:03"
+  },
+  "rbd21": {
+    "meas_date": "22:47:17",
+    "annot_start": 84660.0,
+    "hipno_start": "22:18:17"
+  },
+  "rbd22": {
+    "meas_date": "22:42:52",
+    "annot_start": 3260.0,
+    "hipno_start": "23:37:12"
+  },
+  "rbd10": {
+    "meas_date": "22:09:22",
+    "annot_start": 30.0,
+    "hipno_start": "22:09:52"
+  },
+  "n1": {
+    "meas_date": "22:06:03",
+    "annot_start": 210.0,
+    "hipno_start": "22:09:33"
+  },
+  "n10": {
+    "meas_date": "22:24:52",
+    "annot_start": 3600.0,
+    "hipno_start": "23:24:52"
+  },
+  "n11": {
+    "meas_date": "22:36:46",
+    "annot_start": 30.0,
+    "hipno_start": "22:37:16"
+  },
+  "n13": {
+    "meas_date": "21:39:18",
+    "annot_start": 270.0,
+    "hipno_start": "21:43:48"
+  },
+  "n14": {
+    "meas_date": "22:09:32",
+    "annot_start": 360.0,
+    "hipno_start": "22:15:32"
+  },
+  "n15": {
+    "meas_date": "21:55:22",
+    "annot_start": 240.0,
+    "hipno_start": "21:59:22"
+  },
+  "n2": {
+    "meas_date": "19:12:06",
+    "annot_start": 11220.0,
+    "hipno_start": "22:19:06"
+  },
+  "n3": {
+    "meas_date": "22:15:42",
+    "annot_start": 3030.0,
+    "hipno_start": "23:06:12"
+  },
+  "n5": {
+    "meas_date": "22:29:48",
+    "annot_start": 1200.0,
+    "hipno_start": "22:49:48"
   }
 }
