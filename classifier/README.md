@@ -30,9 +30,13 @@ python classifier/apply_labels.py               # aplica de fato, com backup aut
 
 # 2 - TRAIN LOSO
 python classifier/train_loso.py
+ou 
+python classifier/train_loso.py --n-folds 6      # ~8h estimadas, roda em background
 
 # 3 - EVALUATE
 python classifier/evaluate_loso.py
+ou
+python classifier/evaluate_loso.py --target-event-recall 0.90   # ou o alvo que preferir
 
 # 4 - TREINAMENTO FINAL
 python classifier/train_final.py

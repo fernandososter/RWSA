@@ -153,5 +153,65 @@
     "meas_date": "22:29:48",
     "annot_start": 1200.0,
     "hipno_start": "22:49:48"
+  },
+  "ins1": {
+    "meas_date": "18:05:58",
+    "annot_start": 15870.0,
+    "hipno_start": "22:30:28"
+  },
+  "ins2": {
+    "meas_date": "18:25:37",
+    "annot_start": 1.0,
+    "hipno_start": "18:25:38"
+  },
+  "ins3": {
+    "meas_date": "20:39:02",
+    "annot_start": 4900.0,
+    "hipno_start": "22:00:42"
+  },
+  "ins4": {
+    "meas_date": "18:07:34",
+    "annot_start": 12390.0,
+    "hipno_start": "21:34:04"
+  },
+  "ins5": {
+    "meas_date": "17:58:48",
+    "annot_start": 0.0,
+    "hipno_start": "17:58:48"
+  },
+  "ins6": {
+    "meas_date": "18:46:57",
+    "annot_start": 13820.0,
+    "hipno_start": "22:37:17"
+  },
+  "ins7": {
+    "meas_date": "19:58:14",
+    "annot_start": 0.0,
+    "hipno_start": "19:58:14"
+  },
+  "ins8": {
+    "meas_date": "22:16:34",
+    "annot_start": 1590.0,
+    "hipno_start": "22:43:04"
+  },
+  "ins9": {
+    "meas_date": "22:28:44",
+    "annot_start": 0.0,
+    "hipno_start": "22:28:44"
+  },
+  "ADRYAN.SANTANA DE LIMA.11-12-2018 22.00.50": {
+    "meas_date": "22:04:33",
+    "annot_start": null,
+    "hipno_start": null
+  },
+  "plm1": {
+    "meas_date": "21:58:23",
+    "annot_start": 0.0,
+    "hipno_start": "21:58:23"
+  },
+  "plm10": {
+    "meas_date": "22:41:46",
+    "annot_start": 30.0,
+    "hipno_start": "22:42:16"
   }
 }
