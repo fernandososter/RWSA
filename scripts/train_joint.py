@@ -26,6 +26,10 @@ from sleep_rswa.training import (
     seed_everything,
 )
 
+GREEN  = "\033[92m"
+YELLOW = "\033[93m"
+RESET  = "\033[0m"
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -171,8 +175,15 @@ def main() -> None:
                 f"ep={epoch:03d} train={train_time:.1f}s val={val_time:.1f}s "
                 f"train_stg_loss={row['train_staging_loss']:.4f} "
                 f"train_rswa_loss={row['train_rswa_loss']:.4f} | "
+                f"{YELLOW}"
                 f"val_stg_f1={val_metrics.get('staging_f1_macro', float('nan')):.4f} "
-                f"val_rswa_f1={val_metrics.get('rswa_rswa_f1_macro', float('nan')):.4f}"
+                f"val_stg_kappa={val_metrics.get('staging_kappa', float('nan')):.4f} "
+                f"val_rswa_f1={val_metrics.get('rswa_rswa_f1_macro', float('nan')):.4f} "
+                f"{GREEN}"
+                f"val_tonic_kappa={val_metrics.get('rswa_tonic_kappa', float('nan')):.4f} "
+                f"val_phasic_kappa={val_metrics.get('rswa_phasic_kappa', float('nan')):.4f} "
+                f"val_rswa_kappa={val_metrics.get('rswa_rswa_kappa_macro', float('nan')):.4f}"
+                f"{RESET}"
             )
 
             save_checkpoint(
