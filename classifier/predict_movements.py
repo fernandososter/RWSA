@@ -20,12 +20,26 @@ noite). Se ja souber o offset em segundos, use --annot-start diretamente
 (tem prioridade sobre o par --meas-date/--hipno-start). Sem nenhum desses,
 `onset_s` sai em tempo do .pt, como sempre.
 
+Opcionalmente (--tonic-phasic, ligado por padrao), roda tambem a regra
+deterministica de duracao+amplitude (classifier/movement_clf/tonic_phasic.py)
+restrita aos trechos ja marcados como movimento pela CNN, e grava um
+SEGUNDO csv (<out>_tonico_fasico.csv) com colunas:
+
+    subject_id, onset_s, duration_s, type, peak_ratio, needs_review
+
+`type` e 'phasic' (rotulo final) ou 'tonic_candidate' (NUNCA final --
+needs_review=True sempre). Ver RELATORIO.md para a justificativa: a regra
+nao consegue, matematicamente, separar tonus tonico real de artefato de
+movimento sustentado usando so duracao+amplitude do EMG; por isso todo
+candidato a tonico exige confirmacao visual antes de virar rotulo.
+
 Uso:
     python classifier/predict_movements.py EXAME.pt [-o SAIDA.csv]
                  [--model CKPT.pt] [--threshold 0.5] [--min-epochs 1]
                  [--device auto|cpu|cuda|cuda:N]
                  [--meas-date HH:MM:SS --hipno-start HH:MM:SS]
                  [--annot-start SEGUNDOS]
+                 [--no-tonic-phasic]
 
 Este modulo NAO importa nada de src/sleep_rswa nem de view/ — o par
 meas-date/hipno-start e resolvido localmente, sem ler view/exam_config.json
@@ -50,8 +64,29 @@ from classifier.movement_clf.dataio import load_exam, zscore_emg, events_from_bi
 from classifier.movement_clf.dataset import build_tensors
 from classifier.movement_clf.model import MovementCNN
 from classifier.movement_clf.engine import resolve_device
+from classifier.movement_clf.tonic_phasic import classify_tonic_phasic, restrict_to_movement
 
 DEFAULT_MODEL = HERE / "outputs" / "movement_cnn_final.pt"
+
+
+def predict_tonic_phasic(exam, movement_mask, annot_start: float | None = None):
+    """Roda a regra deterministica de fasico/candidato-tonico sobre o EMG bruto,
+    restrita aos trechos que a CNN ja marcou como movimento.
+
+    exam: Exam (de load_exam), usa exam.emg [T,300] -> flatten para EMG continuo.
+    movement_mask: [T] bool, mascara de movimento por mini-epoca (mask do CNN).
+    Devolve lista de eventos com onset_s/duration_s/type/peak_ratio/needs_review.
+    """
+    flat = exam.emg.reshape(-1).astype(float)  # [T*300], fs=100Hz, mesmo referencial do exam
+    events = classify_tonic_phasic(flat)
+    events = restrict_to_movement(events, movement_mask, epoch_sec=EPOCH_SEC)
+    for e in events:
+        e["subject_id"] = exam.subject_id
+        e["needs_review"] = (e["type"] == "tonic_candidate")
+    if annot_start is not None:
+        for e in events:
+            e["onset_s"] = round(e["onset_s"] + annot_start, 3)
+    return events
 
 
 def _hms_to_sec(s):
@@ -121,7 +156,8 @@ def score_exam(model, exam, window_epochs: int, batch_size: int = 512, device: s
 
 def predict_to_csv(pt_path, out_csv, model_path=DEFAULT_MODEL, threshold=None,
                    min_epochs: int = 1, verbose: bool = True, device: str = "cpu",
-                   annot_start: float | None = None):
+                   annot_start: float | None = None, tonic_phasic: bool = True,
+                   out_csv_tonic_phasic=None):
     """Roda a inferencia e grava o CSV de eventos.
 
     annot_start: offset em segundos (onset_edf = onset_s_pt + annot_start).
@@ -129,6 +165,12 @@ def predict_to_csv(pt_path, out_csv, model_path=DEFAULT_MODEL, threshold=None,
     do .pt (mini-epoca 0 = inicio do tensor), como antes. Use
     resolve_annot_start(...) para obter esse valor a partir de
     --meas-date/--hipno-start ou passar --annot-start diretamente.
+
+    tonic_phasic: se True (default), roda tambem a regra deterministica de
+    duracao+amplitude (movement_clf.tonic_phasic) restrita aos trechos de
+    movimento, e grava um segundo CSV em out_csv_tonic_phasic (default:
+    <out_csv>_tonico_fasico.csv). 'phasic' e rotulo final; 'tonic_candidate'
+    NUNCA e final e sempre tem needs_review=True (ver RELATORIO.md).
     """
     model, ckpt = load_model(Path(model_path), device=device)
     window = ckpt.get("window_epochs", 5)
@@ -158,12 +200,30 @@ def predict_to_csv(pt_path, out_csv, model_path=DEFAULT_MODEL, threshold=None,
         for e in events:
             w.writerow(e)
 
+    tp_events = None
+    if tonic_phasic:
+        tp_events = predict_tonic_phasic(exam, mask, annot_start=annot_start)
+        out_tp = Path(out_csv_tonic_phasic) if out_csv_tonic_phasic else \
+            out_csv.with_name(out_csv.stem + "_tonico_fasico.csv")
+        out_tp.parent.mkdir(parents=True, exist_ok=True)
+        with open(out_tp, "w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=["subject_id", "onset_s", "duration_s",
+                                              "type", "peak_ratio", "needs_review"])
+            w.writeheader()
+            for e in tp_events:
+                w.writerow(e)
+
     if verbose:
         time_ref = "tempo EDF" if annot_start is not None else "tempo .pt"
         print(f"{exam.subject_id}: {exam.n_epochs} mini-epocas ({exam.hours:.1f}h), "
               f"limiar={threshold:.3f} -> {int(mask.sum())} mini-epocas positivas, "
               f"{len(events)} eventos ({time_ref}) -> {out_csv}")
-    return events, scores
+        if tonic_phasic:
+            n_phasic = sum(1 for e in tp_events if e["type"] == "phasic")
+            n_cand = sum(1 for e in tp_events if e["type"] == "tonic_candidate")
+            print(f"  tonico/fasico: {n_phasic} fasico (final), "
+                  f"{n_cand} candidato-tonico (precisa revisao) -> {out_tp}")
+    return events, scores, tp_events
 
 
 def main():
@@ -182,6 +242,8 @@ def main():
     ap.add_argument("--annot-start", type=float, default=None,
                      help="offset onset_pt->onset_edf em segundos, se ja souber (tem "
                           "prioridade sobre --meas-date/--hipno-start)")
+    ap.add_argument("--no-tonic-phasic", action="store_true",
+                     help="nao gerar o CSV de sub-classificacao fasico/candidato-tonico")
     args = ap.parse_args()
     device = resolve_device(args.device)
 
@@ -194,7 +256,8 @@ def main():
     pt = Path(args.pt)
     out = args.out or str(pt.with_name(pt.stem + "_movimentos.csv"))
     predict_to_csv(pt, out, model_path=args.model, threshold=args.threshold,
-                   min_epochs=args.min_epochs, device=device, annot_start=annot_start)
+                   min_epochs=args.min_epochs, device=device, annot_start=annot_start,
+                   tonic_phasic=not args.no_tonic_phasic)
 
 
 if __name__ == "__main__":

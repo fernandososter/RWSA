@@ -10,6 +10,7 @@
     --move:#ff8a3d; --movebg:rgba(255,138,61,.18);
     --tonic:#4da3ff; --phasic:#c77dff; --del:#ff5d6c; --ok:#39d98a;
     --manual:#ffd166; --line:#7fd4ff; --grid:#243444; --prob:#5eead4;
+    --candidate:#ffb454; --review:#ff5d6c;
   }
   * { box-sizing:border-box; }
   body { margin:0; font:14px/1.4 -apple-system,Segoe UI,Roboto,sans-serif;
@@ -56,10 +57,12 @@
   .evrow.active { border-color:var(--move); background:#20140a; }
   .evrow .lab { font-size:11px; padding:1px 6px; border-radius:10px; text-align:center; }
   .lab.tonic { background:var(--tonic); color:#04121f; }
+  .lab.tonic_candidate { background:var(--candidate); color:#241800; }
   .lab.phasic { background:var(--phasic); color:#180a24; }
   .lab.deleted { background:#3a2225; color:var(--del); text-decoration:line-through; }
   .lab.movement { background:#33251a; color:var(--move); }
   .mtag { font-size:10px; color:var(--manual); border:1px solid var(--manual); border-radius:8px; padding:0 4px; margin-left:4px; }
+  .rtag { font-size:10px; color:var(--review); border:1px solid var(--review); border-radius:8px; padding:0 4px; margin-left:4px; font-weight:600; }
   .progress { font-size:12px; color:var(--muted); margin-bottom:8px; }
   kbd { background:#22303d; border:1px solid var(--grid); border-bottom-width:2px; border-radius:4px;
         padding:1px 6px; font-size:11px; }
@@ -86,6 +89,25 @@
   .mono { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
   .cfgactions { display:flex; gap:8px; align-items:center; margin-top:14px; }
   .btn-ok { background:var(--ok); color:#04120b; border-color:var(--ok); font-weight:600; }
+
+  /* ---- filtros da lista de eventos ---- */
+  .filters { display:flex; flex-direction:column; gap:6px; margin-bottom:10px; }
+  .filters select { width:100%; }
+  .filters label { font-size:11px; color:var(--muted); }
+
+  /* ---- modal de selecao de arquivo de anotacoes ---- */
+  .filelist { display:flex; flex-direction:column; gap:6px; max-height:50vh; overflow:auto; margin:10px 0; }
+  .filerow { display:flex; align-items:center; gap:10px; padding:8px 10px; border-radius:8px;
+             background:#141f29; border:1px solid var(--grid); cursor:pointer; }
+  .filerow:hover { border-color:var(--line); }
+  .filerow .fname { flex:1; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12.5px; }
+  .filerow .fmeta { font-size:11px; color:var(--muted); white-space:nowrap; }
+  .kindtag { font-size:10px; padding:2px 7px; border-radius:10px; white-space:nowrap; font-weight:600; }
+  .kindtag.movimento { background:#33251a; color:var(--move); }
+  .kindtag.tonico_fasico { background:#241a33; color:var(--phasic); }
+  .kindtag.revisado { background:#0f2b20; color:var(--ok); }
+  .kindtag.outro { background:#22303d; color:var(--muted); }
+  .fileempty { color:var(--muted); font-size:13px; padding:10px 0; }
 </style>
 </head>
 <body>
@@ -96,10 +118,24 @@
   <span id="offmeta" class="pill"></span>
   <span style="flex:1"></span>
   <button id="cfgbtn" title="Configurar tempo do EDF">⚙ Config</button>
-  <button id="loadsaved" title="Substitui a lista de eventos pelas anotações já salvas em view/revisado/">📂 Abrir anotações salvas</button>
+  <button id="loadsaved" title="Escolher um arquivo de anotações (movimento, fásico/tônico-candidato, ou já revisado) para carregar">📂 Abrir arquivo de anotações</button>
   <button id="save">Salvar CSV revisado</button>
   <span id="savemsg" class="pill"></span>
 </header>
+<div id="openpanel" class="cfgpanel" hidden>
+  <div class="cfgcard">
+    <div class="cfgtitle">Abrir anotações — exame <b id="openexam">—</b></div>
+    <p class="cfghint">Arquivos encontrados em <code>view/revisado/</code> (já revisados por este app) e
+       <code>classifier/outputs/</code> (saída de <code>predict_movements.py</code>: movimento binário e
+       sub-classificação fásico/candidato-tônico). Escolher um substitui a lista de eventos atual.</p>
+    <div class="filelist" id="openfilelist"></div>
+    <div class="cfgactions">
+      <span style="flex:1"></span>
+      <button id="opencancel">Fechar</button>
+    </div>
+    <div id="openmsg" class="cfghint"></div>
+  </div>
+</div>
 <div id="cfgpanel" class="cfgpanel" hidden>
   <div class="cfgcard">
     <div class="cfgtitle">Tempo do EDF — exame <b id="cfgexam">—</b></div>
@@ -179,6 +215,27 @@
     <div class="evinfo" id="editHint" hidden>✂ <b>Modo edição de janelas</b>: clique numa mini-época dentro de um evento para incluí-la/excluí-la. Ao salvar, cada trecho contínuo restante do evento vira uma linha própria no CSV.</div>
   </section>
   <aside>
+    <div class="filters">
+      <div>
+        <label for="filtType">Tipo</label>
+        <select id="filtType">
+          <option value="all">Todos os tipos</option>
+          <option value="tonic">Tônico (confirmado)</option>
+          <option value="tonic_candidate">Candidato a tônico</option>
+          <option value="phasic">Fásico</option>
+          <option value="movement">Movimento (sem sub-classificação)</option>
+          <option value="deleted">Apagado</option>
+        </select>
+      </div>
+      <div>
+        <label for="filtReview">Revisão</label>
+        <select id="filtReview">
+          <option value="all">Todos</option>
+          <option value="needs">Precisam de revisão</option>
+          <option value="no">Não precisam de revisão</option>
+        </select>
+      </div>
+    </div>
     <div class="progress" id="progress">—</div>
     <div class="evlist" id="evlist"></div>
   </aside>
@@ -209,7 +266,7 @@ async function selectExam(name){
   $("#meta").textContent = "carregando…";
   const info = await jget("/api/exam?name="+encodeURIComponent(name));
   S.info = info; S.events = info.events.slice(); S.decisions = {}; S.cur = 0; S.winEp = 0; S.excluded = {};
-  info.events.forEach(e => { e.manual=false; S.decisions[e.id] = e.suggestion; }); // pre-sugestao do .pt
+  info.events.forEach(e => { e.manual=false; e.needs_review = !!e.needs_review; S.decisions[e.id] = e.suggestion; }); // pre-sugestao do .pt
   $("#meta").textContent = `${info.subject_id} · ${info.hours} h · ${info.n_events} eventos · limiar ${info.threshold}`;
   $("#offmeta").className = "pill" + (info.has_offset ? "" : " warn");
   $("#offmeta").textContent = info.has_offset
@@ -231,8 +288,13 @@ async function selectExam(name){
 }
 
 function decLabel(id){ return S.decisions[id] || "movement"; }
-function labColor(lab){ return lab==="tonic"?getCss("--tonic"):lab==="phasic"?getCss("--phasic")
+function labColor(lab){ return lab==="tonic"?getCss("--tonic"):lab==="tonic_candidate"?getCss("--candidate")
+                              :lab==="phasic"?getCss("--phasic")
                               :lab==="deleted"?getCss("--del"):getCss("--move"); }
+function labLetter(lab){ return lab==="tonic_candidate" ? "C" : (lab[0]||"?").toUpperCase(); }
+// evento precisa de revisao humana: vem explicito do CSV (needs_review), com fallback
+// para o proprio rotulo (candidato-tonico sempre precisa; qualquer outro so se marcado).
+function needsReview(e){ return e.needs_review === true || decLabel(e.id) === "tonic_candidate"; }
 
 // ---------- edicao de janelas dentro de um evento ----------
 // S.excluded: eventId -> Set(epoch_abs) removidas de dentro do evento (evento fundido pode ter
@@ -268,9 +330,25 @@ function segmentsForEvent(e){
 function fmt(s){ const m=Math.floor(s/60), ss=(s%60).toFixed(0).padStart(2,"0"); return `${m}:${ss}`; }
 function getCss(v){ return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
 
+// Filtros da sidebar: nao alteram S.events (a navegacao ◀▶ e os atalhos T/F/D/A
+// continuam operando sobre a lista completa) — so decidem quais linhas aparecem
+// na lista lateral e sao usados para destacar (nao esconder) o evento atual no traçado.
+function passesFilters(e){
+  const ft = $("#filtType").value;
+  const fr = $("#filtReview").value;
+  const lab = decLabel(e.id);
+  if(ft!=="all" && lab!==ft) return false;
+  if(fr==="needs" && !needsReview(e)) return false;
+  if(fr==="no" && needsReview(e)) return false;
+  return true;
+}
+
 function renderList(){
   const box = $("#evlist"); box.innerHTML = "";
+  let nShown = 0;
   S.events.forEach((e,idx) => {
+    if(!passesFilters(e)) return;
+    nShown++;
     const row = document.createElement("div");
     row.className = "evrow" + (idx===S.cur ? " active":"");
     const lab = decLabel(e.id);
@@ -278,18 +356,25 @@ function renderList(){
     const tedf = e.onset_edf!=null ? ` · EDF ${fmt(e.onset_edf)}` : "";
     const sc = e.score==null ? "—" : e.score;
     const mtag = e.manual ? `<span class="mtag">manual</span>` : "";
+    const rtag = needsReview(e) ? `<span class="rtag">revisar</span>` : "";
     const nexcl = S.excluded[e.id] ? S.excluded[e.id].size : 0;
     const etag = nexcl ? `<span class="etag">${nexcl} janela${nexcl>1?"s":""} excluída${nexcl>1?"s":""}</span>` : "";
-    row.innerHTML = `<span class="lab ${labcls}">${lab==="deleted"?"✕":lab[0].toUpperCase()}</span>
-      <span>#${idx+1} · ${fmt(e.onset_s)} (${e.duration_s}s)${mtag}${etag}<br><small style="color:var(--muted)">${e.stage}${tedf} · score ${sc}</small></span>
+    row.innerHTML = `<span class="lab ${labcls}">${lab==="deleted"?"✕":labLetter(lab)}</span>
+      <span>#${idx+1} · ${fmt(e.onset_s)} (${e.duration_s}s)${mtag}${rtag}${etag}<br><small style="color:var(--muted)">${e.stage}${tedf} · score ${sc}</small></span>
       <span style="color:var(--muted)">›</span>`;
     row.onclick = () => selectEvent(idx, true);
     box.appendChild(row);
   });
+  if(nShown===0 && S.events.length>0){
+    box.innerHTML = `<div class="fileempty">Nenhum evento corresponde aos filtros atuais.</div>`;
+  }
   const done = Object.values(S.decisions).filter(v=>v!=="movement").length;
   const kept = Object.values(S.decisions).filter(v=>v==="tonic"||v==="phasic").length;
   const nman = S.events.filter(e=>e.manual).length;
-  $("#progress").textContent = `${done}/${S.events.length} revisados · ${kept} mantidos (tônico/fásico)` + (nman?` · ${nman} manuais`:"");
+  const nreview = S.events.filter(needsReview).length;
+  const filtTxt = nShown!==S.events.length ? ` · mostrando ${nShown} (filtro ativo)` : "";
+  $("#progress").textContent = `${done}/${S.events.length} revisados · ${kept} mantidos (tônico/fásico)`
+      + (nman?` · ${nman} manuais`:"") + (nreview?` · ${nreview} p/ revisar`:"") + filtTxt;
 }
 
 // ---------- carregamento de janela / desenho ----------
@@ -444,6 +529,7 @@ function drawHyp(){
 function setLabel(lab){
   const e=S.events[S.cur]; if(!e) return;
   S.decisions[e.id]=lab;
+  e.needs_review = false; // T/F/D e a propria acao de revisao humana: o evento deixa de precisar dela
   if(S.mode==="events" && lab!=="deleted" && S.cur < S.events.length-1){ selectEvent(S.cur+1, true); }
   else { updateInfo(); draw(); drawHyp(); renderList(); }
 }
@@ -467,7 +553,7 @@ function addEvent(ep0, ep1){
   const onset_edf = S.info.has_offset ? Math.round((onset_s+S.info.annot_start)*10)/10 : null;
   const id=S.nextId++;
   const e={ id, onset_s, onset_edf, duration_s, score:null, epoch_start:ep0, epoch_end:ep1,
-            stage:domStageForEpochs(ep0,ep1), suggestion:"phasic", manual:true };
+            stage:domStageForEpochs(ep0,ep1), suggestion:"phasic", manual:true, needs_review:false };
   S.events.push(e);
   S.events.sort((a,b)=>a.onset_s-b.onset_s);
   S.decisions[id]="phasic"; // manual entra como mantido; ajuste com T/F ou apague com D
@@ -593,6 +679,13 @@ hyp.addEventListener("click", evt=>{
   }
 });
 $("#save").onclick=async()=>{
+  // /api/save so grava linhas com label tonic/phasic — qualquer coisa "pendente"
+  // (movement, tonic_candidate ainda nao revisado) e descartada silenciosamente
+  // no CSV final. Avisa antes, pois um candidato-tonico esquecido nunca deveria
+  // sumir sem o usuario perceber.
+  const pending = S.events.filter(needsReview).length;
+  if(pending>0 && !confirm(`Ainda há ${pending} evento(s) marcado(s) como "precisa revisar" (candidato a tônico) `+
+      `sem decisão final (Tônico/Fásico/Apagar). Eles NÃO serão incluídos no CSV salvo se continuar. Salvar mesmo assim?`)) return;
   // cada evento vira 1+ linhas: um trecho por segmento contiguo que restou apos exclusoes de janela
   // (sem exclusoes, e exatamente 1 linha = comportamento anterior, sem quebra de compatibilidade)
   const decisions = [];
@@ -607,26 +700,63 @@ $("#save").onclick=async()=>{
   $("#loadsaved").classList.add("has-saved");
 };
 
-// ---- abrir anotacoes ja salvas (view/revisado/<exame>_revisado.csv) em vez das
-// sugestoes originais do .pt — substitui S.events pelos eventos ja confirmados ----
-async function loadSavedAnnotations(){
+// ---- abrir arquivo de anotacoes: lista os CSVs disponiveis (view/revisado/ e
+// classifier/outputs/) num modal e, ao escolher um, substitui S.events pelos
+// eventos daquele arquivo (formato unificado incluindo tonic_candidate/needs_review) ----
+const KIND_LABEL = { movimento: "movimento", tonico_fasico: "fásico/candidato-tônico",
+                     revisado: "revisado (confirmado)", outro: "outro" };
+
+function fmtBytesAgo(mtime){
+  const d = new Date(mtime*1000);
+  return d.toLocaleString("pt-BR", {dateStyle:"short", timeStyle:"short"});
+}
+
+async function openAnnotPicker(){
   if(!S.exam) return;
-  const r = await jget("/api/saved?name="+encodeURIComponent(S.exam));
-  if(!r.exists){
-    $("#savemsg").textContent = `nenhuma anotação salva encontrada para ${S.exam} (${'view/revisado/'+S.exam+'_revisado.csv'} não existe).`;
+  $("#openexam").textContent = S.exam;
+  $("#openmsg").textContent = "";
+  const box = $("#openfilelist"); box.innerHTML = "carregando…";
+  $("#openpanel").hidden = false;
+  let r;
+  try { r = await jget("/api/annot_files?name="+encodeURIComponent(S.exam)); }
+  catch(err){ box.innerHTML = `<div class="fileempty">Erro ao listar arquivos: ${err.message}</div>`; return; }
+  if(!r.files.length){
+    box.innerHTML = `<div class="fileempty">Nenhum arquivo de anotação encontrado para ${S.exam}
+      em view/revisado/ ou classifier/outputs/.</div>`;
     return;
   }
-  if(!confirm(`Substituir a lista de eventos atual pelas ${r.events.length} anotações já salvas para ${S.exam}?\nIsso descarta qualquer revisão não salva feita nesta sessão.`)) return;
+  box.innerHTML = "";
+  r.files.forEach(f => {
+    const row = document.createElement("div");
+    row.className = "filerow";
+    row.innerHTML = `<span class="kindtag ${f.kind}">${KIND_LABEL[f.kind]||f.kind}</span>
+      <span class="fname">${f.filename}</span>
+      <span class="fmeta">${f.n_rows==null?"?":f.n_rows} linhas · ${fmtBytesAgo(f.mtime)}</span>`;
+    row.onclick = () => loadAnnotFile(f.path);
+    box.appendChild(row);
+  });
+}
+
+async function loadAnnotFile(relPath){
+  if(!confirm(`Substituir a lista de eventos atual pelo conteúdo de "${relPath}"?\nIsso descarta qualquer revisão não salva feita nesta sessão.`)) return;
+  let r;
+  try { r = await jget(`/api/open_annot?name=${encodeURIComponent(S.exam)}&path=${encodeURIComponent(relPath)}`); }
+  catch(err){ $("#openmsg").textContent = `Erro: ${err.message}`; return; }
   S.events = r.events.slice();
   S.decisions = {}; S.excluded = {}; S.cur = 0;
   r.events.forEach(e => { e.manual=false; S.decisions[e.id] = e.suggestion; });
-  S.nextId = Math.max(1000, ...r.events.map(e=>e.id+1));
-  $("#savemsg").textContent = `${r.events.length} anotações carregadas de ${r.path}.`;
+  S.nextId = Math.max(1000, ...r.events.map(e=>e.id+1), 1000);
+  $("#openpanel").hidden = true;
+  const refTxt = r.time_ref==="edf" ? "tempo EDF" : "tempo .pt";
+  $("#savemsg").textContent = `${r.events.length} anotações carregadas de ${r.filename} (${KIND_LABEL[r.kind]||r.kind}, ${refTxt}).`;
   renderList();
   if(S.mode==="events") await selectEvent(0, true);
   else { updateInfo(); await loadWindow(); }
 }
-$("#loadsaved").onclick = loadSavedAnnotations;
+$("#loadsaved").onclick = openAnnotPicker;
+$("#opencancel").onclick = () => { $("#openpanel").hidden = true; };
+$("#filtType").onchange = renderList;
+$("#filtReview").onchange = renderList;
 
 // ---- painel de configuracoes (tempo do EDF) ----
 function hmsToSec(s){
@@ -683,6 +813,28 @@ function closeCfg(){
 async function saveCfg(meas_date){
   return await jpost("/api/config", {exam:S.exam, meas_date});
 }
+// Aplica o novo annot_start/meas_date SEM recarregar o exame do servidor.
+// selectExam() reconstroi S.events a partir do .pt bruto (rotulos pre-sugestao,
+// needs_review sempre false) — usa-la aqui descartaria silenciosamente qualquer
+// sessao de revisao em andamento (decisoes T/F/D, tonic_candidate/needs_review,
+// exclusoes de janela) carregada de um CSV via "Abrir anotações". Em vez disso,
+// so recalculamos onset_edf em cada evento ja carregado, preservando tudo o resto.
+function applyOffsetLocally(info){
+  S.info.annot_start = info.annot_start;
+  S.info.has_offset = info.has_offset;
+  S.info.meas_date = info.meas_date;
+  S.info.hipno_start = info.hipno_start;
+  const a0 = info.annot_start;
+  S.events.forEach(e=>{
+    e.onset_edf = (a0!=null) ? Math.round((e.onset_s + a0) * 10) / 10 : null;
+  });
+  $("#offmeta").className = "pill" + (info.has_offset ? "" : " warn");
+  $("#offmeta").textContent = info.has_offset
+      ? `tempo EDF ✓ (annot_start=${info.annot_start.toFixed(1)}s)`
+      : "⚠ sem offset — CSV sairá em tempo do .pt";
+  renderList();
+  if(S.events.length) updateInfo();
+}
 async function reloadExamSafe(){
   try { await selectExam(S.exam); }
   catch(e){ console.error("reload apos config:", e); $("#savemsg").textContent="⚠ erro ao recarregar: "+e.message; }
@@ -704,16 +856,19 @@ $("#cfgsave").onclick=async()=>{
   S.cfgRequired = false;
   updateCfgGate();
   $("#cfgpanel").hidden = true;
-  reloadExamSafe();
+  // aplica o offset nos eventos ja carregados (preserva decisoes/needs_review/exclusoes
+  // de uma revisao em andamento) em vez de recarregar o exame do .pt bruto
+  applyOffsetLocally(r);
 };
 $("#cfgclear").onclick=async()=>{
   if(S.cfgRequired) return;  // nao deveria ser clicavel neste estado (botao escondido), guarda extra
   $("#cfgmeas").value="";
-  try { await saveCfg(null); }
+  let r;
+  try { r = await saveCfg(null); }
   catch(e){ $("#cfgmsg").textContent="Erro: "+e.message; return; }
   $("#cfgmsg").textContent="Offset removido — CSV voltará ao tempo do .pt.";
   closeCfg();
-  reloadExamSafe();
+  applyOffsetLocally(r);
 };
 
 document.addEventListener("keydown",ev=>{

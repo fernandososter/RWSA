@@ -47,6 +47,29 @@ CFG = {
 _MODEL = {"net": None, "window": 5, "threshold": 0.2}
 _CACHE = {}  # exam_name -> dict(emg, stages, scores, mask, events, hours)
 
+# Diretorios onde o botao "abrir arquivo de anotacoes" procura CSVs para um exame.
+# out_dir (view/revisado) fica em CFG e e resolvido dinamicamente (pode ser mudado por --out);
+# classifier/outputs e onde predict_movements.py grava por padrao.
+def _annot_search_dirs():
+    return [CFG["out_dir"], PROJ / "classifier" / "outputs"]
+
+
+def _annot_kind(filename: str) -> str:
+    """Classifica o CSV pela presenca de um marcador no nome, nao por sufixo
+    exato — predict_movements.py pode ser chamado com -o e nome arbitrario
+    (ex.: 'rbd1_movimentos_exemplo.csv'), entao so o sufixo fixo nao serve.
+    Checa tonico_fasico antes de movimento pois esse nome tambem contem
+    'movimentos' seria falso, mas por seguranca a ordem evita colisao.
+    """
+    n = filename.lower()
+    if "tonico_fasico" in n:
+        return "tonico_fasico"
+    if "revisado" in n:
+        return "revisado"
+    if "movimentos" in n or "movimento" in n:
+        return "movimento"
+    return "outro"
+
 
 MAT_DIR = HERE / "mat"
 CFG_PATH = HERE / "exam_config.json"
@@ -233,8 +256,161 @@ def _load_saved_events(exam_name):
             "epoch_start": e0, "epoch_end": e1,
             "stage": STAGE_NAMES.get(dom, "?"),
             "suggestion": r["type"],
+            "needs_review": False,  # _revisado.csv so guarda decisoes ja confirmadas
         })
     return out
+
+
+def _list_annot_files(exam_name):
+    """Procura CSVs de anotacao para `exam_name` em view/revisado/ e
+    classifier/outputs/ (onde predict_movements.py grava por padrao).
+
+    Reconhece 3 familias pelo sufixo do nome do arquivo:
+      *_revisado.csv        -> salvo por este proprio app (tonico/fasico finais)
+      *_movimentos.csv      -> saida do detector de movimento (predict_movements.py)
+      *_tonico_fasico.csv   -> sub-classificacao fasico/candidato-tonico (predict_movements.py)
+    Devolve lista ordenada por mtime desc (mais recente primeiro), com um id
+    de path RELATIVO estavel (dir_key/filename) que /api/open_annot valida e resolve.
+    """
+    out = []
+    dirs = {"revisado": CFG["out_dir"], "outputs": PROJ / "classifier" / "outputs"}
+    for dir_key, d in dirs.items():
+        if not d.exists():
+            continue
+        for p in d.glob(f"{exam_name}*.csv"):
+            if not p.is_file():
+                continue
+            # glob(f"{exam_name}*") tambem casa prefixos mais longos (ex.: exam_name
+            # 'rbd1' casa 'rbd10_revisado.csv'); exige que o proximo char seja um
+            # separador (fim do nome do exame), nao um digito/letra que continua outro id.
+            rest = p.stem[len(exam_name):]
+            if rest and rest[0].isalnum():
+                continue
+            try:
+                n_rows = max(0, sum(1 for _ in open(p)) - 1)
+            except Exception:
+                n_rows = None
+            out.append({
+                "path": f"{dir_key}/{p.name}",
+                "filename": p.name,
+                "kind": _annot_kind(p.name),
+                "mtime": p.stat().st_mtime,
+                "n_rows": n_rows,
+            })
+    out.sort(key=lambda r: r["mtime"], reverse=True)
+    return out
+
+
+def _resolve_annot_path(rel_path: str) -> Path:
+    """Resolve um path relativo devolvido por _list_annot_files ('dir_key/nome.csv')
+    para um Path absoluto, validando que ele fica dentro de um dos diretorios
+    permitidos (sem permitir path traversal via ../).
+    """
+    dirs = {"revisado": CFG["out_dir"], "outputs": PROJ / "classifier" / "outputs"}
+    if "/" not in rel_path:
+        raise ValueError("path invalido")
+    dir_key, filename = rel_path.split("/", 1)
+    if dir_key not in dirs or "/" in filename or "\\" in filename or filename in ("..", "."):
+        raise ValueError("path invalido")
+    base = dirs[dir_key].resolve()
+    full = (base / filename).resolve()
+    if not full.is_relative_to(base):
+        raise ValueError("path fora do diretorio permitido")
+    if not full.exists():
+        raise FileNotFoundError(str(full))
+    return full
+
+
+def _infer_time_ref(rows, a0, night_dur):
+    """Decide se onset_s nas linhas do CSV ja esta em tempo do .pt ou em tempo
+    do EDF, testando qual interpretacao cai dentro de [0, night_dur]. Prefere
+    tempo do .pt quando ambas cabem (caso mais comum: predict_movements.py sem
+    --meas-date/--annot-start). So considera tempo do EDF se `a0` (annot_start
+    do exame) for conhecido e a interpretacao pt nao couber.
+    """
+    if not rows:
+        return "pt"
+    onsets = [r["onset_s"] for r in rows]
+    ends = [r["onset_s"] + r["duration_s"] for r in rows]
+    tol = 5.0
+    if min(onsets) >= -tol and max(ends) <= night_dur + tol:
+        return "pt"
+    if a0 is not None:
+        onsets2 = [o - a0 for o in onsets]
+        ends2 = [e - a0 for e in ends]
+        if min(onsets2) >= -tol and max(ends2) <= night_dur + tol:
+            return "edf"
+    return "pt"
+
+
+# Mapeia o valor da coluna 'type' do CSV para a sugestao usada no frontend.
+# 'tonic_candidate' nunca e final (ver classifier/movement_clf/tonic_phasic.py);
+# 'tonic'/'phasic' (de arquivos _revisado.csv) ja sao rotulos finais confirmados.
+_TYPE_TO_SUGGESTION = {
+    "movement": "movement",
+    "phasic": "phasic",
+    "tonic_candidate": "tonic_candidate",
+    "tonic": "tonic",
+}
+
+
+def _parse_annot_csv(path: Path, exam_name: str):
+    """Le um CSV de anotacao generico (qualquer uma das 3 familias) e devolve
+    eventos no formato de _events_payload, com onset_s/onset_edf convertidos
+    para o referencial do exame carregado, e 'needs_review' explicito.
+    """
+    st = _prepare(exam_name)
+    a0 = st.get("annot_start")
+    es = EPOCH_SEC
+    T = st["n_epochs"]
+    night_dur = T * es
+
+    raw = []
+    with open(path, newline="") as f:
+        for d in csv.DictReader(f):
+            raw_type = (d.get("type") or "movement").strip()
+            onset_s = float(d["onset_s"])
+            duration_s = float(d["duration_s"])
+            score = d.get("score") if d.get("score") not in (None, "") else d.get("peak_ratio")
+            nr = d.get("needs_review")
+            needs_review = None
+            if nr is not None and nr != "":
+                needs_review = str(nr).strip().lower() in ("true", "1", "yes")
+            raw.append({
+                "onset_s": onset_s, "duration_s": duration_s,
+                "type": raw_type,
+                "score": float(score) if score not in (None, "") else None,
+                "needs_review": needs_review,
+            })
+
+    time_ref = _infer_time_ref(raw, a0, night_dur)
+    if time_ref == "edf":
+        for r in raw:
+            r["onset_s"] = r["onset_s"] - a0
+    raw.sort(key=lambda r: r["onset_s"])
+
+    out = []
+    for i, r in enumerate(raw):
+        e0 = max(0, int(round(r["onset_s"] / es)))
+        e1 = min(T, max(e0 + 1, int(round((r["onset_s"] + r["duration_s"]) / es))))
+        stages = st["stages"][e0:e1]
+        vals, cnts = np.unique(stages, return_counts=True) if len(stages) else ([], [])
+        dom = int(vals[np.argmax(cnts)]) if len(vals) else -1
+        onset_edf = round(r["onset_s"] + a0, 1) if a0 is not None else None
+        suggestion = _TYPE_TO_SUGGESTION.get(r["type"], r["type"] if r["type"] else "movement")
+        needs_review = r["needs_review"] if r["needs_review"] is not None else (suggestion == "tonic_candidate")
+        out.append({
+            "id": i,
+            "onset_s": round(r["onset_s"], 1),
+            "onset_edf": onset_edf,
+            "duration_s": round(r["duration_s"], 1),
+            "score": round(r["score"], 3) if r["score"] is not None else None,
+            "epoch_start": e0, "epoch_end": e1,
+            "stage": STAGE_NAMES.get(dom, "?"),
+            "suggestion": suggestion,
+            "needs_review": needs_review,
+        })
+    return out, time_ref
 
 
 STAGE_NAMES = {0: "W", 1: "N1", 2: "N2", 3: "N3", 4: "REM", -1: "?"}
@@ -270,6 +446,7 @@ def _events_payload(st):
             "epoch_start": e0, "epoch_end": e1,
             "stage": STAGE_NAMES.get(dom, "?"),
             "suggestion": suggestion,
+            "needs_review": False,  # rotulos do .pt sao pre-sugestao de dataset, nao candidato de regra
         })
     return out
 
@@ -329,6 +506,26 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, {"exists": True, "events": rows,
                                         "path": str(CFG["out_dir"] / f"{name}_revisado.csv")})
 
+            if u.path == "/api/annot_files":
+                # Lista os CSVs de anotacao disponiveis para o exame, das duas
+                # origens: view/revisado (salvos por este app) e
+                # classifier/outputs (saida de predict_movements.py).
+                name = q["name"][0]
+                return self._send(200, {"files": _list_annot_files(name)})
+
+            if u.path == "/api/open_annot":
+                # Le um CSV de anotacao especifico (escolhido pelo usuario na lista
+                # de /api/annot_files) e devolve os eventos no formato do frontend.
+                name = q["name"][0]
+                rel_path = q["path"][0]
+                full = _resolve_annot_path(rel_path)
+                events, time_ref = _parse_annot_csv(full, name)
+                return self._send(200, {
+                    "events": events, "path": rel_path,
+                    "filename": full.name, "kind": _annot_kind(full.name),
+                    "time_ref": time_ref,
+                })
+
             if u.path == "/api/signal":
                 name = q["name"][0]
                 t0 = float(q.get("t0", ["0"])[0])
@@ -357,6 +554,10 @@ class Handler(BaseHTTPRequestHandler):
                     "stages": stages, "movemask": movemask, "scores": scores,
                     "threshold": st["threshold"],
                 })
+        except (ValueError,) as e:
+            return self._send(400, {"error": str(e)})
+        except FileNotFoundError as e:
+            return self._send(404, {"error": f"arquivo nao encontrado: {e}"})
         except Exception as e:
             import traceback
             return self._send(500, {"error": str(e), "trace": traceback.format_exc()})
