@@ -17,8 +17,9 @@ class RSWAFeatureEncoder(nn.Module):
 class RSWADetectionNet(nn.Module):
     def __init__(self,config=None,use_se=True):
         super().__init__(); cfg=config or ModelConfig(); self.encoder=RSWAFeatureEncoder(cfg,use_se); self.temporal=MambaStack(cfg.d_model,cfg.rswa_mamba_layers,cfg.d_state,cfg.dropout); h=cfg.d_model//2
-        self.tonic_head=nn.Sequential(nn.Linear(cfg.d_model,h),nn.ReLU(inplace=True),nn.Dropout(cfg.dropout),nn.Linear(h,1))
-        self.phasic_head=nn.Sequential(nn.Linear(cfg.d_model,h),nn.ReLU(inplace=True),nn.Dropout(cfg.dropout),nn.Linear(h,1))
+        # Cabeca unica: detecta "movement" (any) = qualquer movimento anotado
+        # (tonico OU fasico) por mini-epoca. Substitui as antigas tonic_head/phasic_head.
+        self.movement_head=nn.Sequential(nn.Linear(cfg.d_model,h),nn.ReLU(inplace=True),nn.Dropout(cfg.dropout),nn.Linear(h,1))
     def forward(self,emg_center,mask=None):
-        z=self.temporal(self.encoder(emg_center),mask); return {"tonic_logits":self.tonic_head(z).squeeze(-1),"phasic_logits":self.phasic_head(z).squeeze(-1)}
+        z=self.temporal(self.encoder(emg_center),mask); return {"movement_logits":self.movement_head(z).squeeze(-1)}
     def n_params(self): return sum(p.numel() for p in self.parameters() if p.requires_grad)

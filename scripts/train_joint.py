@@ -118,8 +118,7 @@ def main() -> None:
                 emg = batch["emg_center"].to(device, non_blocking=True)
                 padding_mask = batch["padding_mask"].to(device, non_blocking=True)
                 stage_targets = batch["sleep_stages"].to(device, non_blocking=True)
-                tonic_targets = batch["tonic_labels"].to(device, non_blocking=True)
-                phasic_targets = batch["phasic_labels"].to(device, non_blocking=True)
+                movement_targets = batch["movement_labels"].to(device, non_blocking=True)
                 stage_valid = batch["staging_valid"].to(device, non_blocking=True) & padding_mask
                 rswa_valid = batch["rswa_valid"].to(device, non_blocking=True) & padding_mask
 
@@ -144,7 +143,7 @@ def main() -> None:
                         enabled=(not args.no_amp and device.type == "cuda"),
                     ):
                         rswa_outputs = rswa_model(emg, mask=padding_mask)
-                        rswa_loss = rswa_loss_fn(rswa_outputs, tonic_targets, phasic_targets, rswa_valid)
+                        rswa_loss = rswa_loss_fn(rswa_outputs, movement_targets, rswa_valid)
                     rswa_loss.backward()
                     clip_grad_norm_(rswa_model.parameters(), args.grad_clip)
                     rswa_optimizer.step()
@@ -178,11 +177,9 @@ def main() -> None:
                 f"{YELLOW}"
                 f"val_stg_f1={val_metrics.get('staging_f1_macro', float('nan')):.4f} "
                 f"val_stg_kappa={val_metrics.get('staging_kappa', float('nan')):.4f} "
-                f"val_rswa_f1={val_metrics.get('rswa_rswa_f1_macro', float('nan')):.4f} "
                 f"{GREEN}"
-                f"val_tonic_kappa={val_metrics.get('rswa_tonic_kappa', float('nan')):.4f} "
-                f"val_phasic_kappa={val_metrics.get('rswa_phasic_kappa', float('nan')):.4f} "
-                f"val_rswa_kappa={val_metrics.get('rswa_rswa_kappa_macro', float('nan')):.4f}"
+                f"val_movement_f1={val_metrics.get('rswa_movement_f1', float('nan')):.4f} "
+                f"val_movement_kappa={val_metrics.get('rswa_movement_kappa', float('nan')):.4f}"
                 f"{RESET}"
             )
 

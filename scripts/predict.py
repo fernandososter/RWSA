@@ -61,8 +61,7 @@ def main() -> None:
                 outputs = model(signals, emg, mask=mask)
             stage_prob = torch.softmax(outputs["staging_logits"], dim=-1)
             stage_pred = stage_prob.argmax(dim=-1)
-            tonic_prob = torch.sigmoid(outputs["tonic_logits"])
-            phasic_prob = torch.sigmoid(outputs["phasic_logits"])
+            movement_prob = torch.sigmoid(outputs["movement_logits"])
 
             for i, subject_id in enumerate(batch["subject_ids"]):
                 length = int(batch["lengths"][i])
@@ -75,10 +74,8 @@ def main() -> None:
                         "stage_id": stage_id,
                         "stage": STAGE_NAMES[stage_id],
                         "stage_confidence": float(stage_prob[i, epoch, stage_id].cpu()),
-                        "tonic_probability": float(tonic_prob[i, epoch].cpu()),
-                        "tonic_pred": int(tonic_prob[i, epoch] >= args.threshold),
-                        "phasic_probability": float(phasic_prob[i, epoch].cpu()),
-                        "phasic_pred": int(phasic_prob[i, epoch] >= args.threshold),
+                        "movement_probability": float(movement_prob[i, epoch].cpu()),
+                        "movement_pred": int(movement_prob[i, epoch] >= args.threshold),
                     })
 
     args.output.parent.mkdir(parents=True, exist_ok=True)

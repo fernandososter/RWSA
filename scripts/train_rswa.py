@@ -38,8 +38,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--threshold", type=float, default=0.5)
     parser.add_argument("--min-confidence", type=float, default=0.0)
     parser.add_argument("--all-stages", action="store_true")
-    parser.add_argument("--tonic-pos-weight", type=float)
-    parser.add_argument("--phasic-pos-weight", type=float)
+    parser.add_argument("--movement-pos-weight", type=float)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", default="auto")
     parser.add_argument("--no-amp", action="store_true")
@@ -48,7 +47,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--notes", default=None)
     parser.add_argument("--tags", nargs="*", default=[])
     parser.add_argument("--patience", type=int, default=15)
-    parser.add_argument("--monitor", choices=["rswa_f1_macro", "rswa_kappa_macro"], default="rswa_f1_macro", help="Métrica usada para selecionar o melhor checkpoint.")
+    parser.add_argument("--monitor", choices=["movement_f1", "movement_kappa", "rswa_f1_macro", "rswa_kappa_macro"], default="movement_f1", help="Métrica usada para selecionar o melhor checkpoint (movement_* e rswa_*_macro sao equivalentes).")
 
     return parser.parse_args()
 
@@ -84,9 +83,8 @@ def main() -> None:
             train_loader = make_loader(train_subjects, args, True, device)
             val_loader = make_loader(val_subjects, args, False, device)
             model = RSWADetectionNet().to(device)
-            tonic_weight = torch.tensor(args.tonic_pos_weight, device=device) if args.tonic_pos_weight else None
-            phasic_weight = torch.tensor(args.phasic_pos_weight, device=device) if args.phasic_pos_weight else None
-            criterion = RSWALoss(tonic_pos_weight=tonic_weight, phasic_pos_weight=phasic_weight)
+            movement_weight = torch.tensor(args.movement_pos_weight, device=device) if args.movement_pos_weight else None
+            criterion = RSWALoss(movement_pos_weight=movement_weight)
             optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
             logger.log_subject_split(train_subjects, val_subjects, filename=f"fold_{fold}_split.json")
             
@@ -119,12 +117,10 @@ def main() -> None:
                     f"ep={epoch:03d} "
                     f"train_loss={train_metrics['loss']:.4f} "
                     f"val_loss={val_metrics['loss']:.4f} "
-                    f"train_f1={train_metrics['rswa_f1_macro']:.4f} "
-                    f"val_f1={val_metrics['rswa_f1_macro']:.4f} "
-                    f"train_kappa={train_metrics['rswa_kappa_macro']:.4f} "
-                    f"val_kappa={val_metrics['rswa_kappa_macro']:.4f} "
-                    f"val_tonic_kappa={val_metrics['tonic_kappa']:.4f} "
-                    f"val_phasic_kappa={val_metrics['phasic_kappa']:.4f}"
+                    f"train_f1={train_metrics['movement_f1']:.4f} "
+                    f"val_f1={val_metrics['movement_f1']:.4f} "
+                    f"train_kappa={train_metrics['movement_kappa']:.4f} "
+                    f"val_kappa={val_metrics['movement_kappa']:.4f}"
                 )
 
                 current_metric = float(val_metrics[args.monitor])
@@ -164,13 +160,12 @@ def main() -> None:
 
             load_checkpoint(checkpoint_dir / "best.pt", model, device)
             final = collect_rswa_predictions(model, val_loader, device, amp=not args.no_amp, threshold=args.threshold)
-            for name, display in (("tonic", "Tonic"), ("phasic", "Phasic")):
-                plot_confusion_matrix(final[f"{name}_expected"], final[f"{name}_prediction"],
-                                      figures_dir / f"confusion_matrix_{name}.png", labels=[0, 1],
-                                      display_labels=["Negative", "Positive"], title=f"{display} confusion matrix - Fold {fold}")
-                plot_confusion_matrix(final[f"{name}_expected"], final[f"{name}_prediction"],
-                                      figures_dir / f"confusion_matrix_{name}_normalized.png", labels=[0, 1],
-                                      display_labels=["Negative", "Positive"], title=f"{display} normalized confusion matrix - Fold {fold}", normalize="true")
+            plot_confusion_matrix(final["movement_expected"], final["movement_prediction"],
+                                  figures_dir / "confusion_matrix_movement.png", labels=[0, 1],
+                                  display_labels=["Negative", "Positive"], title=f"Movement confusion matrix - Fold {fold}")
+            plot_confusion_matrix(final["movement_expected"], final["movement_prediction"],
+                                  figures_dir / "confusion_matrix_movement_normalized.png", labels=[0, 1],
+                                  display_labels=["Negative", "Positive"], title=f"Movement normalized confusion matrix - Fold {fold}", normalize="true")
             
             fold_summaries.append(
                 {
@@ -179,20 +174,8 @@ def main() -> None:
                     "monitor": args.monitor,
                     "best_monitor_value": best_metric,
                     "best_val_loss": best_metrics.get("loss"),
-                    "best_val_rswa_f1_macro": best_metrics.get(
-                        "rswa_f1_macro"
-                    ),
-                    "best_val_rswa_kappa_macro": best_metrics.get(
-                        "rswa_kappa_macro"
-                    ),
-                    "best_val_tonic_f1": best_metrics.get("tonic_f1"),
-                    "best_val_phasic_f1": best_metrics.get("phasic_f1"),
-                    "best_val_tonic_kappa": best_metrics.get(
-                        "tonic_kappa"
-                    ),
-                    "best_val_phasic_kappa": best_metrics.get(
-                        "phasic_kappa"
-                    ),
+                    "best_val_movement_f1": best_metrics.get("movement_f1"),
+                    "best_val_movement_kappa": best_metrics.get("movement_kappa"),
                 }
             )
 

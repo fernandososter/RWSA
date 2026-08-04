@@ -208,6 +208,12 @@ class SleepAnalysisDataset(Dataset):
         phasic_labels[~valid_rswa] = 0.0
         rswa_labels[~valid_rswa] = self.rswa_config.none_label
 
+        # Alvo unico "movement" (any) = qualquer movimento anotado na mini-epoca
+        # (tonico OU fasico). E o unico rotulo usado pelo treino/metrica agora;
+        # tonic_labels/phasic_labels sao mantidos apenas para inspecao/QC.
+        movement_labels = ((tonic_labels > 0.5) | (phasic_labels > 0.5)).float()
+        movement_labels[~valid_rswa] = 0.0
+
         return {
             "signals": context,
             "emg_center": emg,
@@ -216,6 +222,7 @@ class SleepAnalysisDataset(Dataset):
             "rswa_labels": rswa_labels,
             "phasic_labels": phasic_labels,
             "tonic_labels": tonic_labels,
+            "movement_labels": movement_labels,
             "rswa_valid": valid_rswa,
             "rswa_conf": confidence,
             "subject_id": subject.subject_id,
@@ -237,6 +244,7 @@ def collate_sleep_analysis_exams(batch):
         "rswa_labels": torch.zeros(b, tmax, dtype=torch.long),
         "phasic_labels": torch.zeros(b, tmax),
         "tonic_labels": torch.zeros(b, tmax),
+        "movement_labels": torch.zeros(b, tmax),
         "rswa_valid": torch.zeros(b, tmax, dtype=torch.bool),
         "rswa_conf": torch.zeros(b, tmax),
         "subject_ids": [],
@@ -251,6 +259,7 @@ def collate_sleep_analysis_exams(batch):
             "rswa_labels",
             "phasic_labels",
             "tonic_labels",
+            "movement_labels",
             "rswa_valid",
             "rswa_conf",
         ):
