@@ -11,6 +11,9 @@ from .data import (
 )
 from .models import (
     BaseStagingModel,
+    MovementBiMamba,
+    MovementCNN,
+    MovementLSTM,
     RSWADetectionNet,
     SleepStagingBiMamba,
     SleepStagingCNN,
@@ -18,7 +21,9 @@ from .models import (
     SleepStagingNet,
     SleepStagingRSWASystem,
     StagingCNNEncoder,
+    available_movement_models,
     available_staging_models,
+    build_movement_model,
     build_staging_model,
     register_staging_model,
 )
@@ -42,6 +47,11 @@ __all__ = [
     "build_staging_model",
     "available_staging_models",
     "register_staging_model",
+    "MovementCNN",
+    "MovementLSTM",
+    "MovementBiMamba",
+    "build_movement_model",
+    "available_movement_models",
     "RSWADetectionNet",
     "SleepStagingRSWASystem",
     "StageDistribution",

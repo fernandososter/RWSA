@@ -17,6 +17,9 @@ from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import DataLoader
 
 from sleep_rswa import (
+    available_staging_models,
+    build_movement_model,
+    build_staging_model,
     RSWADetectionNet,
     SleepAnalysisDataset,
     SleepStagingNet,
@@ -100,6 +103,10 @@ def parse_args() -> argparse.Namespace:
             "um F1 de movimento estável."
         ),
     )
+    parser.add_argument(
+        "--model", choices=available_staging_models(), default="cnn_bimamba",
+        help="Arquitetura aplicada a AMBOS os ramos (staging e movimento/RSWA).",
+    )
     parser.add_argument("--epochs", type=int, default=30)
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--num-workers", type=int, default=2)
@@ -126,7 +133,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", default="auto")
     parser.add_argument("--no-amp", action="store_true")
     parser.add_argument("--run-dir", type=Path, default=Path("runs/joint"))
-    parser.add_argument("--experiment-name", default="joint_stratified_kfold")
+    parser.add_argument("--experiment-name", default=None)
     parser.add_argument("--notes", default=None)
     parser.add_argument("--tags", nargs="*", default=[])
     return parser.parse_args()
@@ -176,6 +183,8 @@ def plot_joint_curves(history: list[dict[str, float]], output_path: Path, *, tit
 
 def main() -> None:
     args = parse_args()
+    if args.experiment_name is None:
+        args.experiment_name = f"joint_{args.model}_stratified_kfold"
     seed_everything(args.seed)
     device = resolve_device(args.device)
     all_subjects = load_subject_directory(args.data_dir)
@@ -204,6 +213,7 @@ def main() -> None:
         device=device, args=vars(args), notes=args.notes, tags=args.tags,
     ) as logger:
         logger.info(f"Dispositivo: {device}")
+        logger.info(f"Modelo (staging + movimento): {args.model}")
         logger.info(
             f"Sujeitos: total={len(all_subjects)} | CV={len(subjects)} | teste={len(test_subjects)} | "
             f"n_splits={args.n_splits} | estratificação CV={args.stratify_by} | teste={args.test_stratify_by}"
@@ -280,8 +290,8 @@ def main() -> None:
                 dataset=val_loader.dataset, loader=val_loader,
             )
 
-            staging_model = SleepStagingNet().to(device)
-            rswa_model = RSWADetectionNet().to(device)
+            staging_model = build_staging_model(args.model).to(device)
+            rswa_model = build_movement_model(args.model).to(device)
             system = SleepStagingRSWASystem(staging_model, rswa_model).to(device)
             staging_loss_fn = StagingLoss()
             movement_weight = torch.tensor(args.movement_pos_weight, device=device) if args.movement_pos_weight else None
@@ -513,12 +523,12 @@ def main() -> None:
             test_loader = make_loader(test_subjects, args, False, device)
             staging_test_summary = evaluate_staging_test_set(
                 test_loader=test_loader, fold_checkpoints=staging_checkpoints,
-                build_model=lambda: SleepStagingNet(), device=device, logger=logger,
+                build_model=lambda: build_staging_model(args.model), device=device, logger=logger,
                 figures_dir=logger.run_dir / "test", amp=not args.no_amp,
             )
             movement_test_summary = evaluate_movement_test_set(
                 test_loader=test_loader, fold_checkpoints=rswa_checkpoints,
-                build_model=lambda: RSWADetectionNet(), device=device, logger=logger,
+                build_model=lambda: build_movement_model(args.model), device=device, logger=logger,
                 figures_dir=logger.run_dir / "test", amp=not args.no_amp, threshold=args.threshold,
             )
 

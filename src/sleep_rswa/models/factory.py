@@ -6,6 +6,7 @@ from typing import Any
 import torch.nn as nn
 
 from ..config import ModelConfig
+from .movement import MovementBiMamba, MovementCNN, MovementLSTM
 from .staging import SleepStagingBiMamba
 from .staging_cnn import SleepStagingCNN
 from .staging_lstm import SleepStagingLSTM
@@ -19,6 +20,14 @@ _STAGING_MODELS: dict[str, StagingBuilder] = {
     "cnn_lstm": SleepStagingLSTM,
     "cnn_bilstm": SleepStagingLSTM,
     "cnn_bimamba": SleepStagingBiMamba,
+}
+
+
+_MOVEMENT_MODELS: dict[str, StagingBuilder] = {
+    "cnn": MovementCNN,
+    "cnn_lstm": MovementLSTM,
+    "cnn_bilstm": MovementLSTM,
+    "cnn_bimamba": MovementBiMamba,
 }
 
 
@@ -88,4 +97,40 @@ def build_staging_model(
 
     model.model_name = normalized_name
 
+    return model
+
+
+def available_movement_models() -> tuple[str, ...]:
+    return tuple(sorted(_MOVEMENT_MODELS))
+
+
+def build_movement_model(
+    name: str,
+    *,
+    config: ModelConfig | None = None,
+    **model_kwargs: Any,
+) -> nn.Module:
+    """Constrói o ramo de detecção de movimento (RSWA) por nome.
+
+    Mesmas famílias de arquitetura do staging: cnn, cnn_lstm, cnn_bilstm,
+    cnn_bimamba. Encoder CNN compartilhado + cabeça temporal + movement_head.
+    """
+    normalized_name = name.strip().lower()
+
+    try:
+        builder = _MOVEMENT_MODELS[normalized_name]
+    except KeyError as error:
+        available = ", ".join(available_movement_models())
+        raise ValueError(
+            f"Modelo de movimento desconhecido: '{name}'. "
+            f"Modelos disponíveis: {available}."
+        ) from error
+
+    if normalized_name == "cnn_lstm":
+        model_kwargs.setdefault("bidirectional", False)
+    if normalized_name == "cnn_bilstm":
+        model_kwargs.setdefault("bidirectional", True)
+
+    model = builder(config=config, **model_kwargs)
+    model.model_name = normalized_name
     return model

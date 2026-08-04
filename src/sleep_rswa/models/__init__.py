@@ -1,7 +1,14 @@
 from .factory import (
+    available_movement_models,
     available_staging_models,
+    build_movement_model,
     build_staging_model,
     register_staging_model,
+)
+from .movement import (
+    MovementBiMamba,
+    MovementCNN,
+    MovementLSTM,
 )
 from .rswa import (
     RSWAFeatureEncoder,
@@ -28,6 +35,11 @@ __all__ = [
     "available_staging_models",
     "build_staging_model",
     "register_staging_model",
+    "available_movement_models",
+    "build_movement_model",
+    "MovementCNN",
+    "MovementLSTM",
+    "MovementBiMamba",
     "RSWAFeatureEncoder",
     "RSWADetectionNet",
     "SleepStagingRSWASystem",
