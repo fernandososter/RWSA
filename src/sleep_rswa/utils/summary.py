@@ -163,6 +163,49 @@ def print_split_summary(
         width=width,
     )
 
+def print_movement_distribution(
+    title: str,
+    movement: Mapping[str, Any],
+    *,
+    width: int = 80,
+) -> None:
+    """Tabela de movimento binário (Negative/Positive) sobre as mini-épocas
+    *avaliáveis* (mesma máscara de validade do treino), mais o contexto de
+    quantas mini-épocas são avaliáveis em relação ao total."""
+    evaluable = int(movement["evaluable_mini_epochs"])
+    positives = int(movement["movement_positive"])
+    negatives = evaluable - positives
+    total = int(movement["total_mini_epochs"])
+
+    print(title)
+    print("-" * width)
+    print(f"{'Movement':<10} {'Count':>15} {'Percentage':>15}")
+    print("-" * 42)
+    for name, count in (("Negative", negatives), ("Positive", positives)):
+        pct = (100.0 * count / evaluable) if evaluable else 0.0
+        print(f"{name:<10} {count:>15,} {pct:>14.2f}%")
+    print("-" * 42)
+    print(f"{'Total':<10} {evaluable:>15,}")
+    print(
+        f"(avaliáveis={evaluable:,} de {total:,} mini-épocas — "
+        f"{float(movement['pct_evaluable_of_total']):.2f}% do total)"
+    )
+    print()
+
+
+def format_stage_distribution(
+    distribution: Mapping[str, Mapping[str, Any]],
+) -> str:
+    """Formata ``{label: {count, percentage}}`` como
+    ``L1=1,234(12.3%) | L2=...`` para as linhas de log por época."""
+    parts = []
+    for stage, values in distribution.items():
+        count = int(values["count"])
+        percentage = float(values["percentage"])
+        parts.append(f"{stage}={count:,}({percentage:.1f}%)")
+    return " | ".join(parts)
+
+
 def print_stage_distribution(
     title: str,
     distribution: Mapping[

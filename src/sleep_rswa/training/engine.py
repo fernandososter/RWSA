@@ -25,6 +25,27 @@ def _safe_mean(values: list[float]) -> float:
     return float(np.mean(values)) if values else float("nan")
 
 
+def _binary_distribution(labels: np.ndarray) -> dict[str, dict[str, float | int]]:
+    """Distribuição binária de movimento no formato de ``StageDistribution.as_dict``:
+    ``{"Negative": {count, percentage}, "Positive": {count, percentage}}``.
+    Reaproveita ``print_stage_distribution``/``format_stage_distribution``.
+    """
+    labels = np.asarray(labels).reshape(-1).astype(np.int64)
+    total = int(labels.size)
+    positives = int((labels == 1).sum())
+    negatives = total - positives
+    return {
+        "Negative": {
+            "count": negatives,
+            "percentage": (100.0 * negatives / total) if total else 0.0,
+        },
+        "Positive": {
+            "count": positives,
+            "percentage": (100.0 * positives / total) if total else 0.0,
+        },
+    }
+
+
 def run_staging_epoch(
     model: torch.nn.Module,
     loader: Iterable[dict[str, Any]],
@@ -174,11 +195,15 @@ def run_rswa_epoch(
             "min_confidence e rem_mask_only."
         )
 
-    result = rswa_metrics(
-        torch.cat(movement_targets_all).numpy(),
-        torch.cat(movement_preds_all).numpy(),
-    )
-    return {"loss": _safe_mean(losses), **{k: float(v) for k, v in result.items()}}
+    targets_np = torch.cat(movement_targets_all).numpy()
+    preds_np = torch.cat(movement_preds_all).numpy()
+    result = rswa_metrics(targets_np, preds_np)
+    return {
+        "loss": _safe_mean(losses),
+        **{k: float(v) for k, v in result.items()},
+        "target_distribution": _binary_distribution(targets_np),
+        "prediction_distribution": _binary_distribution(preds_np),
+    }
 
 
 def evaluate_joint(
@@ -227,20 +252,27 @@ def evaluate_joint(
                 movement_targets_all.append(movement_targets[rswa_valid].long().cpu())
                 movement_preds_all.append(movement_preds[rswa_valid].cpu())
 
-    metrics: dict[str, float] = {}
+    metrics: dict[str, Any] = {}
     if stage_targets_all:
-        stage = staging_metrics(
-            torch.cat(stage_targets_all).numpy(), torch.cat(stage_preds_all).numpy()
-        )
+        stage_t = torch.cat(stage_targets_all).numpy()
+        stage_p = torch.cat(stage_preds_all).numpy()
+        stage = staging_metrics(stage_t, stage_p)
         metrics.update({f"staging_{k}": float(v) for k, v in stage.items()})
         metrics["staging_loss"] = _safe_mean(stage_losses)
+        st_target = StageDistribution()
+        st_pred = StageDistribution()
+        st_target.update(torch.as_tensor(stage_t))
+        st_pred.update(torch.as_tensor(stage_p))
+        metrics["staging_target_distribution"] = st_target.as_dict()
+        metrics["staging_prediction_distribution"] = st_pred.as_dict()
     if movement_targets_all:
-        rswa = rswa_metrics(
-            torch.cat(movement_targets_all).numpy(),
-            torch.cat(movement_preds_all).numpy(),
-        )
+        mv_t = torch.cat(movement_targets_all).numpy()
+        mv_p = torch.cat(movement_preds_all).numpy()
+        rswa = rswa_metrics(mv_t, mv_p)
         metrics.update({f"rswa_{k}": float(v) for k, v in rswa.items()})
         metrics["rswa_loss"] = _safe_mean(rswa_losses)
+        metrics["movement_target_distribution"] = _binary_distribution(mv_t)
+        metrics["movement_prediction_distribution"] = _binary_distribution(mv_p)
     return metrics
 
 
@@ -253,8 +285,10 @@ def collect_rswa_predictions(
     threshold: float = 0.5,
 ) -> dict[str, np.ndarray]:
     model.eval()
-    movement_expected: list[torch.Tensor] = []
-    movement_prediction: list[torch.Tensor] = []
+    movement_expected: list[np.ndarray] = []
+    movement_probability: list[np.ndarray] = []
+    subject_ids: list[str] = []
+    mini_indices: list[np.ndarray] = []
 
     with torch.no_grad():
         for batch in loader:
@@ -265,15 +299,31 @@ def collect_rswa_predictions(
                 continue
             with _autocast_context(device, amp):
                 outputs = model(emg, mask=padding_mask)
-            movement_pred = (torch.sigmoid(outputs["movement_logits"]) >= threshold).long()
-            movement_expected.append(batch["movement_labels"].to(device)[valid_mask].long().cpu())
-            movement_prediction.append(movement_pred[valid_mask].cpu())
+            probs = torch.sigmoid(outputs["movement_logits"].float())
+
+            valid_cpu = valid_mask.detach().cpu()
+            probs_cpu = probs.detach().cpu()
+            targets_cpu = batch["movement_labels"].detach().cpu()
+            batch_subject_ids = batch["subject_ids"]
+
+            for b, subject_id in enumerate(batch_subject_ids):
+                idx = torch.nonzero(valid_cpu[b], as_tuple=False).flatten()
+                if idx.numel() == 0:
+                    continue
+                movement_expected.append(targets_cpu[b, idx].numpy().astype(np.int64, copy=False))
+                movement_probability.append(probs_cpu[b, idx].numpy().astype(np.float32, copy=False))
+                subject_ids.extend([str(subject_id)] * int(idx.numel()))
+                mini_indices.append(idx.numpy().astype(np.int64, copy=False))
 
     if not movement_expected:
         raise RuntimeError("Nenhuma predição RSWA válida foi encontrada.")
+    prob_arr = np.concatenate(movement_probability)
     return {
-        "movement_expected": torch.cat(movement_expected).numpy(),
-        "movement_prediction": torch.cat(movement_prediction).numpy(),
+        "movement_expected": np.concatenate(movement_expected),
+        "movement_prediction": (prob_arr >= threshold).astype(np.int64, copy=False),
+        "movement_probability": prob_arr,
+        "subject_id": np.asarray(subject_ids, dtype=object),
+        "mini_epoch_index": np.concatenate(mini_indices),
     }
 
 

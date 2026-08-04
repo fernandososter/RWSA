@@ -159,6 +159,51 @@ class SleepAnalysisDataset(Dataset):
 
         return distribution
 
+    def movement_distribution(self) -> dict[str, int | float]:
+        """Contagem de movimento 'any' (tônico OU fásico) usando a MESMA máscara
+        de validade do ``__getitem__`` (confiança > min_confidence e, se
+        ``rem_mask_only``, apenas mini-épocas em REM).
+
+        Retorna, sobre todas as mini-épocas dos sujeitos deste split:
+          - ``total_mini_epochs``    total de mini-épocas
+          - ``evaluable_mini_epochs`` mini-épocas válidas para RSWA (na máscara)
+          - ``movement_positive``    mini-épocas válidas com movimento anotado
+          - ``pct_movement_of_evaluable`` % de positivos entre as avaliáveis
+          - ``pct_movement_of_total``     % de positivos sobre o total
+          - ``pct_evaluable_of_total``    % de mini-épocas avaliáveis sobre o total
+        """
+        total = 0
+        evaluable = 0
+        positives = 0
+        for subject in self.subjects:
+            stages = subject.sleep_stages.long()
+            conf = subject.rswa_conf.float()
+            valid = conf > self.min_confidence
+            if self.rem_mask_only:
+                valid = valid & stages.eq(self.rswa_config.rem_stage)
+
+            if subject.tonic_labels is not None and subject.phasic_labels is not None:
+                movement = (subject.tonic_labels > 0.5) | (subject.phasic_labels > 0.5)
+            else:
+                rswa = subject.rswa_labels.long()
+                movement = rswa.eq(self.rswa_config.tonic_label) | rswa.eq(
+                    self.rswa_config.phasic_label
+                )
+
+            movement_valid = movement & valid
+            total += int(stages.numel())
+            evaluable += int(valid.sum().item())
+            positives += int(movement_valid.sum().item())
+
+        return {
+            "total_mini_epochs": total,
+            "evaluable_mini_epochs": evaluable,
+            "movement_positive": positives,
+            "pct_movement_of_evaluable": (100.0 * positives / evaluable) if evaluable else 0.0,
+            "pct_movement_of_total": (100.0 * positives / total) if total else 0.0,
+            "pct_evaluable_of_total": (100.0 * evaluable / total) if total else 0.0,
+        }
+
     def summary(self) -> dict[str, int]:
         return {
             "exams": len(self.subjects),

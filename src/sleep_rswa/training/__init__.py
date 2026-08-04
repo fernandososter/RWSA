@@ -10,6 +10,12 @@ from .logger import ExperimentLogger
 from .losses import RSWALoss, StagingLoss
 from .plots import plot_confusion_matrix, plot_training_curves
 from .prediction_logger import ValidationPredictionLogger
+from .testing import (
+    describe_split,
+    evaluate_movement_test_set,
+    evaluate_staging_test_set,
+    format_split_description,
+)
 from .utils import (
     load_checkpoint,
     load_train_val_subjects,
@@ -31,6 +37,10 @@ __all__ = [
     "collect_staging_predictions",
     "stratified_group_folds",
     "stratified_group_holdout",
+    "describe_split",
+    "format_split_description",
+    "evaluate_movement_test_set",
+    "evaluate_staging_test_set",
     "plot_training_curves",
     "plot_confusion_matrix",
     "seed_everything",

@@ -3,6 +3,9 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 from time import perf_counter
+from typing import Any
+
+from sklearn.metrics import cohen_kappa_score, f1_score
 
 import matplotlib
 
@@ -21,19 +24,32 @@ from sleep_rswa import (
     collate_sleep_analysis_exams,
 )
 from sleep_rswa.data import load_subject_directory
+from sleep_rswa.distribution import StageDistribution
+from sleep_rswa.training.engine import _binary_distribution
+from sleep_rswa.utils import (
+    format_stage_distribution,
+    print_movement_distribution,
+    print_split_summary,
+    print_stage_distribution,
+)
 from sleep_rswa.training import (
     ExperimentLogger,
     RSWALoss,
     StagingLoss,
     collect_rswa_predictions,
     collect_staging_predictions,
+    describe_split,
     evaluate_joint,
+    evaluate_movement_test_set,
+    evaluate_staging_test_set,
+    format_split_description,
     load_checkpoint,
     plot_confusion_matrix,
     resolve_device,
     save_checkpoint,
     seed_everything,
     stratified_group_folds,
+    stratified_group_holdout,
 )
 
 GREEN  = "\033[92m"
@@ -58,6 +74,32 @@ def parse_args() -> argparse.Namespace:
             "pode guiar a estratificação."
         ),
     )
+    parser.add_argument(
+        "--test-fraction",
+        type=float,
+        default=0.2,
+        help=(
+            "Fração de sujeitos separada como conjunto de TESTE fixo, antes da "
+            "validação cruzada, estratificada por --test-stratify-by. Use 0 para "
+            "desativar. Ignorado se --test-dir for dado."
+        ),
+    )
+    parser.add_argument(
+        "--test-dir",
+        type=Path,
+        default=None,
+        help="Diretório .pt de teste EXTERNO; se dado, --data-dir vai inteiro para a CV.",
+    )
+    parser.add_argument(
+        "--test-stratify-by",
+        choices=["staging", "rswa"],
+        default="rswa",
+        help=(
+            "Rótulo que estratifica o holdout de TESTE. Padrão 'rswa' porque "
+            "movimento é raro e o teste precisa de positivos suficientes para "
+            "um F1 de movimento estável."
+        ),
+    )
     parser.add_argument("--epochs", type=int, default=30)
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--num-workers", type=int, default=2)
@@ -70,6 +112,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--all-stages", action="store_true")
     parser.add_argument("--movement-pos-weight", type=float)
     parser.add_argument("--patience", type=int, default=15)
+    parser.add_argument(
+        "--log-movement-distribution", action="store_true",
+        help="Mostra target/prediction de staging e movimento (train e val) por época.",
+    )
     parser.add_argument(
         "--monitor",
         choices=["joint_mean_f1", "staging_f1_macro", "rswa_movement_f1", "rswa_movement_kappa"],
@@ -132,7 +178,21 @@ def main() -> None:
     args = parse_args()
     seed_everything(args.seed)
     device = resolve_device(args.device)
-    subjects = load_subject_directory(args.data_dir)
+    all_subjects = load_subject_directory(args.data_dir)
+
+    # ── Conjunto de TESTE fixo (held-out), separado ANTES da CV ────────────
+    test_subjects: list = []
+    if args.test_dir is not None:
+        test_subjects = load_subject_directory(args.test_dir)
+        cv_subjects = all_subjects
+    elif args.test_fraction and args.test_fraction > 0.0:
+        cv_subjects, test_subjects = stratified_group_holdout(
+            all_subjects, test_fraction=args.test_fraction, seed=args.seed, task=args.test_stratify_by
+        )
+    else:
+        cv_subjects = all_subjects
+
+    subjects = cv_subjects
     folds = list(stratified_group_folds(subjects, n_splits=args.n_splits, seed=args.seed, task=args.stratify_by))
     if args.fold is not None:
         folds = [item for item in folds if item[0] == args.fold]
@@ -144,9 +204,31 @@ def main() -> None:
         device=device, args=vars(args), notes=args.notes, tags=args.tags,
     ) as logger:
         logger.info(f"Dispositivo: {device}")
-        logger.info(f"Sujeitos: {len(subjects)} | n_splits={args.n_splits} | estratificação={args.stratify_by}")
+        logger.info(
+            f"Sujeitos: total={len(all_subjects)} | CV={len(subjects)} | teste={len(test_subjects)} | "
+            f"n_splits={args.n_splits} | estratificação CV={args.stratify_by} | teste={args.test_stratify_by}"
+        )
 
         fold_summaries = []
+        staging_checkpoints: list[dict[str, Any]] = []
+        rswa_checkpoints: list[dict[str, Any]] = []
+        data_report: dict[str, Any] = {"folds": []}
+
+        if test_subjects:
+            logger.log_subject_split(subjects, test_subjects, filename="test_split.json")
+            test_dataset = make_loader(test_subjects, args, False, device).dataset
+            test_desc = describe_split(test_dataset)
+            data_report["test"] = test_desc
+            logger.info(format_split_description("TESTE (held-out)", test_desc))
+            print_stage_distribution(
+                "TESTE (held-out) - Stage distribution",
+                test_dataset.stage_distribution().as_dict(),
+            )
+            print_movement_distribution(
+                "TESTE (held-out) - Movement distribution",
+                test_dataset.movement_distribution(),
+            )
+
         for fold, train_subjects, val_subjects in folds:
             seed_everything(args.seed + fold)
             fold_dir = logger.run_dir / f"fold_{fold}"
@@ -157,6 +239,46 @@ def main() -> None:
 
             train_loader = make_loader(train_subjects, args, True, device)
             val_loader = make_loader(val_subjects, args, False, device)
+
+            # ── Documentação de dados do fold (exames, % estágios, % movimento) ──
+            train_desc = describe_split(train_loader.dataset)
+            val_desc = describe_split(val_loader.dataset)
+            fold_data = {"fold": fold, "train": train_desc, "validation": val_desc}
+            data_report["folds"].append(fold_data)
+            logger.write_json(f"fold_{fold}/data_description.json", fold_data)
+            logger.info(format_split_description(f"Fold {fold} TREINO", train_desc))
+            logger.info(format_split_description(f"Fold {fold} VALIDAÇÃO", val_desc))
+
+            print()
+            print("=" * 80)
+            print(f"FOLD {fold}/{args.n_splits}")
+            print("=" * 80)
+
+            print_stage_distribution(
+                f"Fold {fold} - Train stage distribution",
+                train_loader.dataset.stage_distribution().as_dict(),
+            )
+            print_movement_distribution(
+                f"Fold {fold} - Train movement distribution",
+                train_loader.dataset.movement_distribution(),
+            )
+            print_stage_distribution(
+                f"Fold {fold} - Validation stage distribution",
+                val_loader.dataset.stage_distribution().as_dict(),
+            )
+            print_movement_distribution(
+                f"Fold {fold} - Validation movement distribution",
+                val_loader.dataset.movement_distribution(),
+            )
+
+            print_split_summary(
+                split_name="Train", subjects=train_subjects,
+                dataset=train_loader.dataset, loader=train_loader,
+            )
+            print_split_summary(
+                split_name="Validation", subjects=val_subjects,
+                dataset=val_loader.dataset, loader=val_loader,
+            )
 
             staging_model = SleepStagingNet().to(device)
             rswa_model = RSWADetectionNet().to(device)
@@ -188,6 +310,10 @@ def main() -> None:
                 rswa_loss_sum = 0.0
                 stage_batches = 0
                 rswa_batches = 0
+                tr_stage_targets: list[torch.Tensor] = []
+                tr_stage_preds: list[torch.Tensor] = []
+                tr_move_targets: list[torch.Tensor] = []
+                tr_move_preds: list[torch.Tensor] = []
 
                 for batch in train_loader:
                     signals = batch["signals"].to(device, non_blocking=True)
@@ -211,6 +337,8 @@ def main() -> None:
                         staging_optimizer.step()
                         stage_loss_sum += float(stage_loss.detach().cpu())
                         stage_batches += 1
+                        tr_stage_targets.append(stage_targets[stage_valid].detach().cpu())
+                        tr_stage_preds.append(stage_logits.detach().argmax(dim=-1)[stage_valid].cpu())
 
                     if rswa_valid.any():
                         rswa_optimizer.zero_grad(set_to_none=True)
@@ -225,8 +353,25 @@ def main() -> None:
                         rswa_optimizer.step()
                         rswa_loss_sum += float(rswa_loss.detach().cpu())
                         rswa_batches += 1
+                        move_preds = (torch.sigmoid(rswa_outputs["movement_logits"].detach()) >= args.threshold).long()
+                        tr_move_targets.append(movement_targets[rswa_valid].long().detach().cpu())
+                        tr_move_preds.append(move_preds[rswa_valid].cpu())
 
                 train_time = perf_counter() - train_start
+
+                # Distribuições de treino (staging 5-classes e movimento binário).
+                train_dist: dict[str, Any] = {}
+                if tr_stage_targets:
+                    st_t = StageDistribution(); st_p = StageDistribution()
+                    st_t.update(torch.cat(tr_stage_targets)); st_p.update(torch.cat(tr_stage_preds))
+                    train_dist["staging_target_distribution"] = st_t.as_dict()
+                    train_dist["staging_prediction_distribution"] = st_p.as_dict()
+                if tr_move_targets:
+                    train_dist["movement_target_distribution"] = _binary_distribution(
+                        torch.cat(tr_move_targets).numpy())
+                    train_dist["movement_prediction_distribution"] = _binary_distribution(
+                        torch.cat(tr_move_preds).numpy())
+
                 val_start = perf_counter()
                 val_metrics = evaluate_joint(
                     system, val_loader, staging_loss_fn, rswa_loss_fn, device,
@@ -244,22 +389,37 @@ def main() -> None:
                     "rswa_learning_rate": rswa_optimizer.param_groups[0]["lr"],
                     "train_staging_loss": stage_loss_sum / max(stage_batches, 1),
                     "train_rswa_loss": rswa_loss_sum / max(rswa_batches, 1),
-                    **{f"val_{key}": value for key, value in val_metrics.items()},
+                    **{f"val_{key}": value for key, value in val_metrics.items()
+                       if isinstance(value, (int, float))},
                 }
                 history.append(row)
                 logger.log_epoch(row)
                 logger.info(
                     f"fold={fold} ep={epoch:03d} train={train_time:.1f}s val={val_time:.1f}s "
+                    f"{GREEN}"
                     f"train_stg_loss={row['train_staging_loss']:.4f} "
-                    f"train_rswa_loss={row['train_rswa_loss']:.4f} | "
+                    f"train_rswa_loss={row['train_rswa_loss']:.4f}"
+                    f"{RESET} | "
                     f"{YELLOW}"
                     f"val_stg_f1={val_metrics.get('staging_f1_macro', float('nan')):.4f} "
                     f"val_stg_kappa={val_metrics.get('staging_kappa', float('nan')):.4f} "
-                    f"{GREEN}"
                     f"val_movement_f1={val_metrics.get('rswa_movement_f1', float('nan')):.4f} "
                     f"val_movement_kappa={val_metrics.get('rswa_movement_kappa', float('nan')):.4f}"
                     f"{RESET}"
                 )
+
+                if args.log_movement_distribution:
+                    def _emit(tag, dist, color, key):
+                        if key in dist:
+                            logger.info(f"{color}{tag}[{format_stage_distribution(dist[key])}]{RESET}")
+                    _emit("train_stage_targets", train_dist, GREEN, "staging_target_distribution")
+                    _emit("train_stage_predictions", train_dist, GREEN, "staging_prediction_distribution")
+                    _emit("train_move_targets", train_dist, GREEN, "movement_target_distribution")
+                    _emit("train_move_predictions", train_dist, GREEN, "movement_prediction_distribution")
+                    _emit("val_stage_targets", val_metrics, YELLOW, "staging_target_distribution")
+                    _emit("val_stage_predictions", val_metrics, YELLOW, "staging_prediction_distribution")
+                    _emit("val_move_targets", val_metrics, YELLOW, "movement_target_distribution")
+                    _emit("val_move_predictions", val_metrics, YELLOW, "movement_prediction_distribution")
 
                 save_checkpoint(
                     checkpoint_dir / "staging_last.pt", model=staging_model,
@@ -331,6 +491,8 @@ def main() -> None:
                 display_labels=["Negative", "Positive"], title=f"Movement normalized confusion matrix - Fold {fold}", normalize="true",
             )
 
+            staging_checkpoints.append({"fold": fold, "best_checkpoint": checkpoint_dir / "staging_best.pt"})
+            rswa_checkpoints.append({"fold": fold, "best_checkpoint": checkpoint_dir / "rswa_best.pt"})
             fold_summaries.append(
                 {
                     "fold": fold,
@@ -343,6 +505,24 @@ def main() -> None:
                     "best_val_movement_kappa": best_metrics.get("rswa_movement_kappa"),
                 }
             )
+
+        # ── Fase de TESTE (held-out): ensemble dos folds, staging e movimento ─
+        staging_test_summary: dict[str, Any] | None = None
+        movement_test_summary: dict[str, Any] | None = None
+        if test_subjects and staging_checkpoints:
+            test_loader = make_loader(test_subjects, args, False, device)
+            staging_test_summary = evaluate_staging_test_set(
+                test_loader=test_loader, fold_checkpoints=staging_checkpoints,
+                build_model=lambda: SleepStagingNet(), device=device, logger=logger,
+                figures_dir=logger.run_dir / "test", amp=not args.no_amp,
+            )
+            movement_test_summary = evaluate_movement_test_set(
+                test_loader=test_loader, fold_checkpoints=rswa_checkpoints,
+                build_model=lambda: RSWADetectionNet(), device=device, logger=logger,
+                figures_dir=logger.run_dir / "test", amp=not args.no_amp, threshold=args.threshold,
+            )
+
+        logger.write_json("data_description.json", data_report)
 
         staging_f1_values = np.asarray(
             [f["best_val_staging_f1_macro"] for f in fold_summaries if f["best_val_staging_f1_macro"] is not None],
@@ -371,6 +551,12 @@ def main() -> None:
                     "staging_f1_macro": _mean_std(staging_f1_values),
                     "movement_f1": _mean_std(movement_f1_values),
                 },
+                "test": {
+                    "stratify_by": args.test_stratify_by,
+                    "staging": staging_test_summary,
+                    "movement": movement_test_summary,
+                },
+                "data_description": data_report,
             },
         )
 
