@@ -33,6 +33,14 @@ nao consegue, matematicamente, separar tonus tonico real de artefato de
 movimento sustentado usando so duracao+amplitude do EMG; por isso todo
 candidato a tonico exige confirmacao visual antes de virar rotulo.
 
+CORRECAO (2026-08-03): toda mini-epoca marcada como movimento pela CNN
+agora tem garantia de cobertura no segundo CSV (ensure_movement_coverage
+em tonic_phasic.py) -- antes, ~11.5% dos eventos do CSV primario (medido
+em rbd1) nao apareciam em NENHUMA linha do CSV tonico/fasico (zona morta
+de duracao 5-16s descartada, ou trecho de movimento sem segmento de
+ativacao RMS suficiente). Nenhum evento do CSV primario deve mais
+desaparecer silenciosamente da revisao.
+
 Uso:
     python classifier/predict_movements.py EXAME.pt [-o SAIDA.csv]
                  [--model CKPT.pt] [--threshold 0.5] [--min-epochs 1]
@@ -64,7 +72,9 @@ from classifier.movement_clf.dataio import load_exam, zscore_emg, events_from_bi
 from classifier.movement_clf.dataset import build_tensors
 from classifier.movement_clf.model import MovementCNN
 from classifier.movement_clf.engine import resolve_device
-from classifier.movement_clf.tonic_phasic import classify_tonic_phasic, restrict_to_movement
+from classifier.movement_clf.tonic_phasic import (
+    classify_tonic_phasic, restrict_to_movement, ensure_movement_coverage,
+)
 
 DEFAULT_MODEL = HERE / "outputs" / "movement_cnn_final.pt"
 
@@ -80,6 +90,12 @@ def predict_tonic_phasic(exam, movement_mask, annot_start: float | None = None):
     flat = exam.emg.reshape(-1).astype(float)  # [T*300], fs=100Hz, mesmo referencial do exam
     events = classify_tonic_phasic(flat)
     events = restrict_to_movement(events, movement_mask, epoch_sec=EPOCH_SEC)
+    # Garantia de cobertura (correcao 2026-08-03): nenhum trecho que a CNN
+    # marcou como movimento pode ficar sem nenhuma linha no CSV de
+    # sub-classificacao, mesmo que a regra de amplitude nao tenha gerado
+    # segmento de ativacao suficiente ali (ver tonic_phasic.py).
+    events = ensure_movement_coverage(events, movement_mask, epoch_sec=EPOCH_SEC)
+    events.sort(key=lambda e: e["onset_s"])
     for e in events:
         e["subject_id"] = exam.subject_id
         e["needs_review"] = (e["type"] == "tonic_candidate")
