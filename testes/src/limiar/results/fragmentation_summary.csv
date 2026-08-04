@@ -1,0 +1,3 @@
+method,n_segments_raw,n_segments_after_merge_gaps,n_short_fragments_raw_lt_0.3s
+double,2934,2809,7
+single,10258,2861,1418
