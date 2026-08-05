@@ -120,7 +120,7 @@ def main():
     rows = []
     frag_rows = []
     for stem in subject_stems:
-        # pega os eventos ja carregados do ground truth (csv) e o EMG sintetico (pt)
+        # pega os eventos ja
         emg = load_synth_exam(DATA_DIR / f"{stem}.pt")
         gt_df = load_ground_truth(DATA_DIR / f"{stem}_events.csv")
 
