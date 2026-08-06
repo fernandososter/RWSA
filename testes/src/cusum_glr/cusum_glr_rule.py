@@ -109,10 +109,13 @@ GLR_SCALES_S = [0.1, 0.2, 0.4, 0.8, 1.6, 3.0]   # escalas geometricas, ~0.1 a 3s
 GLR_H = 9.0             # limiar de decisao sobre Lambda[n] -- valor com melhor F1 tonico (0.98)
                         # na varredura, AINDA com blob (max ~800s); ver nota acima e avaliacao.
 
-# --- classificacao por duracao (identica aos testes 1 e 2) ---
-PHASIC_LO_S = 0.5
+# --- classificacao por duracao + amplitude (cortes atualizados pelo usuario,
+# identicos aos usados em testes/src/limiar/threshold_rule.py e
+# testes/src/tkeo/tkeo_rule.py apos a revisao em exames reais) ---
+PHASIC_LO_S = 0.1
 PHASIC_HI_S = 5.0
-TONIC_MIN_DUR_S = 16.0
+TONIC_MIN_DUR_S = 15.0          # faixa "any" (ambigua) fica entre PHASIC_HI_S e TONIC_MIN_DUR_S
+MIN_AMPLITUDE_RATIO = 2.0        # score (pico do envelope / media do baseline local) minimo
 
 
 def rms_envelope(x: np.ndarray, win_sec: float = 0.1, fs: int = FS) -> np.ndarray:
@@ -194,23 +197,33 @@ class DetectedEvent:
     score: float
 
 
-def segments_to_events(segs: list[tuple[int, int]], score_signal: np.ndarray,
+def segments_to_events(segs: list[tuple[int, int]], env: np.ndarray, baseline: np.ndarray,
                         fs: int = FS, phasic_lo_s: float = PHASIC_LO_S,
                         phasic_hi_s: float = PHASIC_HI_S,
-                        tonic_min_dur_s: float = TONIC_MIN_DUR_S) -> list[DetectedEvent]:
+                        tonic_min_dur_s: float = TONIC_MIN_DUR_S,
+                        min_amplitude_ratio: float = MIN_AMPLITUDE_RATIO) -> list[DetectedEvent]:
+    """Classificacao por duracao (fasico/any/tonico) + filtro de amplitude:
+    score = pico do ENVELOPE RMS / media do baseline robusto (mu0) local
+    dentro do segmento -- nao mais o proprio estatistico CUSUM/GLR (g ou
+    Lambda), para que o campo `score` seja comparavel entre os tres testes
+    (limiar/tkeo/cusum_glr), conforme pedido pelo usuario. Segmentos com
+    score < min_amplitude_ratio sao descartados (nao contam como evento de
+    nenhum tipo)."""
     events = []
     for s, e in segs:
         dur_s = (e - s) / fs
         if dur_s < phasic_lo_s:
             continue
+        score = float(np.max(env[s:e]) / max(np.mean(baseline[s:e]), 1e-12))
+        if score < min_amplitude_ratio:
+            continue
         onset_s = s / fs
-        score = float(np.max(score_signal[s:e]))
         if phasic_lo_s <= dur_s <= phasic_hi_s:
             etype = "phasic"
         elif dur_s >= tonic_min_dur_s:
             etype = "tonic"
         else:
-            etype = "unclassified"
+            etype = "any"
         events.append(DetectedEvent(onset_s=onset_s, duration_s=dur_s, type=etype, score=round(score, 3)))
     return events
 
@@ -261,7 +274,7 @@ def detect_events_cusum(emg_flat: np.ndarray, fs: int = FS,
     if apply_merge_gaps:
         mask = merge_gaps(mask, gap_samples=int(round(MERGE_GAP_S * fs)))
     segs = segments_from_mask(mask)
-    return segments_to_events(segs, g, fs=fs)
+    return segments_to_events(segs, env, mu0, fs=fs)
 
 
 def glr_multiscale_statistic(z: np.ndarray, scales_s: list[float] = GLR_SCALES_S,
@@ -298,7 +311,7 @@ def detect_events_glr(emg_flat: np.ndarray, fs: int = FS, h: float = GLR_H,
     if apply_merge_gaps:
         mask = merge_gaps(mask, gap_samples=int(round(MERGE_GAP_S * fs)))
     segs = segments_from_mask(mask)
-    return segments_to_events(segs, lam, fs=fs)
+    return segments_to_events(segs, env, mu0, fs=fs)
 
 
 # --------------------------------------------------------------------------
@@ -365,4 +378,4 @@ def detect_events_cusum_leaky(emg_flat: np.ndarray, fs: int = FS,
     if apply_merge_gaps:
         mask = merge_gaps(mask, gap_samples=int(round(MERGE_GAP_S * fs)))
     segs = segments_from_mask(mask)
-    return segments_to_events(segs, g, fs=fs)
+    return segments_to_events(segs, env, mu0, fs=fs)

@@ -1,179 +1,243 @@
 """
-Avaliacao: limiar simples vs. limiar duplo (histerese) para isolar e
-classificar eventos tonicos/fasicos, testado contra os 10 exames sinteticos
-com ground truth exato em testes/data/ (ver testes/generate_synthetic_data.py).
+Avaliacao intervalar do metodo de limiar (single vs. double) em exames reais.
 
-Isolado: usa apenas threshold_rule.py (deste mesmo diretorio) + torch/numpy/
-pandas. Nao importa nada de classifier/ ou src/sleep_rswa/.
+Novo fluxo:
+1. Le cada evento anotado no arquivo <exame>_revisado.csv.
+2. Converte onset/duration para tempo do .pt usando annot_start quando
+   disponivel em classifier/labels/exam_config.json.
+3. Recorta o EMG apenas no intervalo anotado.
+4. Executa o detector nesse recorte, sem varrer o exame inteiro.
+5. Registra:
+   - um resumo por intervalo anotado (interval_analysis.csv)
+   - a lista completa dos eventos detectados dentro de cada intervalo
+     (detected_events.csv)
+   - agregados por exame e globais (per_subject_metrics.csv e
+     summary_metrics.csv)
 
-Metrica: correspondencia por evento (nao por mini-epoca). Para cada tipo
-(fasico, tonico), um evento verdadeiro conta como TP se ao menos um evento
-detectado DO MESMO TIPO se sobrepoe a ele no tempo; caso contrario e FN. Um
-evento detectado do tipo T conta como FP se nao se sobrepoe a nenhum evento
-verdadeiro do tipo T. Overlap = qualquer intersecao temporal > 0 -- eventos
-tonicos/fasicos verdadeiros nunca se sobrepoem entre si (by construction do
-gerador), entao esta regra simples e nao-ambigua.
-
-Saidas (em testes/src/limiar/results/):
-  per_subject_metrics.csv       -- TP/FP/FN/precision/recall/f1 por (exame, metodo, tipo)
-  summary_metrics.csv           -- agregado (todos os exames somados) por (metodo, tipo)
-  threshold_comparison.png      -- figura comparando precisao/recall/F1, simples vs duplo, fasico vs tonico
-  
-  
-  
-FUNCIONAMENTO: 
-
-Etapa 0 — pré-processamento (igual para os dois métodos)
-
-Envelope RMS: o EMG bruto é elevado ao quadrado e suavizado por uma janela deslizante de 0,1s, depois tira-se a raiz — isso dá uma curva de amplitude que sobe durante contração muscular e cai no repouso, sem a oscilação bipolar do sinal bruto.
-Baseline local: em vez de um único valor fixo de "repouso" para o exame inteiro, calcula-se o percentil 10 do envelope dentro de uma janela local de 120s, deslizando ao longo do tempo. Isso segue o mesmo nível de ruído de fundo do paciente, que varia com a postura, o estágio de sono e a impedância do eletrodo ao longo da noite.
-
+Observacao importante:
+- A baseline local e os limiares sao calculados apenas dentro do recorte do
+  intervalo anotado, conforme solicitado.
+- O CSV revisado nao e usado para "guiar" a deteccao dentro do recorte; ele
+  apenas define qual janela temporal deve ser analisada.
 """
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from threshold_rule import detect_events, raw_mask, segments_from_mask, merge_gaps, MERGE_GAP_S
+from threshold_rule import detect_events
 
-DATA_DIR = Path(__file__).resolve().parents[2] / "data"   # testes/src/limiar/../.. -> testes / data
-RESULTS_DIR = Path(__file__).resolve().parent / "results"  # testes/src/limiar/results
+DATA_DIR = Path(__file__).resolve().parents[2] / "data_real"
+RESULTS_DIR = Path(__file__).resolve().parent / "results"
+CONFIG_PATH = Path(__file__).resolve().parents[3] / "classifier" / "labels" / "exam_config.json"
 EMG_CHANNEL_INDEX = 4
 FS = 100
 METHODS = ["single", "double"]
-EVENT_TYPES = ["phasic", "tonic"]
+EVENT_TYPES = ["phasic", "tonic", "any"]
 
 
-def load_synth_exam(pt_path: Path):
+def load_exam_emg(pt_path: Path):
     obj = torch.load(pt_path, map_location="cpu", weights_only=False)
-    emg = obj["signals"][:, EMG_CHANNEL_INDEX, :].numpy().astype(np.float64).reshape(-1)
-    return emg
+    return obj["signals"][:, EMG_CHANNEL_INDEX, :].numpy().astype("float64").reshape(-1)
+
+
+def load_offsets(config_path: Path) -> dict[str, float | None]:
+    if not config_path.exists():
+        return {}
+    cfg = json.loads(config_path.read_text())
+    return {exam: meta.get("annot_start") for exam, meta in cfg.items()}
 
 
 def load_ground_truth(csv_path: Path) -> pd.DataFrame:
     df = pd.read_csv(csv_path)
     df["end_s"] = df["onset_s"] + df["duration_s"]
+    df["interval_id"] = range(1, len(df) + 1)
     return df
 
 
-def match_events(gt_df: pd.DataFrame, detected: list, event_type: str) -> dict:
-    """Correspondencia por sobreposicao temporal, restrita a `event_type`.
-
-    Retorna {tp, fp, fn} (contagem de eventos, nao de amostras).
-    """
-    gt_sub = gt_df[gt_df["type"] == event_type]
-    det_sub = [d for d in detected if d.type == event_type]
-
-    gt_matched = np.zeros(len(gt_sub), dtype=bool)
-    det_matched = np.zeros(len(det_sub), dtype=bool)
-
-    gt_starts = gt_sub["onset_s"].to_numpy()
-    gt_ends = gt_sub["end_s"].to_numpy()
-
-    for j, d in enumerate(det_sub):
-        d_start, d_end = d.onset_s, d.onset_s + d.duration_s
-        overlaps = (gt_starts < d_end) & (gt_ends > d_start)
-        idxs = np.where(overlaps)[0]
-        if len(idxs) > 0:
-            det_matched[j] = True
-            gt_matched[idxs] = True
-
-    tp = int(gt_matched.sum())          # eventos verdadeiros capturados por >=1 deteccao correta
-    fn = int((~gt_matched).sum())       # eventos verdadeiros sem nenhuma deteccao correspondente
-    fp = int((~det_matched).sum())      # deteccoes deste tipo sem evento verdadeiro correspondente
-    return {"tp": tp, "fp": fp, "fn": fn}
+def resolve_annot_start(subject: str, offsets: dict[str, float | None]) -> float:
+    value = offsets.get(subject)
+    return float(value) if value is not None else 0.0
 
 
-def prf1(tp: int, fp: int, fn: int) -> tuple[float, float, float]:
-    precision = tp / (tp + fp) if (tp + fp) > 0 else np.nan
-    recall = tp / (tp + fn) if (tp + fn) > 0 else np.nan
-    f1 = (2 * precision * recall / (precision + recall)
-          if (precision + recall) > 0 and not (np.isnan(precision) or np.isnan(recall)) else np.nan)
-    return precision, recall, f1
+def clip_interval_to_exam(start_s: float, end_s: float, n_samples: int, fs: int = FS) -> tuple[int, int]:
+    i0 = max(0, int(round(start_s * fs)))
+    i1 = min(n_samples, int(round(end_s * fs)))
+    return i0, i1
 
 
-def fragmentation_stats(emg: np.ndarray, method: str, fs: int = FS) -> dict:
-    """Mede a fragmentacao INTRINSECA de cada metodo de limiar, isolada do
-    pos-processamento de merge_gaps -- ver docstring de detect_events."""
-    _, _, mask = raw_mask(emg, method=method, fs=fs)
-    segs_raw = segments_from_mask(mask)
-    mask_merged = merge_gaps(mask, gap_samples=int(round(MERGE_GAP_S * fs)))
-    segs_merged = segments_from_mask(mask_merged)
-    durs_raw = np.array([(e - s) / fs for s, e in segs_raw])
-    return {
-        "n_segments_raw": len(segs_raw),
-        "n_segments_after_merge_gaps": len(segs_merged),
-        "n_short_fragments_raw_lt_0.3s": int((durs_raw < 0.3).sum()) if len(durs_raw) else 0,
+def detect_events_in_interval(
+    emg: object,
+    start_s_pt: float,
+    end_s_pt: float,
+    method: str,
+    fs: int = FS,
+) -> tuple[list[dict], dict]:
+    i0, i1 = clip_interval_to_exam(start_s_pt, end_s_pt, len(emg), fs=fs)
+    clipped_start_s = i0 / fs
+    clipped_end_s = i1 / fs
+
+    meta = {
+        "analysis_start_s_pt": round(clipped_start_s, 3),
+        "analysis_end_s_pt": round(clipped_end_s, 3),
+        "analysis_duration_s": round(max(0.0, clipped_end_s - clipped_start_s), 3),
+        "was_clipped": (abs(clipped_start_s - start_s_pt) > 1e-9) or (abs(clipped_end_s - end_s_pt) > 1e-9),
+        "is_empty": i0 >= i1,
     }
+    if i0 >= i1:
+        return [], meta
+
+    local_events = detect_events(emg[i0:i1], method=method, fs=fs, apply_merge_gaps=True)
+    detected = []
+    for event_idx, ev in enumerate(local_events, start=1):
+        onset_s = clipped_start_s + ev.onset_s
+        end_s = onset_s + ev.duration_s
+        detected.append({
+            "event_index_in_interval": event_idx,
+            "event_type": ev.type,
+            "onset_s": round(onset_s, 3),
+            "end_s": round(end_s, 3),
+            "duration_s": round(ev.duration_s, 3),
+            "score": ev.score,
+        })
+    return detected, meta
+
+
+def classify_interval_status(gt_type: str, counts: dict[str, int]) -> str:
+    if counts.get(gt_type, 0) > 0:
+        return "same_type_detected"
+    if sum(counts.values()) == 0:
+        return "none_detected"
+    if counts.get("any", 0) > 0 and counts.get("phasic", 0) == 0 and counts.get("tonic", 0) == 0:
+        return "only_ambiguous"
+    return "other_type_detected"
+
+
+def aggregate_interval_metrics(df: pd.DataFrame, group_cols: list[str]) -> pd.DataFrame:
+    grouped = (df.groupby(group_cols)
+               .agg(
+                   n_intervals=("interval_id", "count"),
+                   n_same_type_detected=("same_type_detected", "sum"),
+                   n_any_detected=("any_detected", "sum"),
+                   n_none_detected=("none_detected", "sum"),
+                   n_only_ambiguous=("only_ambiguous", "sum"),
+                   n_other_type_detected=("other_type_detected", "sum"),
+                   n_clipped_intervals=("was_clipped", "sum"),
+                   mean_n_detected_total=("n_detected_total", "mean"),
+                   mean_n_detected_phasic=("n_detected_phasic", "mean"),
+                   mean_n_detected_tonic=("n_detected_tonic", "mean"),
+                   mean_n_detected_ambiguous=("n_detected_ambiguous", "mean"),
+               )
+               .reset_index())
+
+    grouped["same_type_rate"] = grouped["n_same_type_detected"] / grouped["n_intervals"]
+    grouped["any_detection_rate"] = grouped["n_any_detected"] / grouped["n_intervals"]
+    grouped["mean_n_detected_total"] = grouped["mean_n_detected_total"].round(3)
+    grouped["mean_n_detected_phasic"] = grouped["mean_n_detected_phasic"].round(3)
+    grouped["mean_n_detected_tonic"] = grouped["mean_n_detected_tonic"].round(3)
+    grouped["mean_n_detected_ambiguous"] = grouped["mean_n_detected_ambiguous"].round(3)
+    grouped["same_type_rate"] = grouped["same_type_rate"].round(6)
+    grouped["any_detection_rate"] = grouped["any_detection_rate"].round(6)
+    return grouped
 
 
 def main():
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-    subject_stems = sorted(p.stem for p in DATA_DIR.glob("synth*.pt"))
-    assert len(subject_stems) > 0, f"nenhum synth*.pt encontrado em {DATA_DIR}"
+    offsets = load_offsets(CONFIG_PATH)
+    subject_stems = sorted(p.stem for p in DATA_DIR.glob("*.pt"))
+    assert subject_stems, f"nenhum .pt encontrado em {DATA_DIR}"
 
-    rows = []
-    frag_rows = []
+    interval_rows = []
+    detected_rows = []
+
     for stem in subject_stems:
-        # pega os eventos ja
-        emg = load_synth_exam(DATA_DIR / f"{stem}.pt")
-        gt_df = load_ground_truth(DATA_DIR / f"{stem}_events.csv")
+        emg = load_exam_emg(DATA_DIR / f"{stem}.pt")
+        gt_df = load_ground_truth(DATA_DIR / f"{stem}_revisado.csv")
+        annot_start = resolve_annot_start(stem, offsets)
 
-        for method in METHODS:
-            # metricas de evento (com merge_gaps -- pipeline "real")
-            detected = detect_events(emg, method=method, fs=FS, apply_merge_gaps=True)
-            n_unclassified = sum(1 for d in detected if d.type == "unclassified")
-            for etype in EVENT_TYPES:
-                m = match_events(gt_df, detected, etype)
-                precision, recall, f1 = prf1(m["tp"], m["fp"], m["fn"])
-                rows.append({
-                    "subject": stem, "method": method, "event_type": etype,
-                    "tp": m["tp"], "fp": m["fp"], "fn": m["fn"],
-                    "n_gt": int((gt_df["type"] == etype).sum()),
-                    "n_detected": sum(1 for d in detected if d.type == etype),
-                    "n_unclassified_total": n_unclassified,
-                    "precision": precision, "recall": recall, "f1": f1,
+        for row in gt_df.itertuples(index=False):
+            gt_onset_s = float(row.onset_s)
+            gt_end_s = float(row.end_s)
+            gt_duration_s = float(row.duration_s)
+            gt_type = str(row.type)
+            start_s_pt = gt_onset_s - annot_start
+            end_s_pt = gt_end_s - annot_start
+
+            for method in METHODS:
+                detected, meta = detect_events_in_interval(
+                    emg=emg,
+                    start_s_pt=start_s_pt,
+                    end_s_pt=end_s_pt,
+                    method=method,
+                    fs=FS,
+                )
+
+                counts = {etype: sum(1 for d in detected if d["event_type"] == etype) for etype in EVENT_TYPES}
+                status = classify_interval_status(gt_type, counts)
+
+                interval_rows.append({
+                    "subject": stem,
+                    "interval_id": int(row.interval_id),
+                    "method": method,
+                    "gt_type": gt_type,
+                    "csv_onset_s": round(gt_onset_s, 3),
+                    "csv_end_s": round(gt_end_s, 3),
+                    "csv_duration_s": round(gt_duration_s, 3),
+                    "annot_start_used": round(annot_start, 3),
+                    "pt_onset_s": round(start_s_pt, 3),
+                    "pt_end_s": round(end_s_pt, 3),
+                    **meta,
+                    "n_detected_total": len(detected),
+                    "n_detected_phasic": counts["phasic"],
+                    "n_detected_tonic": counts["tonic"],
+                    "n_detected_ambiguous": counts["any"],
+                    "detected_types": "|".join(sorted({d["event_type"] for d in detected})) if detected else "",
+                    "status": status,
+                    "same_type_detected": status == "same_type_detected",
+                    "any_detected": len(detected) > 0,
+                    "none_detected": status == "none_detected",
+                    "only_ambiguous": status == "only_ambiguous",
+                    "other_type_detected": status == "other_type_detected",
                 })
 
-            # fragmentacao intrinseca (sem merge_gaps) -- mostra a vantagem
-            # estrutural do limiar duplo antes do pos-processamento mascara-la
-            frag = fragmentation_stats(emg, method=method, fs=FS)
-            frag_rows.append({"subject": stem, "method": method, **frag})
+                for det in detected:
+                    detected_rows.append({
+                        "subject": stem,
+                        "interval_id": int(row.interval_id),
+                        "method": method,
+                        "gt_type": gt_type,
+                        "csv_onset_s": round(gt_onset_s, 3),
+                        "csv_end_s": round(gt_end_s, 3),
+                        "annot_start_used": round(annot_start, 3),
+                        "analysis_start_s_pt": meta["analysis_start_s_pt"],
+                        "analysis_end_s_pt": meta["analysis_end_s_pt"],
+                        "analysis_duration_s": meta["analysis_duration_s"],
+                        **det,
+                    })
 
-    per_subject = pd.DataFrame(rows)
+    interval_df = pd.DataFrame(interval_rows)
+    detected_df = pd.DataFrame(detected_rows)
+    per_subject = aggregate_interval_metrics(interval_df, ["subject", "method", "gt_type"])
+    summary = aggregate_interval_metrics(interval_df, ["method", "gt_type"])
+
+    interval_df.to_csv(RESULTS_DIR / "interval_analysis.csv", index=False)
+    detected_df.to_csv(RESULTS_DIR / "detected_events.csv", index=False)
     per_subject.to_csv(RESULTS_DIR / "per_subject_metrics.csv", index=False)
+    summary.to_csv(RESULTS_DIR / "summary_metrics.csv", index=False)
 
-    frag_df = pd.DataFrame(frag_rows)
-    frag_df.to_csv(RESULTS_DIR / "fragmentation_stats.csv", index=False)
-
-    agg = (per_subject.groupby(["method", "event_type"])
-           .agg(tp=("tp", "sum"), fp=("fp", "sum"), fn=("fn", "sum"),
-                n_gt=("n_gt", "sum"), n_detected=("n_detected", "sum"))
-           .reset_index())
-    agg["precision"], agg["recall"], agg["f1"] = zip(*agg.apply(
-        lambda r: prf1(r["tp"], r["fp"], r["fn"]), axis=1))
-    agg.to_csv(RESULTS_DIR / "summary_metrics.csv", index=False)
-
-    frag_agg = frag_df.groupby("method")[
-        ["n_segments_raw", "n_segments_after_merge_gaps", "n_short_fragments_raw_lt_0.3s"]
-    ].sum().reset_index()
-    frag_agg.to_csv(RESULTS_DIR / "fragmentation_summary.csv", index=False)
-
-    print(per_subject.to_string(index=False))
+    print("=== ANALISE POR INTERVALO ANOTADO ===")
+    print(f"{len(interval_df)} linhas gravadas em {RESULTS_DIR / 'interval_analysis.csv'}")
+    print(f"{len(detected_df)} eventos gravados em {RESULTS_DIR / 'detected_events.csv'}")
     print()
-    print("=== RESUMO AGREGADO (todos os 10 exames sinteticos, 2h cada) ===")
-    print(agg.to_string(index=False))
-    print()
-    print("=== FRAGMENTACAO INTRINSECA (antes de merge_gaps) ===")
-    print(frag_agg.to_string(index=False))
-    return per_subject, agg, frag_df, frag_agg
+    print("=== RESUMO AGREGADO ===")
+    print(summary.to_string(index=False))
+    return interval_df, detected_df, per_subject, summary
 
 
 if __name__ == "__main__":
     main()
-

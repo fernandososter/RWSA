@@ -74,10 +74,13 @@ TKEO_SMOOTH_WIN_S = 0.5     # janela de suavizacao do psi[n] -- MAIOR que a do e
 K_ON = 3.0                  # limiar duplo: corte de INICIO
 K_OFF = 1.5                 # limiar duplo: corte de MANUTENCAO
 
-# --- classificacao por duracao (identica ao teste 1) ---
-PHASIC_LO_S = 0.5
+# --- classificacao por duracao + amplitude (cortes atualizados pelo usuario,
+# identicos aos usados em testes/src/limiar/threshold_rule.py apos a revisao
+# em exames reais) ---
+PHASIC_LO_S = 0.1
 PHASIC_HI_S = 5.0
-TONIC_MIN_DUR_S = 16.0
+TONIC_MIN_DUR_S = 15.0          # faixa "any" (ambigua) fica entre PHASIC_HI_S e TONIC_MIN_DUR_S
+MIN_AMPLITUDE_RATIO = 2.0        # score (pico/baseline) minimo para contar como evento de qualquer tipo
 
 
 def teager_kaiser_operator(x: np.ndarray) -> np.ndarray:
@@ -175,20 +178,28 @@ class DetectedEvent:
 def segments_to_events(segs: list[tuple[int, int]], sig: np.ndarray, baseline: np.ndarray,
                         fs: int = FS, phasic_lo_s: float = PHASIC_LO_S,
                         phasic_hi_s: float = PHASIC_HI_S,
-                        tonic_min_dur_s: float = TONIC_MIN_DUR_S) -> list[DetectedEvent]:
+                        tonic_min_dur_s: float = TONIC_MIN_DUR_S,
+                        min_amplitude_ratio: float = MIN_AMPLITUDE_RATIO) -> list[DetectedEvent]:
+    """Classificacao por duracao (fasico/any/tonico) + filtro de amplitude:
+    score = pico do sinal de energia / media do baseline local dentro do
+    segmento; segmentos com score < min_amplitude_ratio sao descartados
+    (nao contam como evento de nenhum tipo), mesma regra de
+    testes/src/limiar/threshold_rule.py."""
     events = []
     for s, e in segs:
         dur_s = (e - s) / fs
         if dur_s < phasic_lo_s:
             continue
+        score = float(np.max(sig[s:e]) / max(np.mean(baseline[s:e]), 1e-12))
+        if score < min_amplitude_ratio:
+            continue
         onset_s = s / fs
-        score = float(np.max(sig[s:e]) / np.mean(baseline[s:e]))
         if phasic_lo_s <= dur_s <= phasic_hi_s:
             etype = "phasic"
         elif dur_s >= tonic_min_dur_s:
             etype = "tonic"
         else:
-            etype = "unclassified"
+            etype = "any"
         events.append(DetectedEvent(onset_s=onset_s, duration_s=dur_s, type=etype, score=round(score, 3)))
     return events
 

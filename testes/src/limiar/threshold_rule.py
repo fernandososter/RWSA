@@ -26,17 +26,18 @@ Duas variantes de deteccao, mesma classificacao por duracao a partir daqui:
    sem exigir evidencia forte para SUSTENTAR (so para COMECAR) um evento.
 
 Apos a deteccao de segmentos (por qualquer um dos dois metodos), a
-classificacao fasico/tonico e por duracao, replicando os cortes ja
-validados no pipeline de producao (classifier/movement_clf/tonic_phasic.py):
-  fasico  : 0.5s <= duracao <= 5.0s   -> rotulo final
-  tonico  : duracao >= 16.0s          -> rotulo final (aqui, sem a ressalva
-                                          de revisao humana da producao --
-                                          este teste usa GROUND TRUTH
-                                          SINTETICO exato, entao pode-se
-                                          avaliar "tonico" diretamente)
-  zona morta (5s < duracao < 16s) e sub-0.5s: nao classificados (descartados
-                                          da contagem de fasico/tonico; ver
-                                          avaliacao para como isso e tratado)
+classificacao fasico/any/tonico e por duracao E amplitude (revisao vs.
+exames reais, testes/src/limiar/evaluate.py):
+  fasico  : 0.1s <= duracao <= 5.0s    E  score >= 2.0 (pico/baseline)
+  any     : 5.0s <  duracao < 15.0s    E  score >= 2.0  -- faixa intermediaria
+                                          ambigua (nao conta como acerto de
+                                          fasico nem de tonico na avaliacao;
+                                          substitui a antiga "zona morta")
+  tonico  : duracao >= 15.0s           E  score >= 2.0
+  score < 2.0 (amplitude insuficiente) OU duracao < 0.1s: descartado, nao
+                                          vira evento de nenhum tipo.
+  score = max(envelope) / media(baseline) dentro do segmento (mesma metrica
+          ja usada como campo "score" de cada DetectedEvent).
 """
 from __future__ import annotations
 
@@ -56,10 +57,11 @@ K_SINGLE = 2.5             # limiar simples
 K_ON = 3.0                 # limiar duplo: corte de INICIO (mais exigente)
 K_OFF = 1.5                # limiar duplo: corte de MANUTENCAO (menos exigente)
 
-# --- classificacao por duracao (mesmos cortes do pipeline de producao) ---
-PHASIC_LO_S = 0.5
+# --- classificacao por duracao + amplitude (cortes atualizados pelo usuario) ---
+PHASIC_LO_S = 0.1
 PHASIC_HI_S = 5.0
-TONIC_MIN_DUR_S = 16.0
+TONIC_MIN_DUR_S = 15.0          # faixa "any" (ambigua) fica entre PHASIC_HI_S e TONIC_MIN_DUR_S
+MIN_AMPLITUDE_RATIO = 2.0        # score (pico/baseline) minimo para contar como evento de qualquer tipo
 
 
 def rms_envelope(x: np.ndarray, win_sec: float = 0.1, fs: int = FS) -> np.ndarray:
@@ -170,33 +172,38 @@ class DetectedEvent:
 def segments_to_events(segs: list[tuple[int, int]], env: np.ndarray, baseline: np.ndarray,
                         fs: int = FS, phasic_lo_s: float = PHASIC_LO_S,
                         phasic_hi_s: float = PHASIC_HI_S,
-                        tonic_min_dur_s: float = TONIC_MIN_DUR_S) -> list[DetectedEvent]:
-    """Converte segmentos (amostras) em eventos classificados por duracao.
+                        tonic_min_dur_s: float = TONIC_MIN_DUR_S,
+                        min_amplitude_ratio: float = MIN_AMPLITUDE_RATIO) -> list[DetectedEvent]:
+    """Converte segmentos (amostras) em eventos classificados por duracao E amplitude.
 
-    Segmentos com duracao < phasic_lo_s sao descartados (ruido/micro-
-    flutuacao). Segmentos na zona morta (phasic_hi_s < dur < tonic_min_dur_s)
-    sao mantidos com type="unclassified" -- no pipeline de producao isso
-    vira "tonic_candidate" (revisao humana); aqui, como o ground truth
-    sintetico so contem eventos EXATAMENTE nas faixas fasico/tonico, um
-    segmento na zona morta e sempre um erro do detector (fragmentacao ou
-    fusao), nunca um evento real ambiguo -- por isso a avaliacao trata
-    "unclassified" como nem fasico nem tonico (conta contra recall de ambos
-    se corresponder a um evento real, e nao conta como FP de nenhum tipo
-    classificado).
+    Um segmento so vira evento se: duracao >= phasic_lo_s E score >= min_amplitude_ratio
+    (score = pico do envelope / media do baseline dentro do segmento). Caso
+    contrario e descartado (nem fasico, nem any, nem tonico).
+
+    Faixas de duracao (aplicadas so apos passar no filtro de amplitude):
+      fasico : phasic_lo_s  <= dur <= phasic_hi_s
+      tonico : dur >= tonic_min_dur_s
+      any    : phasic_hi_s < dur < tonic_min_dur_s -- faixa intermediaria
+               ambigua (substitui a antiga "zona morta"/"unclassified"): no
+               ground truth revisado isto e sempre um erro de fragmentacao/
+               fusao do detector ou um evento genuinamente ambiguo, nunca
+               contado como acerto de fasico nem de tonico na avaliacao.
     """
     events = []
     for s, e in segs:
         dur_s = (e - s) / fs
         if dur_s < phasic_lo_s:
             continue
-        onset_s = s / fs
         score = float(np.max(env[s:e]) / np.mean(baseline[s:e]))
+        if score < min_amplitude_ratio:
+            continue
+        onset_s = s / fs
         if phasic_lo_s <= dur_s <= phasic_hi_s:
             etype = "phasic"
         elif dur_s >= tonic_min_dur_s:
             etype = "tonic"
         else:
-            etype = "unclassified"
+            etype = "any"
         events.append(DetectedEvent(onset_s=onset_s, duration_s=dur_s, type=etype, score=round(score, 3)))
     return events
 

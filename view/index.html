@@ -27,6 +27,7 @@
   main { display:grid; grid-template-columns: 1fr 320px; gap:0; height:calc(100vh - 52px); }
   #plotwrap { position:relative; padding:12px 16px; overflow:hidden; }
   #canvas { width:100%; height:340px; background:#0b1219; border-radius:8px; border:1px solid var(--grid); cursor:crosshair; }
+  #timeruler { width:100%; height:20px; margin-top:3px; background:#0b1219; border-radius:6px; border:1px solid var(--grid); }
   #probstrip { width:100%; height:56px; margin-top:6px; background:#0b1219; border-radius:8px; border:1px solid var(--grid); cursor:crosshair; }
   #hyp { width:100%; height:64px; margin-top:8px; background:#0b1219; border-radius:8px; border:1px solid var(--grid); cursor:pointer; }
   .navrow { display:flex; align-items:center; gap:10px; margin-top:12px; flex-wrap:wrap; }
@@ -70,6 +71,7 @@
   .lg-manual::before{ color:var(--manual); }
   .lg-excluded::before{ color:var(--del); }
   .lg-prob::before{ color:var(--prob,#7fd4ff); }
+  .lg-time::before{ color:var(--muted); }
   .cfgpanel { position:fixed; inset:0; background:rgba(0,0,0,.55); display:flex;
               align-items:flex-start; justify-content:center; z-index:50; padding-top:70px; }
   .cfgpanel[hidden] { display:none; }  /* o hidden precisa vencer o display:flex acima */
@@ -127,6 +129,7 @@
 <main>
   <section id="plotwrap">
     <canvas id="canvas"></canvas>
+    <canvas id="timeruler"></canvas>
     <canvas id="probstrip"></canvas>
     <canvas id="hyp"></canvas>
     <div class="legend">
@@ -136,6 +139,7 @@
       <span class="lg-phasic">fásico</span>
       <span class="lg-manual">manual</span>
       <span class="lg-excluded">janela excluída do evento</span>
+      <span class="lg-time">tempo do exame (0:00 = início, sem meas_date)</span>
       <span class="lg-prob">probabilidade do modelo (0–1)</span>
     </div>
 
@@ -189,8 +193,8 @@ const S = { exam:null, info:null, events:[], decisions:{}, cur:0, sig:null,
             editMode:false, excluded:{}, cfgRequired:false };  // excluded: eventId -> Set(epoch_abs) removidas de dentro do evento
                                                                 // cfgRequired: meas_date obrigatorio e ainda nao preenchido p/ este exame
 const $ = s => document.querySelector(s);
-const cv = $("#canvas"), hyp = $("#hyp"), probstrip = $("#probstrip");
-const CTX = cv.getContext("2d"), HG = hyp.getContext("2d"), PB = probstrip.getContext("2d");
+const cv = $("#canvas"), hyp = $("#hyp"), probstrip = $("#probstrip"), timeruler = $("#timeruler");
+const CTX = cv.getContext("2d"), HG = hyp.getContext("2d"), PB = probstrip.getContext("2d"), TR = timeruler.getContext("2d");
 const PAD = 2; // mini-epocas de contexto em cada lado no modo Eventos
 
 async function jget(u){ const r = await fetch(u); if(!r.ok) throw new Error((await r.json()).error||r.status); return r.json(); }
@@ -344,7 +348,7 @@ function updateInfo(){
 function draw(){
   const w=cv.width=cv.clientWidth*devicePixelRatio, h=cv.height=340*devicePixelRatio;
   CTX.clearRect(0,0,w,h); CTX.save();
-  const sig=S.sig; if(!sig || !sig.samples.length){ CTX.restore(); drawProb(); return; }
+  const sig=S.sig; if(!sig || !sig.samples.length){ CTX.restore(); drawProb(); drawTimeRuler(); return; }
   const es=S.info.epoch_sec, fs=sig.fs_eff, dur=sig.t1-sig.t0;
   const x = t => (t - sig.t0)/dur * w;
   // fundo: mini-epocas marcadas pelo modelo + rotulo de estagio
@@ -393,6 +397,29 @@ function draw(){
   }
   CTX.restore();
   drawProb();
+  drawTimeRuler();
+}
+
+// Regua de tempo do exame: 0:00 = inicio do .pt (sem meas_date/EDF), uma marca por
+// minuto cheio dentro da janela visivel. Mesma base de tempo usada em todo o app
+// (fmt(onset_s), tempo relativo ao inicio do registro, nao ao EDF).
+function drawTimeRuler(){
+  const w=timeruler.width=timeruler.clientWidth*devicePixelRatio, h=timeruler.height=20*devicePixelRatio;
+  TR.clearRect(0,0,w,h);
+  const sig=S.sig; if(!sig) return;
+  const dur=sig.t1-sig.t0; if(dur<=0) return;
+  const x = t => (t - sig.t0)/dur * w;
+  TR.strokeStyle=getCss("--grid"); TR.lineWidth=1*devicePixelRatio;
+  TR.beginPath(); TR.moveTo(0,1*devicePixelRatio); TR.lineTo(w,1*devicePixelRatio); TR.stroke();
+  TR.fillStyle=getCss("--muted"); TR.font=`${10*devicePixelRatio}px sans-serif`;
+  TR.strokeStyle=getCss("--grid");
+  const m0 = Math.ceil(sig.t0/60), m1 = Math.floor(sig.t1/60);
+  for(let m=m0; m<=m1; m++){
+    const t=m*60, px=x(t);
+    TR.lineWidth=1*devicePixelRatio;
+    TR.beginPath(); TR.moveTo(px,2*devicePixelRatio); TR.lineTo(px,h-2*devicePixelRatio); TR.stroke();
+    TR.fillText(fmt(t), px+3*devicePixelRatio, h-5*devicePixelRatio);
+  }
 }
 
 // Faixa de probabilidade: score continuo (0-1) do modelo por mini-epoca, com linha de limiar.
