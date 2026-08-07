@@ -74,10 +74,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--grad-clip", type=float, default=1.0)
-    parser.add_argument("--threshold", type=float, default=0.5)
+    parser.add_argument("--threshold", type=float, default=0.5, help="Limiar de decisão default, aplicado às 3 cabeças se os limiares específicos não forem dados.")
+    parser.add_argument("--tonic-threshold", type=float, default=None, help="Limiar específico da cabeça tônica (default: --threshold).")
+    parser.add_argument("--phasic-threshold", type=float, default=None, help="Limiar específico da cabeça fásica (default: --threshold).")
+    parser.add_argument("--any-threshold", type=float, default=None, help="Limiar específico da cabeça any (default: --threshold).")
     parser.add_argument("--min-confidence", type=float, default=0.0)
     parser.add_argument("--all-stages", action="store_true")
-    parser.add_argument("--movement-pos-weight", type=float)
+    parser.add_argument("--tonic-pos-weight", type=float, help="pos_weight da BCE da cabeça tônica (prevalência tipicamente mais baixa que fásica).")
+    parser.add_argument("--phasic-pos-weight", type=float, help="pos_weight da BCE da cabeça fásica.")
+    parser.add_argument("--any-pos-weight", type=float, help="pos_weight da BCE da cabeça any (faixa de duração ambígua 5-15s; prevalência mais baixa das 3).")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", default="auto")
     parser.add_argument("--no-amp", action="store_true")
@@ -88,11 +93,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--patience", type=int, default=15)
     parser.add_argument(
         "--log-movement-distribution", action="store_true",
-        help="Mostra target/prediction de movimento (Negative/Positive) por época.",
+        help="Mostra target/prediction de movimento (Negative/Positive) por época, para cada cabeça.",
     )
-    parser.add_argument("--monitor", choices=["movement_f1", "movement_kappa", "rswa_f1_macro", "rswa_kappa_macro"], default="movement_f1", help="Métrica usada para selecionar o melhor checkpoint (movement_* e rswa_*_macro sao equivalentes).")
+    parser.add_argument(
+        "--monitor",
+        choices=["tonic_f1", "phasic_f1", "any_f1", "rswa_f1_macro", "rswa_kappa_macro", "movement_f1", "movement_kappa"],
+        default="rswa_f1_macro",
+        help="Métrica usada para selecionar o melhor checkpoint. rswa_f1_macro/kappa_macro = média das 3 cabeças.",
+    )
 
     return parser.parse_args()
+
+
+def _resolve_thresholds(args) -> dict[str, float]:
+    return {
+        "tonic": args.tonic_threshold if args.tonic_threshold is not None else args.threshold,
+        "phasic": args.phasic_threshold if args.phasic_threshold is not None else args.threshold,
+        "any": args.any_threshold if args.any_threshold is not None else args.threshold,
+    }
 
 
 def make_loader(subjects, args, shuffle, device):
@@ -133,8 +151,8 @@ def main() -> None:
                           device=device, args=vars(args), notes=args.notes, tags=args.tags) as logger:
         fold_summaries = []
         fold_checkpoints: list[dict[str, Any]] = []
-        all_oof_expected: list[int] = []
-        all_oof_predictions: list[int] = []
+        all_oof_expected: dict[str, list[int]] = {"tonic": [], "phasic": [], "any": []}
+        all_oof_predictions: dict[str, list[int]] = {"tonic": [], "phasic": [], "any": []}
         data_report: dict[str, Any] = {"folds": []}
 
         logger.info(
@@ -210,8 +228,11 @@ def main() -> None:
             )
 
             model = RSWADetectionNet().to(device)
-            movement_weight = torch.tensor(args.movement_pos_weight, device=device) if args.movement_pos_weight else None
-            criterion = RSWALoss(movement_pos_weight=movement_weight)
+            tonic_weight = torch.tensor(args.tonic_pos_weight, device=device) if args.tonic_pos_weight else None
+            phasic_weight = torch.tensor(args.phasic_pos_weight, device=device) if args.phasic_pos_weight else None
+            any_weight = torch.tensor(args.any_pos_weight, device=device) if args.any_pos_weight else None
+            criterion = RSWALoss(tonic_pos_weight=tonic_weight, phasic_pos_weight=phasic_weight, any_pos_weight=any_weight)
+            thresholds = _resolve_thresholds(args)
             optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
             logger.log_subject_split(train_subjects, val_subjects, filename=f"fold_{fold}_split.json")
             
@@ -226,11 +247,11 @@ def main() -> None:
                 epoch_start = perf_counter()
                 train_start = perf_counter()
                 train_metrics = run_rswa_epoch(model, train_loader, criterion, device, optimizer, amp=not args.no_amp,
-                                               grad_clip=args.grad_clip, threshold=args.threshold)
+                                               grad_clip=args.grad_clip, threshold=thresholds)
                 train_time = perf_counter() - train_start
                 val_start = perf_counter()
                 val_metrics = run_rswa_epoch(model, val_loader, criterion, device, amp=not args.no_amp,
-                                             threshold=args.threshold)
+                                             threshold=thresholds)
                 val_time = perf_counter() - val_start
                 scalar_train = {k: v for k, v in train_metrics.items() if isinstance(v, (int, float))}
                 scalar_val = {k: v for k, v in val_metrics.items() if isinstance(v, (int, float))}
@@ -245,25 +266,26 @@ def main() -> None:
                     f"fold={fold} ep={epoch:03d} -- "
                     f"{GREEN}"
                     f"train_loss={train_metrics['loss']:.4f} "
-                    f"train_f1={train_metrics['movement_f1']:.4f} "
-                    f"train_kappa={train_metrics['movement_kappa']:.4f}"
+                    f"train_f1(t/p/a)={train_metrics['tonic_f1']:.3f}/{train_metrics['phasic_f1']:.3f}/{train_metrics['any_f1']:.3f} "
+                    f"train_f1_macro={train_metrics['rswa_f1_macro']:.4f}"
                     f"{RESET} -- "
                     f"{YELLOW}"
                     f"val_loss={val_metrics['loss']:.4f} "
-                    f"val_f1={val_metrics['movement_f1']:.4f} "
-                    f"val_kappa={val_metrics['movement_kappa']:.4f}"
+                    f"val_f1(t/p/a)={val_metrics['tonic_f1']:.3f}/{val_metrics['phasic_f1']:.3f}/{val_metrics['any_f1']:.3f} "
+                    f"val_f1_macro={val_metrics['rswa_f1_macro']:.4f}"
                     f"{RESET}"
                 )
 
                 if args.log_movement_distribution:
-                    train_targets = format_stage_distribution(train_metrics["target_distribution"])
-                    train_predictions = format_stage_distribution(train_metrics["prediction_distribution"])
-                    val_targets = format_stage_distribution(val_metrics["target_distribution"])
-                    val_predictions = format_stage_distribution(val_metrics["prediction_distribution"])
-                    logger.info(f"{GREEN}train_targets[{train_targets}]{RESET}")
-                    logger.info(f"{GREEN}train_predictions[{train_predictions}]{RESET}")
-                    logger.info(f"{YELLOW}val_targets[{val_targets}]{RESET}")
-                    logger.info(f"{YELLOW}val_predictions[{val_predictions}]{RESET}")
+                    for head in ("tonic", "phasic", "any"):
+                        train_targets = format_stage_distribution(train_metrics[f"{head}_target_distribution"])
+                        train_predictions = format_stage_distribution(train_metrics[f"{head}_prediction_distribution"])
+                        val_targets = format_stage_distribution(val_metrics[f"{head}_target_distribution"])
+                        val_predictions = format_stage_distribution(val_metrics[f"{head}_prediction_distribution"])
+                        logger.info(f"{GREEN}train_{head}_targets[{train_targets}]{RESET}")
+                        logger.info(f"{GREEN}train_{head}_predictions[{train_predictions}]{RESET}")
+                        logger.info(f"{YELLOW}val_{head}_targets[{val_targets}]{RESET}")
+                        logger.info(f"{YELLOW}val_{head}_predictions[{val_predictions}]{RESET}")
 
                 current_metric = float(val_metrics[args.monitor])
 
@@ -301,16 +323,17 @@ def main() -> None:
             plot_training_curves( history, figures_dir / "training_curves.png", f1_key="rswa_f1_macro", kappa_key="rswa_kappa_macro", title=f"RSWA - Fold {fold}")
 
             load_checkpoint(checkpoint_dir / "best.pt", model, device)
-            final = collect_rswa_predictions(model, val_loader, device, amp=not args.no_amp, threshold=args.threshold)
-            # Acumula predições de validação do melhor checkpoint para o OOF global.
-            all_oof_expected.extend(final["movement_expected"].astype(int).tolist())
-            all_oof_predictions.extend(final["movement_prediction"].astype(int).tolist())
-            plot_confusion_matrix(final["movement_expected"], final["movement_prediction"],
-                                  figures_dir / "confusion_matrix_movement.png", labels=[0, 1],
-                                  display_labels=["Negative", "Positive"], title=f"Movement confusion matrix - Fold {fold}")
-            plot_confusion_matrix(final["movement_expected"], final["movement_prediction"],
-                                  figures_dir / "confusion_matrix_movement_normalized.png", labels=[0, 1],
-                                  display_labels=["Negative", "Positive"], title=f"Movement normalized confusion matrix - Fold {fold}", normalize="true")
+            final = collect_rswa_predictions(model, val_loader, device, amp=not args.no_amp, threshold=thresholds)
+            # Acumula predições de validação do melhor checkpoint para o OOF global, por cabeça.
+            for head in ("tonic", "phasic", "any"):
+                all_oof_expected[head].extend(final[f"{head}_expected"].astype(int).tolist())
+                all_oof_predictions[head].extend(final[f"{head}_prediction"].astype(int).tolist())
+                plot_confusion_matrix(final[f"{head}_expected"], final[f"{head}_prediction"],
+                                      figures_dir / f"confusion_matrix_{head}.png", labels=[0, 1],
+                                      display_labels=["Negative", "Positive"], title=f"{head.capitalize()} confusion matrix - Fold {fold}")
+                plot_confusion_matrix(final[f"{head}_expected"], final[f"{head}_prediction"],
+                                      figures_dir / f"confusion_matrix_{head}_normalized.png", labels=[0, 1],
+                                      display_labels=["Negative", "Positive"], title=f"{head.capitalize()} normalized confusion matrix - Fold {fold}", normalize="true")
 
             fold_checkpoints.append({"fold": fold, "best_checkpoint": checkpoint_dir / "best.pt"})
             fold_summaries.append(
@@ -320,31 +343,36 @@ def main() -> None:
                     "monitor": args.monitor,
                     "best_monitor_value": best_metric,
                     "best_val_loss": best_metrics.get("loss"),
-                    "best_val_movement_f1": best_metrics.get("movement_f1"),
-                    "best_val_movement_kappa": best_metrics.get("movement_kappa"),
+                    "best_val_tonic_f1": best_metrics.get("tonic_f1"),
+                    "best_val_phasic_f1": best_metrics.get("phasic_f1"),
+                    "best_val_any_f1": best_metrics.get("any_f1"),
+                    "best_val_rswa_f1_macro": best_metrics.get("rswa_f1_macro"),
+                    "best_val_rswa_kappa_macro": best_metrics.get("rswa_kappa_macro"),
                 }
             )
 
-        # ── Métricas out-of-fold (validação agregada de todos os folds) ────
-        oof_expected = np.asarray(all_oof_expected, dtype=np.int64)
-        oof_predictions = np.asarray(all_oof_predictions, dtype=np.int64)
-        out_of_fold: dict[str, Any] | None = None
-        if oof_expected.size:
-            global_figures_dir = logger.run_dir / "figures"
-            global_figures_dir.mkdir(parents=True, exist_ok=True)
-            plot_confusion_matrix(oof_expected, oof_predictions, global_figures_dir / "confusion_matrix_movement_oof.png",
+        # ── Métricas out-of-fold (validação agregada de todos os folds), por cabeça ────
+        global_figures_dir = logger.run_dir / "figures"
+        global_figures_dir.mkdir(parents=True, exist_ok=True)
+        out_of_fold: dict[str, Any] = {}
+        for head in ("tonic", "phasic", "any"):
+            oof_expected = np.asarray(all_oof_expected[head], dtype=np.int64)
+            oof_predictions = np.asarray(all_oof_predictions[head], dtype=np.int64)
+            if not oof_expected.size:
+                continue
+            plot_confusion_matrix(oof_expected, oof_predictions, global_figures_dir / f"confusion_matrix_{head}_oof.png",
                                   labels=[0, 1], display_labels=["Negative", "Positive"],
-                                  title="Movement - Out-of-fold confusion matrix")
-            plot_confusion_matrix(oof_expected, oof_predictions, global_figures_dir / "confusion_matrix_movement_oof_normalized.png",
+                                  title=f"{head.capitalize()} - Out-of-fold confusion matrix")
+            plot_confusion_matrix(oof_expected, oof_predictions, global_figures_dir / f"confusion_matrix_{head}_oof_normalized.png",
                                   labels=[0, 1], display_labels=["Negative", "Positive"], normalize="true",
-                                  title="Movement - Out-of-fold normalized confusion matrix")
-            out_of_fold = {
+                                  title=f"{head.capitalize()} - Out-of-fold normalized confusion matrix")
+            out_of_fold[head] = {
                 "n_samples": int(oof_expected.size),
                 "n_positives": int(oof_expected.sum()),
                 "f1": float(f1_score(oof_expected, oof_predictions, zero_division=0)),
                 "kappa": float(cohen_kappa_score(oof_expected, oof_predictions)),
             }
-            logger.info(f"OUT-OF-FOLD (movimento): f1={out_of_fold['f1']:.4f} kappa={out_of_fold['kappa']:.4f}")
+            logger.info(f"OUT-OF-FOLD ({head}): f1={out_of_fold[head]['f1']:.4f} kappa={out_of_fold[head]['kappa']:.4f}")
 
         # ── Fase de TESTE (held-out, nunca visto na CV): ensemble dos folds ─
         test_summary: dict[str, Any] | None = None
@@ -353,20 +381,19 @@ def main() -> None:
             test_summary = evaluate_movement_test_set(
                 test_loader=test_loader, fold_checkpoints=fold_checkpoints,
                 build_model=lambda: RSWADetectionNet(), device=device, logger=logger,
-                figures_dir=logger.run_dir / "test", amp=not args.no_amp, threshold=args.threshold,
+                figures_dir=logger.run_dir / "test", amp=not args.no_amp, threshold=thresholds,
             )
 
         logger.write_json("data_description.json", data_report)
 
-        fold_f1_values = np.asarray(
-            [f["best_val_movement_f1"] for f in fold_summaries if f["best_val_movement_f1"] is not None],
-            dtype=np.float64,
-        )
-        cv_stats = {
-            "n_folds": len(fold_summaries),
-            "movement_f1_mean": float(fold_f1_values.mean()) if fold_f1_values.size else None,
-            "movement_f1_std": float(fold_f1_values.std(ddof=1)) if fold_f1_values.size > 1 else 0.0,
-        }
+        cv_stats: dict[str, Any] = {"n_folds": len(fold_summaries)}
+        for head in ("tonic", "phasic", "any"):
+            fold_f1_values = np.asarray(
+                [f[f"best_val_{head}_f1"] for f in fold_summaries if f.get(f"best_val_{head}_f1") is not None],
+                dtype=np.float64,
+            )
+            cv_stats[f"{head}_f1_mean"] = float(fold_f1_values.mean()) if fold_f1_values.size else None
+            cv_stats[f"{head}_f1_std"] = float(fold_f1_values.std(ddof=1)) if fold_f1_values.size > 1 else 0.0
 
         logger.finalize(
             status="completed",

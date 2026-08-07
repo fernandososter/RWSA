@@ -114,10 +114,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lr-rswa", type=float, default=1e-4)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--grad-clip", type=float, default=1.0)
-    parser.add_argument("--threshold", type=float, default=0.5)
+    parser.add_argument("--threshold", type=float, default=0.5, help="Limiar default aplicado às 3 cabeças (tonic/phasic/any) do ramo RSWA.")
+    parser.add_argument("--tonic-threshold", type=float, default=None)
+    parser.add_argument("--phasic-threshold", type=float, default=None)
+    parser.add_argument("--any-threshold", type=float, default=None)
     parser.add_argument("--min-confidence", type=float, default=0.0)
     parser.add_argument("--all-stages", action="store_true")
-    parser.add_argument("--movement-pos-weight", type=float)
+    parser.add_argument("--tonic-pos-weight", type=float)
+    parser.add_argument("--phasic-pos-weight", type=float)
+    parser.add_argument("--any-pos-weight", type=float)
     parser.add_argument("--patience", type=int, default=15)
     parser.add_argument(
         "--log-movement-distribution", action="store_true",
@@ -125,9 +130,14 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--monitor",
-        choices=["joint_mean_f1", "staging_f1_macro", "rswa_movement_f1", "rswa_movement_kappa"],
+        choices=[
+            "joint_mean_f1", "staging_f1_macro",
+            "rswa_tonic_f1", "rswa_phasic_f1", "rswa_any_f1",
+            "rswa_rswa_f1_macro", "rswa_rswa_kappa_macro",
+            "rswa_movement_f1", "rswa_movement_kappa",
+        ],
         default="joint_mean_f1",
-        help="Métrica de validação usada para selecionar o melhor checkpoint de cada fold.",
+        help="Métrica de validação usada para selecionar o melhor checkpoint de cada fold. rswa_rswa_f1_macro = média das 3 cabeças (tonic/phasic/any).",
     )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", default="auto")
@@ -139,6 +149,14 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _resolve_thresholds(args) -> dict[str, float]:
+    return {
+        "tonic": args.tonic_threshold if args.tonic_threshold is not None else args.threshold,
+        "phasic": args.phasic_threshold if args.phasic_threshold is not None else args.threshold,
+        "any": args.any_threshold if args.any_threshold is not None else args.threshold,
+    }
+
+
 def make_loader(subjects, args, shuffle, device):
     ds = SleepAnalysisDataset(subjects, min_confidence=args.min_confidence, rem_mask_only=not args.all_stages)
     return DataLoader(ds, batch_size=args.batch_size, shuffle=shuffle, num_workers=args.num_workers,
@@ -147,11 +165,12 @@ def make_loader(subjects, args, shuffle, device):
 
 
 def joint_monitor_value(monitor: str, val_metrics: dict[str, float]) -> float:
-    """Valor da métrica monitorada. 'joint_mean_f1' = média de staging_f1_macro e movement_f1."""
+    """Valor da métrica monitorada. 'joint_mean_f1' = média de staging_f1_macro e rswa_f1_macro
+    (média das 3 cabeças tonic/phasic/any)."""
     if monitor == "joint_mean_f1":
         scores = [
             val_metrics.get("staging_f1_macro", float("nan")),
-            val_metrics.get("rswa_movement_f1", float("nan")),
+            val_metrics.get("rswa_rswa_f1_macro", float("nan")),
         ]
         scores = [x for x in scores if x == x]
         return sum(scores) / len(scores) if scores else float("-inf")
@@ -171,7 +190,9 @@ def plot_joint_curves(history: list[dict[str, float]], output_path: Path, *, tit
     axes[0].set_ylabel("Loss"); axes[0].legend(); axes[0].grid(alpha=0.25)
 
     axes[1].plot(epochs, [r.get("val_staging_f1_macro", float("nan")) for r in history], label="Val staging F1 (macro)")
-    axes[1].plot(epochs, [r.get("val_rswa_movement_f1", float("nan")) for r in history], label="Val movement F1")
+    axes[1].plot(epochs, [r.get("val_rswa_tonic_f1", float("nan")) for r in history], label="Val tonic F1")
+    axes[1].plot(epochs, [r.get("val_rswa_phasic_f1", float("nan")) for r in history], label="Val phasic F1")
+    axes[1].plot(epochs, [r.get("val_rswa_any_f1", float("nan")) for r in history], label="Val any F1")
     axes[1].set_ylabel("F1"); axes[1].set_xlabel("Epoch"); axes[1].legend(); axes[1].grid(alpha=0.25)
 
     fig.suptitle(title)
@@ -294,8 +315,11 @@ def main() -> None:
             rswa_model = build_movement_model(args.model).to(device)
             system = SleepStagingRSWASystem(staging_model, rswa_model).to(device)
             staging_loss_fn = StagingLoss()
-            movement_weight = torch.tensor(args.movement_pos_weight, device=device) if args.movement_pos_weight else None
-            rswa_loss_fn = RSWALoss(movement_pos_weight=movement_weight)
+            tonic_weight = torch.tensor(args.tonic_pos_weight, device=device) if args.tonic_pos_weight else None
+            phasic_weight = torch.tensor(args.phasic_pos_weight, device=device) if args.phasic_pos_weight else None
+            any_weight = torch.tensor(args.any_pos_weight, device=device) if args.any_pos_weight else None
+            rswa_loss_fn = RSWALoss(tonic_pos_weight=tonic_weight, phasic_pos_weight=phasic_weight, any_pos_weight=any_weight)
+            thresholds = _resolve_thresholds(args)
             staging_optimizer = torch.optim.AdamW(
                 staging_model.parameters(), lr=args.lr_staging, weight_decay=args.weight_decay
             )
@@ -330,7 +354,9 @@ def main() -> None:
                     emg = batch["emg_center"].to(device, non_blocking=True)
                     padding_mask = batch["padding_mask"].to(device, non_blocking=True)
                     stage_targets = batch["sleep_stages"].to(device, non_blocking=True)
-                    movement_targets = batch["movement_labels"].to(device, non_blocking=True)
+                    tonic_targets = batch["tonic_labels"].to(device, non_blocking=True)
+                    phasic_targets = batch["phasic_labels"].to(device, non_blocking=True)
+                    any_targets = batch["any_labels"].to(device, non_blocking=True)
                     stage_valid = batch["staging_valid"].to(device, non_blocking=True) & padding_mask
                     rswa_valid = batch["rswa_valid"].to(device, non_blocking=True) & padding_mask
 
@@ -357,14 +383,23 @@ def main() -> None:
                             enabled=(not args.no_amp and device.type == "cuda"),
                         ):
                             rswa_outputs = rswa_model(emg, mask=padding_mask)
-                            rswa_loss = rswa_loss_fn(rswa_outputs, movement_targets, rswa_valid)
+                            rswa_loss, _ = rswa_loss_fn(
+                                rswa_outputs, tonic_targets, phasic_targets, any_targets, rswa_valid
+                            )
                         rswa_loss.backward()
                         clip_grad_norm_(rswa_model.parameters(), args.grad_clip)
                         rswa_optimizer.step()
                         rswa_loss_sum += float(rswa_loss.detach().cpu())
                         rswa_batches += 1
-                        move_preds = (torch.sigmoid(rswa_outputs["movement_logits"].detach()) >= args.threshold).long()
-                        tr_move_targets.append(movement_targets[rswa_valid].long().detach().cpu())
+                        move_targets = (
+                            (tonic_targets > 0.5) | (phasic_targets > 0.5) | (any_targets > 0.5)
+                        ).float()
+                        move_preds = (
+                            (torch.sigmoid(rswa_outputs["tonic_logits"].detach()) >= thresholds["tonic"])
+                            | (torch.sigmoid(rswa_outputs["phasic_logits"].detach()) >= thresholds["phasic"])
+                            | (torch.sigmoid(rswa_outputs["any_logits"].detach()) >= thresholds["any"])
+                        ).long()
+                        tr_move_targets.append(move_targets[rswa_valid].long().detach().cpu())
                         tr_move_preds.append(move_preds[rswa_valid].cpu())
 
                 train_time = perf_counter() - train_start
@@ -385,7 +420,7 @@ def main() -> None:
                 val_start = perf_counter()
                 val_metrics = evaluate_joint(
                     system, val_loader, staging_loss_fn, rswa_loss_fn, device,
-                    amp=not args.no_amp, threshold=args.threshold,
+                    amp=not args.no_amp, threshold=thresholds,
                 )
                 val_time = perf_counter() - val_start
 
@@ -413,8 +448,10 @@ def main() -> None:
                     f"{YELLOW}"
                     f"val_stg_f1={val_metrics.get('staging_f1_macro', float('nan')):.4f} "
                     f"val_stg_kappa={val_metrics.get('staging_kappa', float('nan')):.4f} "
-                    f"val_movement_f1={val_metrics.get('rswa_movement_f1', float('nan')):.4f} "
-                    f"val_movement_kappa={val_metrics.get('rswa_movement_kappa', float('nan')):.4f}"
+                    f"val_f1(t/p/a)={val_metrics.get('rswa_tonic_f1', float('nan')):.3f}/"
+                    f"{val_metrics.get('rswa_phasic_f1', float('nan')):.3f}/"
+                    f"{val_metrics.get('rswa_any_f1', float('nan')):.3f} "
+                    f"val_f1_macro={val_metrics.get('rswa_rswa_f1_macro', float('nan')):.4f}"
                     f"{RESET}"
                 )
 
@@ -477,7 +514,7 @@ def main() -> None:
             load_checkpoint(checkpoint_dir / "staging_best.pt", staging_model, device)
             load_checkpoint(checkpoint_dir / "rswa_best.pt", rswa_model, device)
             stage_pred = collect_staging_predictions(staging_model, val_loader, device, amp=not args.no_amp)
-            move_pred = collect_rswa_predictions(rswa_model, val_loader, device, amp=not args.no_amp, threshold=args.threshold)
+            move_pred = collect_rswa_predictions(rswa_model, val_loader, device, amp=not args.no_amp, threshold=thresholds)
             plot_confusion_matrix(
                 stage_pred["expected"], stage_pred["prediction"],
                 figures_dir / "confusion_matrix_staging.png",
@@ -490,16 +527,17 @@ def main() -> None:
                 labels=[0, 1, 2, 3, 4], display_labels=["W", "N1", "N2", "N3", "REM"],
                 title=f"Staging normalized confusion matrix - Fold {fold}", normalize="true",
             )
-            plot_confusion_matrix(
-                move_pred["movement_expected"], move_pred["movement_prediction"],
-                figures_dir / "confusion_matrix_movement.png", labels=[0, 1],
-                display_labels=["Negative", "Positive"], title=f"Movement confusion matrix - Fold {fold}",
-            )
-            plot_confusion_matrix(
-                move_pred["movement_expected"], move_pred["movement_prediction"],
-                figures_dir / "confusion_matrix_movement_normalized.png", labels=[0, 1],
-                display_labels=["Negative", "Positive"], title=f"Movement normalized confusion matrix - Fold {fold}", normalize="true",
-            )
+            for head in ("tonic", "phasic", "any", "movement"):
+                plot_confusion_matrix(
+                    move_pred[f"{head}_expected"], move_pred[f"{head}_prediction"],
+                    figures_dir / f"confusion_matrix_{head}.png", labels=[0, 1],
+                    display_labels=["Negative", "Positive"], title=f"{head.capitalize()} confusion matrix - Fold {fold}",
+                )
+                plot_confusion_matrix(
+                    move_pred[f"{head}_expected"], move_pred[f"{head}_prediction"],
+                    figures_dir / f"confusion_matrix_{head}_normalized.png", labels=[0, 1],
+                    display_labels=["Negative", "Positive"], title=f"{head.capitalize()} normalized confusion matrix - Fold {fold}", normalize="true",
+                )
 
             staging_checkpoints.append({"fold": fold, "best_checkpoint": checkpoint_dir / "staging_best.pt"})
             rswa_checkpoints.append({"fold": fold, "best_checkpoint": checkpoint_dir / "rswa_best.pt"})
@@ -511,8 +549,11 @@ def main() -> None:
                     "best_monitor_value": best_metric,
                     "best_val_staging_f1_macro": best_metrics.get("staging_f1_macro"),
                     "best_val_staging_kappa": best_metrics.get("staging_kappa"),
-                    "best_val_movement_f1": best_metrics.get("rswa_movement_f1"),
-                    "best_val_movement_kappa": best_metrics.get("rswa_movement_kappa"),
+                    "best_val_tonic_f1": best_metrics.get("rswa_tonic_f1"),
+                    "best_val_phasic_f1": best_metrics.get("rswa_phasic_f1"),
+                    "best_val_any_f1": best_metrics.get("rswa_any_f1"),
+                    "best_val_rswa_f1_macro": best_metrics.get("rswa_rswa_f1_macro"),
+                    "best_val_rswa_kappa_macro": best_metrics.get("rswa_rswa_kappa_macro"),
                 }
             )
 
@@ -529,7 +570,7 @@ def main() -> None:
             movement_test_summary = evaluate_movement_test_set(
                 test_loader=test_loader, fold_checkpoints=rswa_checkpoints,
                 build_model=lambda: build_movement_model(args.model), device=device, logger=logger,
-                figures_dir=logger.run_dir / "test", amp=not args.no_amp, threshold=args.threshold,
+                figures_dir=logger.run_dir / "test", amp=not args.no_amp, threshold=thresholds,
             )
 
         logger.write_json("data_description.json", data_report)
@@ -538,10 +579,13 @@ def main() -> None:
             [f["best_val_staging_f1_macro"] for f in fold_summaries if f["best_val_staging_f1_macro"] is not None],
             dtype=np.float64,
         )
-        movement_f1_values = np.asarray(
-            [f["best_val_movement_f1"] for f in fold_summaries if f["best_val_movement_f1"] is not None],
-            dtype=np.float64,
-        )
+        head_f1_values = {
+            head: np.asarray(
+                [f[f"best_val_{head}_f1"] for f in fold_summaries if f.get(f"best_val_{head}_f1") is not None],
+                dtype=np.float64,
+            )
+            for head in ("tonic", "phasic", "any")
+        }
 
         def _mean_std(values: np.ndarray) -> dict[str, float | None]:
             if values.size == 0:
@@ -559,7 +603,9 @@ def main() -> None:
                     "n_folds": len(fold_summaries),
                     "stratify_by": args.stratify_by,
                     "staging_f1_macro": _mean_std(staging_f1_values),
-                    "movement_f1": _mean_std(movement_f1_values),
+                    "tonic_f1": _mean_std(head_f1_values["tonic"]),
+                    "phasic_f1": _mean_std(head_f1_values["phasic"]),
+                    "any_f1": _mean_std(head_f1_values["any"]),
                 },
                 "test": {
                     "stratify_by": args.test_stratify_by,

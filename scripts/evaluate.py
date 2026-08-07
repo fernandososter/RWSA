@@ -36,7 +36,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--num-workers", type=int, default=2)
     parser.add_argument("--device", default="auto")
-    parser.add_argument("--threshold", type=float, default=0.5)
+    parser.add_argument("--threshold", type=float, default=0.5, help="Limiar default aplicado às 3 cabeças (tonic/phasic/any) se os específicos não forem dados.")
+    parser.add_argument("--tonic-threshold", type=float, default=None)
+    parser.add_argument("--phasic-threshold", type=float, default=None)
+    parser.add_argument("--any-threshold", type=float, default=None)
     parser.add_argument("--min-confidence", type=float, default=0.0)
     parser.add_argument("--all-stages", action="store_true")
     parser.add_argument("--no-amp", action="store_true")
@@ -47,6 +50,11 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     device = resolve_device(args.device)
+    thresholds = {
+        "tonic": args.tonic_threshold if args.tonic_threshold is not None else args.threshold,
+        "phasic": args.phasic_threshold if args.phasic_threshold is not None else args.threshold,
+        "any": args.any_threshold if args.any_threshold is not None else args.threshold,
+    }
     subjects = load_subject_directory(args.data_dir)
     dataset = SleepAnalysisDataset(
         subjects,
@@ -76,7 +84,7 @@ def main() -> None:
         load_checkpoint(args.checkpoint, model, device)
         metrics = run_rswa_epoch(
             model, loader, RSWALoss(), device,
-            amp=not args.no_amp, threshold=args.threshold,
+            amp=not args.no_amp, threshold=thresholds,
         )
     else:
         if args.staging_checkpoint is None or args.rswa_checkpoint is None:
@@ -88,7 +96,7 @@ def main() -> None:
         model = SleepStagingRSWASystem(staging_model, rswa_model).to(device)
         metrics = evaluate_joint(
             model, loader, StagingLoss(), RSWALoss(), device,
-            amp=not args.no_amp, threshold=args.threshold,
+            amp=not args.no_amp, threshold=thresholds,
         )
 
     print(json.dumps(metrics, indent=2, ensure_ascii=False))

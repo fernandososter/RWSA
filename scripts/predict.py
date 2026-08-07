@@ -29,7 +29,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--num-workers", type=int, default=2)
     parser.add_argument("--device", default="auto")
-    parser.add_argument("--threshold", type=float, default=0.5)
+    parser.add_argument("--threshold", type=float, default=0.5, help="Limiar default aplicado às 3 cabeças se os específicos não forem dados.")
+    parser.add_argument("--tonic-threshold", type=float, default=None)
+    parser.add_argument("--phasic-threshold", type=float, default=None)
+    parser.add_argument("--any-threshold", type=float, default=None)
     parser.add_argument("--no-amp", action="store_true")
     return parser.parse_args()
 
@@ -37,6 +40,11 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     device = resolve_device(args.device)
+    thr = {
+        "tonic": args.tonic_threshold if args.tonic_threshold is not None else args.threshold,
+        "phasic": args.phasic_threshold if args.phasic_threshold is not None else args.threshold,
+        "any": args.any_threshold if args.any_threshold is not None else args.threshold,
+    }
     dataset = SleepAnalysisDataset(load_subject_directory(args.data_dir))
     loader = DataLoader(
         dataset, batch_size=args.batch_size, shuffle=False,
@@ -61,12 +69,20 @@ def main() -> None:
                 outputs = model(signals, emg, mask=mask)
             stage_prob = torch.softmax(outputs["staging_logits"], dim=-1)
             stage_pred = stage_prob.argmax(dim=-1)
-            movement_prob = torch.sigmoid(outputs["movement_logits"])
+            tonic_prob = torch.sigmoid(outputs["tonic_logits"])
+            phasic_prob = torch.sigmoid(outputs["phasic_logits"])
+            any_prob = torch.sigmoid(outputs["any_logits"])
 
             for i, subject_id in enumerate(batch["subject_ids"]):
                 length = int(batch["lengths"][i])
                 for epoch in range(length):
                     stage_id = int(stage_pred[i, epoch].cpu())
+                    t_p = float(tonic_prob[i, epoch].cpu())
+                    p_p = float(phasic_prob[i, epoch].cpu())
+                    a_p = float(any_prob[i, epoch].cpu())
+                    t_pred = int(t_p >= thr["tonic"])
+                    p_pred = int(p_p >= thr["phasic"])
+                    a_pred = int(a_p >= thr["any"])
                     rows.append({
                         "subject_id": subject_id,
                         "mini_epoch": epoch,
@@ -74,8 +90,14 @@ def main() -> None:
                         "stage_id": stage_id,
                         "stage": STAGE_NAMES[stage_id],
                         "stage_confidence": float(stage_prob[i, epoch, stage_id].cpu()),
-                        "movement_probability": float(movement_prob[i, epoch].cpu()),
-                        "movement_pred": int(movement_prob[i, epoch] >= args.threshold),
+                        "tonic_probability": t_p,
+                        "tonic_pred": t_pred,
+                        "phasic_probability": p_p,
+                        "phasic_pred": p_pred,
+                        "any_probability": a_p,
+                        "any_pred": a_pred,
+                        "movement_probability": max(t_p, p_p, a_p),
+                        "movement_pred": int(t_pred or p_pred or a_pred),
                     })
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
