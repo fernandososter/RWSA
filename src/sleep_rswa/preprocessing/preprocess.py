@@ -42,8 +42,13 @@ Formato salvo (torch.save)
   "channel_names": list[str | None]
   "tonic_labels":  Tensor (T,)  float32  {0,1}
   "phasic_labels": Tensor (T,)  float32  {0,1}
-  "rswa_labels":   Tensor (T,)  int64    {0,1,2,3}
+  "any_labels":    Tensor (T,)  float32  {0,1}  (evento com duracao ambigua,
+                                                  entre limiar fasico e minimo tonico)
+  "rswa_labels":   Tensor (T,)  int64    {0,1,2,3}  (NAO inclui "any")
   "rswa_conf":     Tensor (T,)  float32  {0,1}  (validade p/ mascara da loss)
+  "tonic_cov":     Tensor (T,)  float32  0..1   (fracao de cobertura, diagnostico)
+  "phasic_cov":    Tensor (T,)  float32  0..1
+  "any_cov":       Tensor (T,)  float32  0..1
   "rem_baseline_uv":       float  (uV brutos; NaN se exame sem mini-epoca REM)
   "rem_baseline_n_epochs": int    (quantas mini-epocas REM entraram no calculo)
 }
@@ -86,6 +91,7 @@ def preprocess_exam(
     rswa_dir: Optional[Path] = None,
     tonic_min_coverage: float = 0.5,
     phasic_min_coverage: float = 0.0,
+    any_min_coverage: float = 0.0,
 ) -> Optional[Dict]:
     """
     Pre-processa um unico exame EDF. Retorna dict (ver formato no topo do modulo)
@@ -263,6 +269,7 @@ def preprocess_exam(
         epoch_sec=float(epoch_sec),
         tonic_min_coverage=tonic_min_coverage,
         phasic_min_coverage=phasic_min_coverage,
+        any_min_coverage=any_min_coverage,
     )
 
     if verbose:
@@ -290,10 +297,12 @@ def preprocess_exam(
         "channel_names": matched_chs,
         "tonic_labels":  rswa["tonic_labels"],
         "phasic_labels": rswa["phasic_labels"],
+        "any_labels":    rswa["any_labels"],
         "rswa_labels":   rswa["rswa_labels"],
         "rswa_conf":     rswa["rswa_conf"],
         "tonic_cov":     rswa["tonic_cov"],
         "phasic_cov":    rswa["phasic_cov"],
+        "any_cov":       rswa["any_cov"],
         "fs":            fs_target,
         "rem_baseline_uv":       rem_baseline["rem_baseline_uv"],
         "rem_baseline_n_epochs": rem_baseline["rem_baseline_n_epochs"],
@@ -311,8 +320,12 @@ def _save_result(result: Dict, out_path: Path) -> None:
         "channel_names": result["channel_names"],
         "tonic_labels":  torch.from_numpy(result["tonic_labels"]),
         "phasic_labels": torch.from_numpy(result["phasic_labels"]),
+        "any_labels":    torch.from_numpy(result["any_labels"]),
         "rswa_labels":   torch.from_numpy(result["rswa_labels"]),
         "rswa_conf":     torch.from_numpy(result["rswa_conf"]),
+        "tonic_cov":     torch.from_numpy(result["tonic_cov"]),
+        "phasic_cov":    torch.from_numpy(result["phasic_cov"]),
+        "any_cov":       torch.from_numpy(result["any_cov"]),
         # Basal de EMG na fase REM (percentil 10, uV brutos) -- ver
         # rem_baseline.py. Escalares Python simples (nao Tensor) porque sao
         # um unico valor por exame, nao uma serie por mini-epoca; NaN quando

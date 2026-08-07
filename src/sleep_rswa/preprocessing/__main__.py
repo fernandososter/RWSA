@@ -21,6 +21,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-workers", type=int, default=4)
     parser.add_argument("--tonic-min-coverage", type=float, default=0.5)
     parser.add_argument("--phasic-min-coverage", type=float, default=0.0)
+    parser.add_argument("--any-min-coverage", type=float, default=0.0)
     return parser
 
 
@@ -31,6 +32,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "rswa_dir": args.rswa_dir,
         "tonic_min_coverage": args.tonic_min_coverage,
         "phasic_min_coverage": args.phasic_min_coverage,
+        "any_min_coverage": args.any_min_coverage,
     }
 
     if args.parallel:

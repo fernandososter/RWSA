@@ -26,6 +26,7 @@ def rasterize_rswa_annotations(
     epoch_sec: float = 3.0,
     tonic_min_coverage: float = 0.5,
     phasic_min_coverage: float = 0.0,   # >0 => qualquer presenca
+    any_min_coverage: float = 0.0,      # >0 => qualquer presenca (mesmo criterio de classifier/auto_label.py)
     tonic_priority: bool = True,        # se tonico e fasico caem na mesma mini-epoca
 ) -> dict[str, np.ndarray]:
     """
@@ -34,18 +35,25 @@ def rasterize_rswa_annotations(
     Onsets no CSV estao no referencial do EDF BRUTO. O sinal foi cropado em
     `annot_start`; a mini-epoca m cobre [annot_start+m*dt, annot_start+(m+1)*dt).
 
+    Tipos de evento reconhecidos no CSV (coluna `type`, case-insensitive):
+    tonic, phasic, any — os mesmos 3 rotulos usados pela cabeca "any" da CNN em
+    classifier/auto_label.py (evento com duracao ambigua, entre o limiar fasico
+    e o minimo tonico). Qualquer outro valor de `type` e ignorado.
+
     Retorna arrays de comprimento T = len(stages_mini):
-        tonic_labels, phasic_labels : (T,) float32  {0,1}  (multi-rotulo, p/ 2 cabecas BCE)
+        tonic_labels, phasic_labels, any_labels : (T,) float32  {0,1}  (multi-rotulo, 3 cabecas BCE)
         rswa_labels                 : (T,) int64     {0=nada,1=fasico,2=tonico}
                                       (mono-rotulo, compativel com data.py atual;
-                                       co-ocorrencia resolvida por tonic_priority)
+                                       co-ocorrencia resolvida por tonic_priority;
+                                       NAO inclui "any" — mesma convencao de auto_label.py)
         rswa_conf                   : (T,) float32   {0,1}  VALIDADE (1=escorada)
-        tonic_cov, phasic_cov       : (T,) float32   fracao 0..1 (diagnostico / soft target)
+        tonic_cov, phasic_cov, any_cov : (T,) float32   fracao 0..1 (diagnostico / soft target)
     """
     csv_path = Path(csv_path) if csv_path is not None else None
     T = int(len(stages_mini))
     tonic_cov  = np.zeros(T, dtype=np.float64)
     phasic_cov = np.zeros(T, dtype=np.float64)
+    any_cov    = np.zeros(T, dtype=np.float64)
 
     if csv_path is not None and csv_path.exists():
         with csv_path.open("r", encoding="utf-8-sig", newline="") as fh:
@@ -71,13 +79,17 @@ def rasterize_rswa_annotations(
                         tonic_cov[m]  = min(1.0, tonic_cov[m]  + frac)
                     elif etype == "phasic":
                         phasic_cov[m] = min(1.0, phasic_cov[m] + frac)
+                    elif etype == "any":
+                        any_cov[m]    = min(1.0, any_cov[m]    + frac)
 
     tonic_lab  = (tonic_cov  >= tonic_min_coverage).astype(np.float32)
     phasic_lab = (phasic_cov >  phasic_min_coverage).astype(np.float32)
+    any_lab    = (any_cov    >  any_min_coverage).astype(np.float32)
 
     # rotulo inteiro informativo: 0=nada, 1=fasico, 2=tonico, 3=ambos.
-    # As cabecas do modelo usam tonic_labels/phasic_labels diretamente (multi-
-    # rotulo); rswa_int e so p/ inspecao e p/ compat com .pt mono-rotulo antigos.
+    # As cabecas do modelo usam tonic_labels/phasic_labels/any_labels diretamente
+    # (multi-rotulo); rswa_int e so p/ inspecao e p/ compat com .pt mono-rotulo
+    # antigos — NAO inclui "any" (mesma convencao ja usada em classifier/auto_label.py).
     rswa_int = (phasic_lab.astype(np.int64) * 1) + (tonic_lab.astype(np.int64) * 2)
     _ = tonic_priority  # mantido por compat de assinatura; co-ocorrencia agora preservada
 
@@ -87,8 +99,10 @@ def rasterize_rswa_annotations(
     return {
         "tonic_labels":  tonic_lab,
         "phasic_labels": phasic_lab,
+        "any_labels":    any_lab,
         "rswa_labels":   rswa_int,
         "rswa_conf":     rswa_conf,
         "tonic_cov":     tonic_cov.astype(np.float32),
         "phasic_cov":    phasic_cov.astype(np.float32),
+        "any_cov":       any_cov.astype(np.float32),
     }

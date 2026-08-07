@@ -175,8 +175,81 @@ def test_rasterize_rswa_annotations_handles_missing_csv(tmp_path):
 
     assert np.array_equal(rswa["tonic_labels"], np.zeros(4, dtype=np.float32))
     assert np.array_equal(rswa["phasic_labels"], np.zeros(4, dtype=np.float32))
+    assert np.array_equal(rswa["any_labels"], np.zeros(4, dtype=np.float32))
     assert np.array_equal(rswa["rswa_labels"], np.zeros(4, dtype=np.int64))
     assert np.array_equal(
         rswa["rswa_conf"],
         np.array([1.0, 1.0, 0.0, 1.0], dtype=np.float32),
     )
+    assert np.array_equal(rswa["tonic_cov"], np.zeros(4, dtype=np.float32))
+    assert np.array_equal(rswa["phasic_cov"], np.zeros(4, dtype=np.float32))
+    assert np.array_equal(rswa["any_cov"], np.zeros(4, dtype=np.float32))
+
+
+def test_rasterize_rswa_annotations_recognizes_any_type(tmp_path):
+    """Regressao para o bug em que eventos type=any eram silenciosamente
+    descartados: rasterize_rswa_annotations so reconhecia tonic/phasic."""
+    rswa_module = load_preprocessing_module(
+        tmp_path,
+        "sleep_rswa.preprocessing.rswa_labels",
+    )
+
+    csv_path = tmp_path / "brux3_rswa.csv"
+    csv_path.write_text(
+        "\n".join(
+            [
+                "subject_id,onset_s,duration_s,type",
+                "brux3,10.0,3.0,tonic",   # mini-epoca 0 (annot_start=0): [0,3)
+                "brux3,13.0,3.0,phasic",  # mini-epoca 1: [3,6)
+                "brux3,16.0,3.0,any",     # mini-epoca 2: [6,9)
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    stages_mini = np.array([4, 4, 4, 4], dtype=np.int64)
+    rswa = rswa_module.rasterize_rswa_annotations(
+        csv_path=csv_path,
+        subject_id="brux3",
+        stages_mini=stages_mini,
+        annot_start=10.0,
+    )
+
+    assert np.array_equal(rswa["tonic_labels"], np.array([1, 0, 0, 0], dtype=np.float32))
+    assert np.array_equal(rswa["phasic_labels"], np.array([0, 1, 0, 0], dtype=np.float32))
+    assert np.array_equal(rswa["any_labels"], np.array([0, 0, 1, 0], dtype=np.float32))
+    # rswa_labels (mono-rotulo) NAO inclui "any" -- mesma convencao de auto_label.py
+    assert np.array_equal(rswa["rswa_labels"], np.array([2, 1, 0, 0], dtype=np.int64))
+    assert rswa["any_cov"][2] == pytest.approx(1.0)
+
+
+def test_rasterize_rswa_annotations_unknown_type_is_ignored(tmp_path):
+    """Um type desconhecido (nem tonic/phasic/any) continua sendo ignorado,
+    sem levantar erro -- mesmo comportamento anterior a correcao do any."""
+    rswa_module = load_preprocessing_module(
+        tmp_path,
+        "sleep_rswa.preprocessing.rswa_labels",
+    )
+
+    csv_path = tmp_path / "brux4_rswa.csv"
+    csv_path.write_text(
+        "\n".join(
+            [
+                "subject_id,onset_s,duration_s,type",
+                "brux4,10.0,3.0,artifact",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    stages_mini = np.array([4, 4], dtype=np.int64)
+    rswa = rswa_module.rasterize_rswa_annotations(
+        csv_path=csv_path,
+        subject_id="brux4",
+        stages_mini=stages_mini,
+        annot_start=10.0,
+    )
+
+    assert np.array_equal(rswa["tonic_labels"], np.zeros(2, dtype=np.float32))
+    assert np.array_equal(rswa["phasic_labels"], np.zeros(2, dtype=np.float32))
+    assert np.array_equal(rswa["any_labels"], np.zeros(2, dtype=np.float32))
