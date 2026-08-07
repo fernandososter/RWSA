@@ -22,6 +22,7 @@ Observacao importante:
 """
 from __future__ import annotations
 
+import argparse
 import json
 import sys
 from pathlib import Path
@@ -30,7 +31,7 @@ import pandas as pd
 import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from threshold_rule import detect_events
+from threshold_rule import K_OFF, K_OFF_HOLD_S, K_ON, K_SINGLE, detect_events
 
 DATA_DIR = Path(__file__).resolve().parents[2] / "data_real"
 RESULTS_DIR = Path(__file__).resolve().parent / "results"
@@ -39,6 +40,21 @@ EMG_CHANNEL_INDEX = 4
 FS = 100
 METHODS = ["single", "double"]
 EVENT_TYPES = ["phasic", "tonic", "any"]
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Avalia o detector de limiar em intervalos anotados de exames reais."
+    )
+    parser.add_argument("--k-single", type=float, default=K_SINGLE,
+                        help="Multiplicador do baseline no metodo single.")
+    parser.add_argument("--k-on", type=float, default=K_ON,
+                        help="Multiplicador do baseline para ligar evento no metodo double.")
+    parser.add_argument("--k-off", type=float, default=K_OFF,
+                        help="Multiplicador do baseline para desligar evento no metodo double.")
+    parser.add_argument("--off-hold-s", type=float, default=K_OFF_HOLD_S,
+                        help="Tempo minimo abaixo de k_off para desligar no metodo double.")
+    return parser.parse_args()
 
 
 def load_exam_emg(pt_path: Path):
@@ -77,6 +93,10 @@ def detect_events_in_interval(
     end_s_pt: float,
     method: str,
     fs: int = FS,
+    k_single: float = K_SINGLE,
+    k_on: float = K_ON,
+    k_off: float = K_OFF,
+    off_hold_s: float = K_OFF_HOLD_S,
 ) -> tuple[list[dict], dict]:
     i0, i1 = clip_interval_to_exam(start_s_pt, end_s_pt, len(emg), fs=fs)
     clipped_start_s = i0 / fs
@@ -92,7 +112,16 @@ def detect_events_in_interval(
     if i0 >= i1:
         return [], meta
 
-    local_events = detect_events(emg[i0:i1], method=method, fs=fs, apply_merge_gaps=True)
+    local_events = detect_events(
+        emg[i0:i1],
+        method=method,
+        fs=fs,
+        apply_merge_gaps=True,
+        k_single=k_single,
+        k_on=k_on,
+        k_off=k_off,
+        off_hold_s=off_hold_s,
+    )
     detected = []
     for event_idx, ev in enumerate(local_events, start=1):
         onset_s = clipped_start_s + ev.onset_s
@@ -147,6 +176,7 @@ def aggregate_interval_metrics(df: pd.DataFrame, group_cols: list[str]) -> pd.Da
 
 
 def main():
+    args = parse_args()
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     offsets = load_offsets(CONFIG_PATH)
     subject_stems = sorted(p.stem for p in DATA_DIR.glob("*.pt"))
@@ -175,6 +205,10 @@ def main():
                     end_s_pt=end_s_pt,
                     method=method,
                     fs=FS,
+                    k_single=args.k_single,
+                    k_on=args.k_on,
+                    k_off=args.k_off,
+                    off_hold_s=args.off_hold_s,
                 )
 
                 counts = {etype: sum(1 for d in detected if d["event_type"] == etype) for etype in EVENT_TYPES}
@@ -189,6 +223,10 @@ def main():
                     "csv_end_s": round(gt_end_s, 3),
                     "csv_duration_s": round(gt_duration_s, 3),
                     "annot_start_used": round(annot_start, 3),
+                    "k_single_used": round(args.k_single, 6),
+                    "k_on_used": round(args.k_on, 6),
+                    "k_off_used": round(args.k_off, 6),
+                    "off_hold_s_used": round(args.off_hold_s, 6),
                     "pt_onset_s": round(start_s_pt, 3),
                     "pt_end_s": round(end_s_pt, 3),
                     **meta,
@@ -214,6 +252,10 @@ def main():
                         "csv_onset_s": round(gt_onset_s, 3),
                         "csv_end_s": round(gt_end_s, 3),
                         "annot_start_used": round(annot_start, 3),
+                        "k_single_used": round(args.k_single, 6),
+                        "k_on_used": round(args.k_on, 6),
+                        "k_off_used": round(args.k_off, 6),
+                        "off_hold_s_used": round(args.off_hold_s, 6),
                         "analysis_start_s_pt": meta["analysis_start_s_pt"],
                         "analysis_end_s_pt": meta["analysis_end_s_pt"],
                         "analysis_duration_s": meta["analysis_duration_s"],
@@ -233,6 +275,14 @@ def main():
     print("=== ANALISE POR INTERVALO ANOTADO ===")
     print(f"{len(interval_df)} linhas gravadas em {RESULTS_DIR / 'interval_analysis.csv'}")
     print(f"{len(detected_df)} eventos gravados em {RESULTS_DIR / 'detected_events.csv'}")
+    print()
+    print("=== PARAMETROS USADOS ===")
+    print(
+        f"k_single={args.k_single:.6f} | "
+        f"k_on={args.k_on:.6f} | "
+        f"k_off={args.k_off:.6f} | "
+        f"off_hold_s={args.off_hold_s:.6f}"
+    )
     print()
     print("=== RESUMO AGREGADO ===")
     print(summary.to_string(index=False))

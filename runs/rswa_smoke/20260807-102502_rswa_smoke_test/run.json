@@ -1,0 +1,60 @@
+{
+  "run_id": "20260807-102502_rswa_smoke_test",
+  "task": "rswa",
+  "experiment_name": "rswa_smoke_test",
+  "notes": "smoke test para validar pipeline de scripts (nao usar para avaliacao real)",
+  "tags": [],
+  "arguments": {
+    "data_dir": "/tmp/smoke_data",
+    "n_splits": 4,
+    "fold": null,
+    "test_fraction": 0.25,
+    "test_dir": null,
+    "epochs": 2,
+    "batch_size": 1,
+    "num_workers": 0,
+    "lr": 0.0001,
+    "weight_decay": 0.0001,
+    "grad_clip": 1.0,
+    "threshold": 0.5,
+    "tonic_threshold": null,
+    "phasic_threshold": null,
+    "any_threshold": null,
+    "min_confidence": 0.0,
+    "all_stages": false,
+    "tonic_pos_weight": 17.17,
+    "phasic_pos_weight": 10.5,
+    "any_pos_weight": 13.86,
+    "seed": 42,
+    "device": "auto",
+    "no_amp": false,
+    "run_dir": "runs/rswa_smoke",
+    "experiment_name": "rswa_smoke_test",
+    "notes": "smoke test para validar pipeline de scripts (nao usar para avaliacao real)",
+    "tags": [],
+    "patience": 2,
+    "log_movement_distribution": false,
+    "monitor": "rswa_f1_macro"
+  },
+  "system": {
+    "created_at_utc": "2026-08-07T13:25:02+00:00",
+    "hostname": "Laptop-de-Fernando.local",
+    "platform": "macOS-26.4.1-arm64-arm-64bit",
+    "python": "3.12.7 | packaged by Anaconda, Inc. | (main, Oct  4 2024, 08:22:19) [Clang 14.0.6 ]",
+    "python_executable": "/Users/fernandososter/Documents/sleep_staging_rswa_project/.venv/bin/python3",
+    "torch": "2.13.0",
+    "numpy": "2.5.1",
+    "selected_device": "cpu",
+    "cuda": {
+      "available": false,
+      "torch_cuda_version": null,
+      "cudnn_version": null
+    },
+    "pid": 15168
+  },
+  "git": {
+    "commit": "7db9eaab949d3d7d6be272be6448bd37696b7bfa",
+    "branch": "dev_rembaseline_fasicotonico",
+    "dirty": true
+  }
+}

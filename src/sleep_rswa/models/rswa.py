@@ -17,9 +17,22 @@ class RSWAFeatureEncoder(nn.Module):
 class RSWADetectionNet(nn.Module):
     def __init__(self,config=None,use_se=True):
         super().__init__(); cfg=config or ModelConfig(); self.encoder=RSWAFeatureEncoder(cfg,use_se); self.temporal=MambaStack(cfg.d_model,cfg.rswa_mamba_layers,cfg.d_state,cfg.dropout); h=cfg.d_model//2
-        # Cabeca unica: detecta "movement" (any) = qualquer movimento anotado
-        # (tonico OU fasico) por mini-epoca. Substitui as antigas tonic_head/phasic_head.
-        self.movement_head=nn.Sequential(nn.Linear(cfg.d_model,h),nn.ReLU(inplace=True),nn.Dropout(cfg.dropout),nn.Linear(h,1))
+        # Tres cabecas independentes por mini-epoca (multi-rotulo, BCE cada):
+        #   tonic_head  : evento tonico confirmado (duracao >= 15s, score >= 2.0)
+        #   phasic_head : evento fasico confirmado (0.1s <= duracao <= 5s, score >= 2.0)
+        #   any_head    : evento com amplitude confirmada mas duracao ambigua
+        #                 (5s < duracao < 15s) -- categoria "any" do limiar duplo,
+        #                 NAO e um "qualquer movimento" (isso seria a uniao das 3
+        #                 cabecas em pos-processamento, nao uma cabeca propria).
+        # Substitui a antiga cabeca unica movement_head (commit ec5d505, revertido).
+        self.tonic_head=nn.Sequential(nn.Linear(cfg.d_model,h),nn.ReLU(inplace=True),nn.Dropout(cfg.dropout),nn.Linear(h,1))
+        self.phasic_head=nn.Sequential(nn.Linear(cfg.d_model,h),nn.ReLU(inplace=True),nn.Dropout(cfg.dropout),nn.Linear(h,1))
+        self.any_head=nn.Sequential(nn.Linear(cfg.d_model,h),nn.ReLU(inplace=True),nn.Dropout(cfg.dropout),nn.Linear(h,1))
     def forward(self,emg_center,mask=None):
-        z=self.temporal(self.encoder(emg_center),mask); return {"movement_logits":self.movement_head(z).squeeze(-1)}
+        z=self.temporal(self.encoder(emg_center),mask)
+        return {
+            "tonic_logits":self.tonic_head(z).squeeze(-1),
+            "phasic_logits":self.phasic_head(z).squeeze(-1),
+            "any_logits":self.any_head(z).squeeze(-1),
+        }
     def n_params(self): return sum(p.numel() for p in self.parameters() if p.requires_grad)

@@ -21,6 +21,7 @@ from .config import PathConfig, PSGConfig, FS_TARGET, EPOCH_SEC, N_CHANNELS
 from .preprocess import preprocess_exam, run_preprocessing
 from .parallel import run_preprocessing_parallel
 from .rswa_labels import rasterize_rswa_annotations
+from .rem_baseline import compute_rem_baseline
 
 __all__ = [
     "PathConfig",
@@ -32,4 +33,5 @@ __all__ = [
     "run_preprocessing",
     "run_preprocessing_parallel",
     "rasterize_rswa_annotations",
+    "compute_rem_baseline",
 ]

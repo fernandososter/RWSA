@@ -1,0 +1,34 @@
+{
+  "train": [
+    {
+      "subject_id": "ins4",
+      "n_epochs": 7330
+    },
+    {
+      "subject_id": "narco5",
+      "n_epochs": 8150
+    },
+    {
+      "subject_id": "plm6",
+      "n_epochs": 6590
+    },
+    {
+      "subject_id": "sdb1",
+      "n_epochs": 7710
+    }
+  ],
+  "validation": [
+    {
+      "subject_id": "plm8",
+      "n_epochs": 7340
+    },
+    {
+      "subject_id": "rbd6",
+      "n_epochs": 7150
+    }
+  ],
+  "n_train_subjects": 4,
+  "n_validation_subjects": 2,
+  "n_train_epochs": 29780,
+  "n_validation_epochs": 14490
+}

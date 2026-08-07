@@ -56,6 +56,7 @@ MERGE_GAP_S = 1.0          # funde lacunas curtas (<= isso) entre segmentos ativ
 K_SINGLE = 2.5             # limiar simples
 K_ON = 3.0                 # limiar duplo: corte de INICIO (mais exigente)
 K_OFF = 1.5                # limiar duplo: corte de MANUTENCAO (menos exigente)
+K_OFF_HOLD_S = 0.0         # limiar duplo: tempo minimo abaixo de k_off para DESLIGAR
 
 # --- classificacao por duracao + amplitude (cortes atualizados pelo usuario) ---
 PHASIC_LO_S = 0.1
@@ -137,27 +138,71 @@ def single_threshold_mask(env: np.ndarray, baseline: np.ndarray, k: float = K_SI
 
 
 def double_threshold_mask(env: np.ndarray, baseline: np.ndarray,
-                           k_on: float = K_ON, k_off: float = K_OFF) -> np.ndarray:
+                           k_on: float = K_ON, k_off: float = K_OFF,
+                           off_hold_s: float = K_OFF_HOLD_S,
+                           fs: int = FS) -> np.ndarray:
     """Limiar duplo / histerese (Schmitt trigger):
     - Precisa cruzar k_on*baseline para ATIVAR um segmento (evidencia forte).
-    - Uma vez ativo, so DESATIVA quando cai abaixo de k_off*baseline
-      (evidencia fraca basta para manter -- evita fragmentar um evento
-      sustentado por flutuacoes de ruido perto do limiar).
+    - Uma vez ativo, so DESATIVA quando permanece abaixo de k_off*baseline
+      por pelo menos off_hold_s segundos consecutivos. Quedas breves abaixo
+      de k_off sao absorvidas como parte do mesmo evento.
 
-    Implementacao vetorizada: calcula onde k_on e cruzado (ignition points),
-    e para cada ignicao estende o segmento enquanto env permanecer acima de
-    k_off, usando os limites dos segmentos de "env > k_off*baseline".
+    Implementacao por maquina de estados para suportar "desligamento
+    confirmado no tempo":
+    - inactive -> active ao cruzar k_on
+    - active -> inactive apenas apos off_hold_s consecutivos abaixo de k_off
+
+    Se a queda abaixo de k_off for confirmada, o fim do evento e marcado de
+    forma retroativa no PRIMEIRO instante da queda (nao no instante da
+    confirmacao), para nao inflar artificialmente a duracao do segmento.
     """
-    above_off = env > (k_off * baseline)
-    above_on = env > (k_on * baseline)
+    n = len(env)
+    mask = np.zeros(n, dtype=bool)
+    off_hold_samples = max(0, int(round(off_hold_s * fs)))
 
-    off_segs = segments_from_mask(above_off)
-    mask = np.zeros_like(above_off)
-    for s, e in off_segs:
-        # este segmento (definido pelo limiar baixo) so conta se contiver
-        # pelo menos 1 amostra que cruzou o limiar alto (ignicao)
-        if np.any(above_on[s:e]):
-            mask[s:e] = True
+    active = False
+    off_count = 0
+    off_start: int | None = None
+
+    for i in range(n):
+        on_threshold = k_on * baseline[i]
+        off_threshold = k_off * baseline[i]
+
+        if not active:
+            if env[i] > on_threshold:
+                active = True
+                mask[i] = True
+            continue
+
+        if env[i] > off_threshold:
+            if off_start is not None:
+                # Queda curta abaixo de k_off: reabsorve o vale no mesmo evento.
+                mask[off_start:i] = True
+                off_start = None
+                off_count = 0
+            mask[i] = True
+            continue
+
+        if off_hold_samples == 0:
+            active = False
+            off_count = 0
+            off_start = None
+            continue
+
+        if off_start is None:
+            off_start = i
+        off_count += 1
+
+        if off_count >= off_hold_samples:
+            active = False
+            off_count = 0
+            off_start = None
+
+    if active and off_start is not None:
+        # O sinal terminou durante uma queda curta nao confirmada: mantem o
+        # trecho abaixo de k_off como parte do evento.
+        mask[off_start:n] = True
+
     return mask
 
 
@@ -208,23 +253,31 @@ def segments_to_events(segs: list[tuple[int, int]], env: np.ndarray, baseline: n
     return events
 
 
-def raw_mask(emg_flat: np.ndarray, method: str, fs: int = FS) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def raw_mask(emg_flat: np.ndarray, method: str, fs: int = FS,
+             k_single: float = K_SINGLE,
+             k_on: float = K_ON,
+             k_off: float = K_OFF,
+             off_hold_s: float = K_OFF_HOLD_S) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Envelope, baseline e mascara BRUTA (antes de qualquer fusao de
     lacunas) -- usado para medir fragmentacao intrinseca de cada metodo,
     isolada do efeito de merge_gaps."""
     env = rms_envelope(emg_flat, win_sec=0.1, fs=fs)
     baseline = rolling_baseline(env, win_sec=BASELINE_WIN_S, pct=BASELINE_PCT, fs=fs)
     if method == "single":
-        mask = single_threshold_mask(env, baseline, k=K_SINGLE)
+        mask = single_threshold_mask(env, baseline, k=k_single)
     elif method == "double":
-        mask = double_threshold_mask(env, baseline, k_on=K_ON, k_off=K_OFF)
+        mask = double_threshold_mask(env, baseline, k_on=k_on, k_off=k_off, off_hold_s=off_hold_s, fs=fs)
     else:
         raise ValueError(f"metodo desconhecido: {method!r} (use 'single' ou 'double')")
     return env, baseline, mask
 
 
 def detect_events(emg_flat: np.ndarray, method: str, fs: int = FS,
-                   apply_merge_gaps: bool = True) -> list[DetectedEvent]:
+                   apply_merge_gaps: bool = True,
+                   k_single: float = K_SINGLE,
+                   k_on: float = K_ON,
+                   k_off: float = K_OFF,
+                   off_hold_s: float = K_OFF_HOLD_S) -> list[DetectedEvent]:
     """Pipeline completo: envelope -> baseline -> mascara (metodo escolhido)
     -> fusao de lacunas curtas (opcional) -> segmentos -> classificacao por duracao.
 
@@ -234,8 +287,22 @@ def detect_events(emg_flat: np.ndarray, method: str, fs: int = FS,
         pos-processamento que absorve fragmentacao (ver testes/src/limiar/
         results/ e o relatorio: merge_gaps mascara boa parte da diferenca
         entre os dois metodos no nivel de evento classificado).
+    k_single: limiar multiplicativo do metodo "single".
+    k_on: no metodo "double", limiar multiplicativo para INICIAR o evento.
+    k_off: no metodo "double", limiar multiplicativo para ENCERRAR o evento.
+    off_hold_s: no metodo "double", exige que o sinal permaneca abaixo de
+        k_off por esse tempo antes de desligar. Em 0.0s, reproduz o
+        comportamento antigo de desligamento imediato.
     """
-    env, baseline, mask = raw_mask(emg_flat, method=method, fs=fs)
+    env, baseline, mask = raw_mask(
+        emg_flat,
+        method=method,
+        fs=fs,
+        k_single=k_single,
+        k_on=k_on,
+        k_off=k_off,
+        off_hold_s=off_hold_s,
+    )
     if apply_merge_gaps:
         mask = merge_gaps(mask, gap_samples=int(round(MERGE_GAP_S * fs)))
     segs = segments_from_mask(mask)

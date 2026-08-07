@@ -1,0 +1,52 @@
+2026-08-07 10:25:02,989 | INFO | Run criada em: runs/rswa_smoke/20260807-102502_rswa_smoke_test
+2026-08-07 10:25:02,989 | INFO | Sujeitos: total=8 | CV=6 | teste=2
+2026-08-07 10:25:02,991 | INFO | TESTE (held-out): exames=2 | estágios[W=1,440(9.4%) | N1=510(3.3%) | N2=8,240(54.0%) | N3=2,570(16.9%) | REM=2,490(16.3%)] | movimento=801/2,490 (32.17% das avaliáveis; avaliáveis=16.3% do total de 15,250 mini-épocas)
+2026-08-07 10:25:02,997 | INFO | Fold 0 TREINO: exames=4 | estágios[W=6,730(22.2%) | N1=2,590(8.5%) | N2=8,260(27.2%) | N3=6,410(21.1%) | REM=6,360(21.0%)] | movimento=1,258/6,360 (19.78% das avaliáveis; avaliáveis=21.0% do total de 30,350 mini-épocas)
+2026-08-07 10:25:02,997 | INFO | Fold 0 VALIDAÇÃO: exames=2 | estágios[W=3,590(25.8%) | N1=910(6.5%) | N2=5,710(41.0%) | N3=1,920(13.8%) | REM=1,790(12.9%)] | movimento=349/1,790 (19.50% das avaliáveis; avaliáveis=12.9% do total de 13,920 mini-épocas)
+2026-08-07 10:27:48,030 | INFO | fold=0 ep=001 -- [92mtrain_loss=4.0440 train_f1(t/p/a)=0.135/0.068/0.158 train_f1_macro=0.1202[0m -- [93mval_loss=4.5881 val_f1(t/p/a)=0.152/0.000/0.154 val_f1_macro=0.1018[0m
+2026-08-07 10:27:48,084 | INFO | Fold 0: novo melhor checkpoint na época 1, rswa_f1_macro=0.1018
+2026-08-07 10:30:37,389 | INFO | fold=0 ep=002 -- [92mtrain_loss=3.9829 train_f1(t/p/a)=0.135/0.080/0.159 train_f1_macro=0.1245[0m -- [93mval_loss=4.5455 val_f1(t/p/a)=0.152/0.000/0.154 val_f1_macro=0.1018[0m
+2026-08-07 10:30:57,966 | INFO | Fold 1 TREINO: exames=5 | estágios[W=8,120(22.2%) | N1=2,620(7.2%) | N2=12,520(34.2%) | N3=6,240(17.1%) | REM=7,060(19.3%)] | movimento=1,468/7,060 (20.79% das avaliáveis; avaliáveis=19.3% do total de 36,560 mini-épocas)
+2026-08-07 10:30:57,966 | INFO | Fold 1 VALIDAÇÃO: exames=1 | estágios[W=2,200(28.5%) | N1=880(11.4%) | N2=1,450(18.8%) | N3=2,090(27.1%) | REM=1,090(14.1%)] | movimento=139/1,090 (12.75% das avaliáveis; avaliáveis=14.1% do total de 7,710 mini-épocas)
+2026-08-07 10:34:52,127 | INFO | fold=1 ep=001 -- [92mtrain_loss=4.5572 train_f1(t/p/a)=0.153/0.071/0.075 train_f1_macro=0.0996[0m -- [93mval_loss=3.3986 val_f1(t/p/a)=0.079/0.065/0.000 val_f1_macro=0.0481[0m
+2026-08-07 10:34:52,199 | INFO | Fold 1: novo melhor checkpoint na época 1, rswa_f1_macro=0.0481
+2026-08-07 10:38:38,756 | INFO | fold=1 ep=002 -- [92mtrain_loss=4.4288 train_f1(t/p/a)=0.154/0.075/0.126 train_f1_macro=0.1182[0m -- [93mval_loss=3.3587 val_f1(t/p/a)=0.079/0.000/0.000 val_f1_macro=0.0264[0m
+2026-08-07 10:38:54,656 | INFO | Fold 2 TREINO: exames=4 | estágios[W=9,040(30.4%) | N1=1,960(6.6%) | N2=8,850(29.7%) | N3=4,890(16.4%) | REM=5,040(16.9%)] | movimento=841/5,040 (16.69% das avaliáveis; avaliáveis=16.9% do total de 29,780 mini-épocas)
+2026-08-07 10:38:54,657 | INFO | Fold 2 VALIDAÇÃO: exames=2 | estágios[W=1,280(8.8%) | N1=1,540(10.6%) | N2=5,120(35.3%) | N3=3,440(23.7%) | REM=3,110(21.5%)] | movimento=766/3,110 (24.63% das avaliáveis; avaliáveis=21.5% do total de 14,490 mini-épocas)
+2026-08-07 10:43:12,756 | INFO | fold=2 ep=001 -- [92mtrain_loss=4.0711 train_f1(t/p/a)=0.103/0.051/0.153 train_f1_macro=0.1023[0m -- [93mval_loss=4.5021 val_f1(t/p/a)=0.197/0.000/0.164 val_f1_macro=0.1202[0m
+2026-08-07 10:43:12,859 | INFO | Fold 2: novo melhor checkpoint na época 1, rswa_f1_macro=0.1202
+2026-08-07 10:47:03,708 | INFO | fold=2 ep=002 -- [92mtrain_loss=4.0317 train_f1(t/p/a)=0.099/0.023/0.160 train_f1_macro=0.0940[0m -- [93mval_loss=4.5202 val_f1(t/p/a)=0.200/0.000/0.164 val_f1_macro=0.1213[0m
+2026-08-07 10:47:03,755 | INFO | Fold 2: novo melhor checkpoint na época 2, rswa_f1_macro=0.1213
+2026-08-07 10:47:31,964 | INFO | Fold 3 TREINO: exames=5 | estágios[W=7,070(19.6%) | N1=3,330(9.2%) | N2=12,280(34.0%) | N3=7,450(20.6%) | REM=5,990(16.6%)] | movimento=1,254/5,990 (20.93% das avaliáveis; avaliáveis=16.6% do total de 36,120 mini-épocas)
+2026-08-07 10:47:31,965 | INFO | Fold 3 VALIDAÇÃO: exames=1 | estágios[W=3,250(39.9%) | N1=170(2.1%) | N2=1,690(20.7%) | N3=880(10.8%) | REM=2,160(26.5%)] | movimento=353/2,160 (16.34% das avaliáveis; avaliáveis=26.5% do total de 8,150 mini-épocas)
+2026-08-07 10:50:51,765 | INFO | fold=3 ep=001 -- [92mtrain_loss=4.4557 train_f1(t/p/a)=0.113/0.081/0.140 train_f1_macro=0.1115[0m -- [93mval_loss=3.4714 val_f1(t/p/a)=0.042/0.000/0.185 val_f1_macro=0.0755[0m
+2026-08-07 10:50:51,810 | INFO | Fold 3: novo melhor checkpoint na época 1, rswa_f1_macro=0.0755
+2026-08-07 10:54:24,597 | INFO | fold=3 ep=002 -- [92mtrain_loss=4.3827 train_f1(t/p/a)=0.139/0.035/0.142 train_f1_macro=0.1056[0m -- [93mval_loss=3.4845 val_f1(t/p/a)=0.080/0.000/0.185 val_f1_macro=0.0883[0m
+2026-08-07 10:54:24,623 | INFO | Fold 3: novo melhor checkpoint na época 2, rswa_f1_macro=0.0883
+2026-08-07 10:54:41,530 | INFO | OUT-OF-FOLD (tonic): f1=0.1431 kappa=-0.0002
+2026-08-07 10:54:41,794 | INFO | OUT-OF-FOLD (phasic): f1=0.0496 kappa=-0.0071
+2026-08-07 10:54:42,040 | INFO | OUT-OF-FOLD (any): f1=0.1663 kappa=0.0095
+2026-08-07 10:54:42,044 | INFO | ================================================================================
+2026-08-07 10:54:42,044 | INFO | FASE DE TESTE (tonic/phasic/any) | folds=4
+2026-08-07 10:54:42,044 | INFO | ================================================================================
+2026-08-07 10:55:07,163 | INFO | TESTE fold 0 (tonic): f1=0.1229 kappa=0.0000 pos=163/2490
+2026-08-07 10:55:07,321 | INFO | TESTE fold 0 (phasic): f1=0.0000 kappa=0.0000 pos=329/2490
+2026-08-07 10:55:07,486 | INFO | TESTE fold 0 (any): f1=0.2403 kappa=0.0000 pos=340/2490
+2026-08-07 10:55:07,644 | INFO | TESTE fold 0 (movement): f1=0.4868 kappa=0.0000 pos=801/2490
+2026-08-07 10:55:33,393 | INFO | TESTE fold 1 (tonic): f1=0.1229 kappa=0.0000 pos=163/2490
+2026-08-07 10:55:33,562 | INFO | TESTE fold 1 (phasic): f1=0.2490 kappa=0.0271 pos=329/2490
+2026-08-07 10:55:33,723 | INFO | TESTE fold 1 (any): f1=0.0000 kappa=0.0000 pos=340/2490
+2026-08-07 10:55:33,862 | INFO | TESTE fold 1 (movement): f1=0.4868 kappa=0.0000 pos=801/2490
+2026-08-07 10:55:54,799 | INFO | TESTE fold 2 (tonic): f1=0.1224 kappa=-0.0006 pos=163/2490
+2026-08-07 10:55:54,957 | INFO | TESTE fold 2 (phasic): f1=0.0000 kappa=0.0000 pos=329/2490
+2026-08-07 10:55:55,101 | INFO | TESTE fold 2 (any): f1=0.2403 kappa=0.0000 pos=340/2490
+2026-08-07 10:55:55,228 | INFO | TESTE fold 2 (movement): f1=0.4868 kappa=0.0000 pos=801/2490
+2026-08-07 10:56:17,367 | INFO | TESTE fold 3 (tonic): f1=0.1229 kappa=0.0000 pos=163/2490
+2026-08-07 10:56:17,484 | INFO | TESTE fold 3 (phasic): f1=0.0000 kappa=0.0000 pos=329/2490
+2026-08-07 10:56:17,601 | INFO | TESTE fold 3 (any): f1=0.2403 kappa=0.0000 pos=340/2490
+2026-08-07 10:56:17,710 | INFO | TESTE fold 3 (movement): f1=0.4868 kappa=0.0000 pos=801/2490
+2026-08-07 10:56:17,812 | INFO | TESTE ENSEMBLE tonic (4 folds): f1=0.1229 kappa=0.0000
+2026-08-07 10:56:18,062 | INFO | TESTE ENSEMBLE phasic (4 folds): f1=0.0000 kappa=0.0000
+2026-08-07 10:56:19,505 | INFO | TESTE ENSEMBLE any (4 folds): f1=0.2403 kappa=0.0000
+2026-08-07 10:56:19,661 | INFO | TESTE ENSEMBLE movement (4 folds): f1=0.4868 kappa=0.0000
+2026-08-07 10:56:19,825 | INFO | Execução finalizada com status=completed

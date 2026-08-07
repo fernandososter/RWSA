@@ -24,6 +24,11 @@ class SubjectData:
     # de rswa_labels no load (retrocompatibilidade com .pt mono-rotulo antigos).
     tonic_labels: torch.Tensor | None = None
     phasic_labels: torch.Tensor | None = None
+    # any_labels: categoria "any" do limiar duplo (amplitude confirmada, duracao
+    # ambigua 5s-15s) -- cabeca NOVA, nao existe em nenhum .pt antigo (mono- ou
+    # multi-rotulo). Ausente -> zeros (nenhum "any" conhecido) ate a rotulagem
+    # automatica (CNN+limiar-duplo) escrever este campo.
+    any_labels: torch.Tensor | None = None
     n_epochs: int = field(init=False)
 
     def __post_init__(self) -> None:
@@ -58,6 +63,7 @@ def load_subject_file(path: str | Path) -> SubjectData:
     # rswa_labels no __getitem__.
     tonic = obj.get("tonic_labels")
     phasic = obj.get("phasic_labels")
+    any_lab = obj.get("any_labels")
     return SubjectData(
         subject_id=str(obj.get("subject_id", path.stem)),
         signals=signals,
@@ -67,6 +73,7 @@ def load_subject_file(path: str | Path) -> SubjectData:
         emg_signals=emg,
         tonic_labels=tonic,
         phasic_labels=phasic,
+        any_labels=any_lab,
     )
 
 
@@ -189,6 +196,8 @@ class SleepAnalysisDataset(Dataset):
                 movement = rswa.eq(self.rswa_config.tonic_label) | rswa.eq(
                     self.rswa_config.phasic_label
                 )
+            if subject.any_labels is not None:
+                movement = movement | (subject.any_labels > 0.5)
 
             movement_valid = movement & valid
             total += int(stages.numel())
@@ -248,15 +257,26 @@ class SleepAnalysisDataset(Dataset):
             tonic_labels = rswa_labels.eq(self.rswa_config.tonic_label).float()
             phasic_labels = rswa_labels.eq(self.rswa_config.phasic_label).float()
 
+        # any_labels: cabeca nova, sem retrocompat possivel -- .pt que nao a
+        # trazem (nenhum, ainda) contam zeros (nenhum "any" conhecido) e ficam
+        # de fora da loss/metrica dessa cabeca so pela mascara rswa_valid, que
+        # e a mesma das outras duas (validade = mini-epoca escorada).
+        if subject.any_labels is not None:
+            any_labels = subject.any_labels.float().clone()
+        else:
+            any_labels = torch.zeros_like(labels, dtype=torch.float32)
+
         # Zera rotulos fora da mascara de validade (cada cabeca independente).
         tonic_labels[~valid_rswa] = 0.0
         phasic_labels[~valid_rswa] = 0.0
+        any_labels[~valid_rswa] = 0.0
         rswa_labels[~valid_rswa] = self.rswa_config.none_label
 
-        # Alvo unico "movement" (any) = qualquer movimento anotado na mini-epoca
-        # (tonico OU fasico). E o unico rotulo usado pelo treino/metrica agora;
-        # tonic_labels/phasic_labels sao mantidos apenas para inspecao/QC.
-        movement_labels = ((tonic_labels > 0.5) | (phasic_labels > 0.5)).float()
+        # Alias historico "movement" = uniao das 3 cabecas (qualquer movimento
+        # anotado, tonico OU fasico OU any). Mantido so para inspecao/QC e
+        # compatibilidade com codigo antigo -- NAO e mais o alvo de treino
+        # (o treino agora usa as 3 cabecas tonic/phasic/any independentes).
+        movement_labels = ((tonic_labels > 0.5) | (phasic_labels > 0.5) | (any_labels > 0.5)).float()
         movement_labels[~valid_rswa] = 0.0
 
         return {
@@ -267,6 +287,7 @@ class SleepAnalysisDataset(Dataset):
             "rswa_labels": rswa_labels,
             "phasic_labels": phasic_labels,
             "tonic_labels": tonic_labels,
+            "any_labels": any_labels,
             "movement_labels": movement_labels,
             "rswa_valid": valid_rswa,
             "rswa_conf": confidence,
@@ -289,6 +310,7 @@ def collate_sleep_analysis_exams(batch):
         "rswa_labels": torch.zeros(b, tmax, dtype=torch.long),
         "phasic_labels": torch.zeros(b, tmax),
         "tonic_labels": torch.zeros(b, tmax),
+        "any_labels": torch.zeros(b, tmax),
         "movement_labels": torch.zeros(b, tmax),
         "rswa_valid": torch.zeros(b, tmax, dtype=torch.bool),
         "rswa_conf": torch.zeros(b, tmax),
@@ -304,6 +326,7 @@ def collate_sleep_analysis_exams(batch):
             "rswa_labels",
             "phasic_labels",
             "tonic_labels",
+            "any_labels",
             "movement_labels",
             "rswa_valid",
             "rswa_conf",

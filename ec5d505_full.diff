@@ -1,0 +1,437 @@
+commit ec5d505e770dd6a94dae86305ee6695ef76f63b9
+Author: fernandososter <fernando.soster@gmail.com>
+Date:   Tue Aug 4 10:51:49 2026 -0300
+
+    unificacao any
+
+diff --git a/scripts/predict.py b/scripts/predict.py
+index 5e74bc3..3cda693 100644
+--- a/scripts/predict.py
++++ b/scripts/predict.py
+@@ -61,8 +61,7 @@ def main() -> None:
+                 outputs = model(signals, emg, mask=mask)
+             stage_prob = torch.softmax(outputs["staging_logits"], dim=-1)
+             stage_pred = stage_prob.argmax(dim=-1)
+-            tonic_prob = torch.sigmoid(outputs["tonic_logits"])
+-            phasic_prob = torch.sigmoid(outputs["phasic_logits"])
++            movement_prob = torch.sigmoid(outputs["movement_logits"])
+ 
+             for i, subject_id in enumerate(batch["subject_ids"]):
+                 length = int(batch["lengths"][i])
+@@ -75,10 +74,8 @@ def main() -> None:
+                         "stage_id": stage_id,
+                         "stage": STAGE_NAMES[stage_id],
+                         "stage_confidence": float(stage_prob[i, epoch, stage_id].cpu()),
+-                        "tonic_probability": float(tonic_prob[i, epoch].cpu()),
+-                        "tonic_pred": int(tonic_prob[i, epoch] >= args.threshold),
+-                        "phasic_probability": float(phasic_prob[i, epoch].cpu()),
+-                        "phasic_pred": int(phasic_prob[i, epoch] >= args.threshold),
++                        "movement_probability": float(movement_prob[i, epoch].cpu()),
++                        "movement_pred": int(movement_prob[i, epoch] >= args.threshold),
+                     })
+ 
+     args.output.parent.mkdir(parents=True, exist_ok=True)
+diff --git a/scripts/train_joint.py b/scripts/train_joint.py
+index 061dd50..321fae9 100644
+--- a/scripts/train_joint.py
++++ b/scripts/train_joint.py
+@@ -118,8 +118,7 @@ def main() -> None:
+                 emg = batch["emg_center"].to(device, non_blocking=True)
+                 padding_mask = batch["padding_mask"].to(device, non_blocking=True)
+                 stage_targets = batch["sleep_stages"].to(device, non_blocking=True)
+-                tonic_targets = batch["tonic_labels"].to(device, non_blocking=True)
+-                phasic_targets = batch["phasic_labels"].to(device, non_blocking=True)
++                movement_targets = batch["movement_labels"].to(device, non_blocking=True)
+                 stage_valid = batch["staging_valid"].to(device, non_blocking=True) & padding_mask
+                 rswa_valid = batch["rswa_valid"].to(device, non_blocking=True) & padding_mask
+ 
+@@ -144,7 +143,7 @@ def main() -> None:
+                         enabled=(not args.no_amp and device.type == "cuda"),
+                     ):
+                         rswa_outputs = rswa_model(emg, mask=padding_mask)
+-                        rswa_loss = rswa_loss_fn(rswa_outputs, tonic_targets, phasic_targets, rswa_valid)
++                        rswa_loss = rswa_loss_fn(rswa_outputs, movement_targets, rswa_valid)
+                     rswa_loss.backward()
+                     clip_grad_norm_(rswa_model.parameters(), args.grad_clip)
+                     rswa_optimizer.step()
+@@ -178,11 +177,9 @@ def main() -> None:
+                 f"{YELLOW}"
+                 f"val_stg_f1={val_metrics.get('staging_f1_macro', float('nan')):.4f} "
+                 f"val_stg_kappa={val_metrics.get('staging_kappa', float('nan')):.4f} "
+-                f"val_rswa_f1={val_metrics.get('rswa_rswa_f1_macro', float('nan')):.4f} "
+                 f"{GREEN}"
+-                f"val_tonic_kappa={val_metrics.get('rswa_tonic_kappa', float('nan')):.4f} "
+-                f"val_phasic_kappa={val_metrics.get('rswa_phasic_kappa', float('nan')):.4f} "
+-                f"val_rswa_kappa={val_metrics.get('rswa_rswa_kappa_macro', float('nan')):.4f}"
++                f"val_movement_f1={val_metrics.get('rswa_movement_f1', float('nan')):.4f} "
++                f"val_movement_kappa={val_metrics.get('rswa_movement_kappa', float('nan')):.4f}"
+                 f"{RESET}"
+             )
+ 
+diff --git a/scripts/train_rswa.py b/scripts/train_rswa.py
+index 3834f88..5fb04ca 100644
+--- a/scripts/train_rswa.py
++++ b/scripts/train_rswa.py
+@@ -38,8 +38,7 @@ def parse_args() -> argparse.Namespace:
+     parser.add_argument("--threshold", type=float, default=0.5)
+     parser.add_argument("--min-confidence", type=float, default=0.0)
+     parser.add_argument("--all-stages", action="store_true")
+-    parser.add_argument("--tonic-pos-weight", type=float)
+-    parser.add_argument("--phasic-pos-weight", type=float)
++    parser.add_argument("--movement-pos-weight", type=float)
+     parser.add_argument("--seed", type=int, default=42)
+     parser.add_argument("--device", default="auto")
+     parser.add_argument("--no-amp", action="store_true")
+@@ -48,7 +47,7 @@ def parse_args() -> argparse.Namespace:
+     parser.add_argument("--notes", default=None)
+     parser.add_argument("--tags", nargs="*", default=[])
+     parser.add_argument("--patience", type=int, default=15)
+-    parser.add_argument("--monitor", choices=["rswa_f1_macro", "rswa_kappa_macro"], default="rswa_f1_macro", help="Métrica usada para selecionar o melhor checkpoint.")
++    parser.add_argument("--monitor", choices=["movement_f1", "movement_kappa", "rswa_f1_macro", "rswa_kappa_macro"], default="movement_f1", help="Métrica usada para selecionar o melhor checkpoint (movement_* e rswa_*_macro sao equivalentes).")
+ 
+     return parser.parse_args()
+ 
+@@ -84,9 +83,8 @@ def main() -> None:
+             train_loader = make_loader(train_subjects, args, True, device)
+             val_loader = make_loader(val_subjects, args, False, device)
+             model = RSWADetectionNet().to(device)
+-            tonic_weight = torch.tensor(args.tonic_pos_weight, device=device) if args.tonic_pos_weight else None
+-            phasic_weight = torch.tensor(args.phasic_pos_weight, device=device) if args.phasic_pos_weight else None
+-            criterion = RSWALoss(tonic_pos_weight=tonic_weight, phasic_pos_weight=phasic_weight)
++            movement_weight = torch.tensor(args.movement_pos_weight, device=device) if args.movement_pos_weight else None
++            criterion = RSWALoss(movement_pos_weight=movement_weight)
+             optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+             logger.log_subject_split(train_subjects, val_subjects, filename=f"fold_{fold}_split.json")
+             
+@@ -119,12 +117,10 @@ def main() -> None:
+                     f"ep={epoch:03d} "
+                     f"train_loss={train_metrics['loss']:.4f} "
+                     f"val_loss={val_metrics['loss']:.4f} "
+-                    f"train_f1={train_metrics['rswa_f1_macro']:.4f} "
+-                    f"val_f1={val_metrics['rswa_f1_macro']:.4f} "
+-                    f"train_kappa={train_metrics['rswa_kappa_macro']:.4f} "
+-                    f"val_kappa={val_metrics['rswa_kappa_macro']:.4f} "
+-                    f"val_tonic_kappa={val_metrics['tonic_kappa']:.4f} "
+-                    f"val_phasic_kappa={val_metrics['phasic_kappa']:.4f}"
++                    f"train_f1={train_metrics['movement_f1']:.4f} "
++                    f"val_f1={val_metrics['movement_f1']:.4f} "
++                    f"train_kappa={train_metrics['movement_kappa']:.4f} "
++                    f"val_kappa={val_metrics['movement_kappa']:.4f}"
+                 )
+ 
+                 current_metric = float(val_metrics[args.monitor])
+@@ -164,13 +160,12 @@ def main() -> None:
+ 
+             load_checkpoint(checkpoint_dir / "best.pt", model, device)
+             final = collect_rswa_predictions(model, val_loader, device, amp=not args.no_amp, threshold=args.threshold)
+-            for name, display in (("tonic", "Tonic"), ("phasic", "Phasic")):
+-                plot_confusion_matrix(final[f"{name}_expected"], final[f"{name}_prediction"],
+-                                      figures_dir / f"confusion_matrix_{name}.png", labels=[0, 1],
+-                                      display_labels=["Negative", "Positive"], title=f"{display} confusion matrix - Fold {fold}")
+-                plot_confusion_matrix(final[f"{name}_expected"], final[f"{name}_prediction"],
+-                                      figures_dir / f"confusion_matrix_{name}_normalized.png", labels=[0, 1],
+-                                      display_labels=["Negative", "Positive"], title=f"{display} normalized confusion matrix - Fold {fold}", normalize="true")
++            plot_confusion_matrix(final["movement_expected"], final["movement_prediction"],
++                                  figures_dir / "confusion_matrix_movement.png", labels=[0, 1],
++                                  display_labels=["Negative", "Positive"], title=f"Movement confusion matrix - Fold {fold}")
++            plot_confusion_matrix(final["movement_expected"], final["movement_prediction"],
++                                  figures_dir / "confusion_matrix_movement_normalized.png", labels=[0, 1],
++                                  display_labels=["Negative", "Positive"], title=f"Movement normalized confusion matrix - Fold {fold}", normalize="true")
+             
+             fold_summaries.append(
+                 {
+@@ -179,20 +174,8 @@ def main() -> None:
+                     "monitor": args.monitor,
+                     "best_monitor_value": best_metric,
+                     "best_val_loss": best_metrics.get("loss"),
+-                    "best_val_rswa_f1_macro": best_metrics.get(
+-                        "rswa_f1_macro"
+-                    ),
+-                    "best_val_rswa_kappa_macro": best_metrics.get(
+-                        "rswa_kappa_macro"
+-                    ),
+-                    "best_val_tonic_f1": best_metrics.get("tonic_f1"),
+-                    "best_val_phasic_f1": best_metrics.get("phasic_f1"),
+-                    "best_val_tonic_kappa": best_metrics.get(
+-                        "tonic_kappa"
+-                    ),
+-                    "best_val_phasic_kappa": best_metrics.get(
+-                        "phasic_kappa"
+-                    ),
++                    "best_val_movement_f1": best_metrics.get("movement_f1"),
++                    "best_val_movement_kappa": best_metrics.get("movement_kappa"),
+                 }
+             )
+ 
+diff --git a/src/sleep_rswa/data.py b/src/sleep_rswa/data.py
+index 1e3d97d..1261f6c 100644
+--- a/src/sleep_rswa/data.py
++++ b/src/sleep_rswa/data.py
+@@ -208,6 +208,12 @@ class SleepAnalysisDataset(Dataset):
+         phasic_labels[~valid_rswa] = 0.0
+         rswa_labels[~valid_rswa] = self.rswa_config.none_label
+ 
++        # Alvo unico "movement" (any) = qualquer movimento anotado na mini-epoca
++        # (tonico OU fasico). E o unico rotulo usado pelo treino/metrica agora;
++        # tonic_labels/phasic_labels sao mantidos apenas para inspecao/QC.
++        movement_labels = ((tonic_labels > 0.5) | (phasic_labels > 0.5)).float()
++        movement_labels[~valid_rswa] = 0.0
++
+         return {
+             "signals": context,
+             "emg_center": emg,
+@@ -216,6 +222,7 @@ class SleepAnalysisDataset(Dataset):
+             "rswa_labels": rswa_labels,
+             "phasic_labels": phasic_labels,
+             "tonic_labels": tonic_labels,
++            "movement_labels": movement_labels,
+             "rswa_valid": valid_rswa,
+             "rswa_conf": confidence,
+             "subject_id": subject.subject_id,
+@@ -237,6 +244,7 @@ def collate_sleep_analysis_exams(batch):
+         "rswa_labels": torch.zeros(b, tmax, dtype=torch.long),
+         "phasic_labels": torch.zeros(b, tmax),
+         "tonic_labels": torch.zeros(b, tmax),
++        "movement_labels": torch.zeros(b, tmax),
+         "rswa_valid": torch.zeros(b, tmax, dtype=torch.bool),
+         "rswa_conf": torch.zeros(b, tmax),
+         "subject_ids": [],
+@@ -251,6 +259,7 @@ def collate_sleep_analysis_exams(batch):
+             "rswa_labels",
+             "phasic_labels",
+             "tonic_labels",
++            "movement_labels",
+             "rswa_valid",
+             "rswa_conf",
+         ):
+diff --git a/src/sleep_rswa/metrics.py b/src/sleep_rswa/metrics.py
+index 6f30a20..59a15a1 100644
+--- a/src/sleep_rswa/metrics.py
++++ b/src/sleep_rswa/metrics.py
+@@ -4,7 +4,13 @@ from sklearn.metrics import balanced_accuracy_score, cohen_kappa_score, f1_score
+ def staging_metrics(targets,preds):
+     return {"f1_macro":f1_score(targets,preds,average="macro",zero_division=0),"kappa":cohen_kappa_score(targets,preds),"balanced_accuracy":balanced_accuracy_score(targets,preds)}
+ 
+-def rswa_metrics(tonic_targets,tonic_preds,phasic_targets,phasic_preds):
+-    tf1=f1_score(tonic_targets,tonic_preds,zero_division=0); pf1=f1_score(phasic_targets,phasic_preds,zero_division=0)
+-    tk=cohen_kappa_score(tonic_targets,tonic_preds); pk=cohen_kappa_score(phasic_targets,phasic_preds)
+-    return {"tonic_f1":tf1,"phasic_f1":pf1,"rswa_f1_macro":float(np.mean([tf1,pf1])),"tonic_kappa":tk,"phasic_kappa":pk,"rswa_kappa_macro":float(np.nanmean([tk,pk]))}
++def rswa_metrics(movement_targets,movement_preds):
++    """F1/kappa de um unico alvo 'movement' (any = tonico OU fasico).
++
++    Retorna 'movement_f1'/'movement_kappa' e mantem os aliases historicos
++    'rswa_f1_macro'/'rswa_kappa_macro' apontando para o MESMO valor unico,
++    para nao quebrar codigo de monitor/logging que ainda os referencia.
++    """
++    f1=float(f1_score(movement_targets,movement_preds,zero_division=0))
++    k=float(cohen_kappa_score(movement_targets,movement_preds))
++    return {"movement_f1":f1,"movement_kappa":k,"rswa_f1_macro":f1,"rswa_kappa_macro":k}
+diff --git a/src/sleep_rswa/models/rswa.py b/src/sleep_rswa/models/rswa.py
+index c78a28b..88e25ee 100644
+--- a/src/sleep_rswa/models/rswa.py
++++ b/src/sleep_rswa/models/rswa.py
+@@ -17,8 +17,9 @@ class RSWAFeatureEncoder(nn.Module):
+ class RSWADetectionNet(nn.Module):
+     def __init__(self,config=None,use_se=True):
+         super().__init__(); cfg=config or ModelConfig(); self.encoder=RSWAFeatureEncoder(cfg,use_se); self.temporal=MambaStack(cfg.d_model,cfg.rswa_mamba_layers,cfg.d_state,cfg.dropout); h=cfg.d_model//2
+-        self.tonic_head=nn.Sequential(nn.Linear(cfg.d_model,h),nn.ReLU(inplace=True),nn.Dropout(cfg.dropout),nn.Linear(h,1))
+-        self.phasic_head=nn.Sequential(nn.Linear(cfg.d_model,h),nn.ReLU(inplace=True),nn.Dropout(cfg.dropout),nn.Linear(h,1))
++        # Cabeca unica: detecta "movement" (any) = qualquer movimento anotado
++        # (tonico OU fasico) por mini-epoca. Substitui as antigas tonic_head/phasic_head.
++        self.movement_head=nn.Sequential(nn.Linear(cfg.d_model,h),nn.ReLU(inplace=True),nn.Dropout(cfg.dropout),nn.Linear(h,1))
+     def forward(self,emg_center,mask=None):
+-        z=self.temporal(self.encoder(emg_center),mask); return {"tonic_logits":self.tonic_head(z).squeeze(-1),"phasic_logits":self.phasic_head(z).squeeze(-1)}
++        z=self.temporal(self.encoder(emg_center),mask); return {"movement_logits":self.movement_head(z).squeeze(-1)}
+     def n_params(self): return sum(p.numel() for p in self.parameters() if p.requires_grad)
+diff --git a/src/sleep_rswa/training/engine.py b/src/sleep_rswa/training/engine.py
+index 1f2ef6c..b0fa752 100644
+--- a/src/sleep_rswa/training/engine.py
++++ b/src/sleep_rswa/training/engine.py
+@@ -136,15 +136,12 @@ def run_rswa_epoch(
+     training = optimizer is not None
+     model.train(training)
+     losses: list[float] = []
+-    tonic_targets_all: list[torch.Tensor] = []
+-    tonic_preds_all: list[torch.Tensor] = []
+-    phasic_targets_all: list[torch.Tensor] = []
+-    phasic_preds_all: list[torch.Tensor] = []
++    movement_targets_all: list[torch.Tensor] = []
++    movement_preds_all: list[torch.Tensor] = []
+ 
+     for batch in tqdm(loader, desc="Running RSWA epoch", unit="batch"):
+         emg = batch["emg_center"].to(device, non_blocking=True)
+-        tonic_targets = batch["tonic_labels"].to(device, non_blocking=True)
+-        phasic_targets = batch["phasic_labels"].to(device, non_blocking=True)
++        movement_targets = batch["movement_labels"].to(device, non_blocking=True)
+         padding_mask = batch["padding_mask"].to(device, non_blocking=True)
+         valid_mask = batch["rswa_valid"].to(device, non_blocking=True) & padding_mask
+ 
+@@ -157,7 +154,7 @@ def run_rswa_epoch(
+         with torch.set_grad_enabled(training):
+             with _autocast_context(device, amp):
+                 outputs = model(emg, mask=padding_mask)
+-                loss = criterion(outputs, tonic_targets, phasic_targets, valid_mask)
++                loss = criterion(outputs, movement_targets, valid_mask)
+ 
+             if training:
+                 loss.backward()
+@@ -165,26 +162,21 @@ def run_rswa_epoch(
+                     clip_grad_norm_(model.parameters(), grad_clip)
+                 optimizer.step()
+ 
+-        tonic_preds = (torch.sigmoid(outputs["tonic_logits"]) >= threshold).long()
+-        phasic_preds = (torch.sigmoid(outputs["phasic_logits"]) >= threshold).long()
++        movement_preds = (torch.sigmoid(outputs["movement_logits"]) >= threshold).long()
+ 
+         losses.append(float(loss.detach().cpu()))
+-        tonic_targets_all.append(tonic_targets[valid_mask].long().detach().cpu())
+-        tonic_preds_all.append(tonic_preds[valid_mask].detach().cpu())
+-        phasic_targets_all.append(phasic_targets[valid_mask].long().detach().cpu())
+-        phasic_preds_all.append(phasic_preds[valid_mask].detach().cpu())
++        movement_targets_all.append(movement_targets[valid_mask].long().detach().cpu())
++        movement_preds_all.append(movement_preds[valid_mask].detach().cpu())
+ 
+-    if not tonic_targets_all:
++    if not movement_targets_all:
+         raise RuntimeError(
+             "Nenhum rótulo RSWA válido foi encontrado. Verifique rswa_conf, "
+             "min_confidence e rem_mask_only."
+         )
+ 
+     result = rswa_metrics(
+-        torch.cat(tonic_targets_all).numpy(),
+-        torch.cat(tonic_preds_all).numpy(),
+-        torch.cat(phasic_targets_all).numpy(),
+-        torch.cat(phasic_preds_all).numpy(),
++        torch.cat(movement_targets_all).numpy(),
++        torch.cat(movement_preds_all).numpy(),
+     )
+     return {"loss": _safe_mean(losses), **{k: float(v) for k, v in result.items()}}
+ 
+@@ -203,10 +195,8 @@ def evaluate_joint(
+     rswa_losses: list[float] = []
+     stage_targets_all: list[torch.Tensor] = []
+     stage_preds_all: list[torch.Tensor] = []
+-    tonic_targets_all: list[torch.Tensor] = []
+-    tonic_preds_all: list[torch.Tensor] = []
+-    phasic_targets_all: list[torch.Tensor] = []
+-    phasic_preds_all: list[torch.Tensor] = []
++    movement_targets_all: list[torch.Tensor] = []
++    movement_preds_all: list[torch.Tensor] = []
+ 
+     with torch.no_grad():
+         for batch in tqdm(loader, desc="Evaluating joint", unit="batch"):
+@@ -214,8 +204,7 @@ def evaluate_joint(
+             emg = batch["emg_center"].to(device, non_blocking=True)
+             padding_mask = batch["padding_mask"].to(device, non_blocking=True)
+             stage_targets = batch["sleep_stages"].to(device, non_blocking=True)
+-            tonic_targets = batch["tonic_labels"].to(device, non_blocking=True)
+-            phasic_targets = batch["phasic_labels"].to(device, non_blocking=True)
++            movement_targets = batch["movement_labels"].to(device, non_blocking=True)
+             stage_valid = batch["staging_valid"].to(device, non_blocking=True) & padding_mask
+             rswa_valid = batch["rswa_valid"].to(device, non_blocking=True) & padding_mask
+ 
+@@ -232,14 +221,11 @@ def evaluate_joint(
+                 stage_preds_all.append(stage_preds[stage_valid].cpu())
+ 
+             if rswa_valid.any():
+-                rswa_loss = rswa_criterion(outputs, tonic_targets, phasic_targets, rswa_valid)
+-                tonic_preds = (torch.sigmoid(outputs["tonic_logits"]) >= threshold).long()
+-                phasic_preds = (torch.sigmoid(outputs["phasic_logits"]) >= threshold).long()
++                rswa_loss = rswa_criterion(outputs, movement_targets, rswa_valid)
++                movement_preds = (torch.sigmoid(outputs["movement_logits"]) >= threshold).long()
+                 rswa_losses.append(float(rswa_loss.cpu()))
+-                tonic_targets_all.append(tonic_targets[rswa_valid].long().cpu())
+-                tonic_preds_all.append(tonic_preds[rswa_valid].cpu())
+-                phasic_targets_all.append(phasic_targets[rswa_valid].long().cpu())
+-                phasic_preds_all.append(phasic_preds[rswa_valid].cpu())
++                movement_targets_all.append(movement_targets[rswa_valid].long().cpu())
++                movement_preds_all.append(movement_preds[rswa_valid].cpu())
+ 
+     metrics: dict[str, float] = {}
+     if stage_targets_all:
+@@ -248,12 +234,10 @@ def evaluate_joint(
+         )
+         metrics.update({f"staging_{k}": float(v) for k, v in stage.items()})
+         metrics["staging_loss"] = _safe_mean(stage_losses)
+-    if tonic_targets_all:
++    if movement_targets_all:
+         rswa = rswa_metrics(
+-            torch.cat(tonic_targets_all).numpy(),
+-            torch.cat(tonic_preds_all).numpy(),
+-            torch.cat(phasic_targets_all).numpy(),
+-            torch.cat(phasic_preds_all).numpy(),
++            torch.cat(movement_targets_all).numpy(),
++            torch.cat(movement_preds_all).numpy(),
+         )
+         metrics.update({f"rswa_{k}": float(v) for k, v in rswa.items()})
+         metrics["rswa_loss"] = _safe_mean(rswa_losses)
+@@ -269,10 +253,8 @@ def collect_rswa_predictions(
+     threshold: float = 0.5,
+ ) -> dict[str, np.ndarray]:
+     model.eval()
+-    tonic_expected: list[torch.Tensor] = []
+-    tonic_prediction: list[torch.Tensor] = []
+-    phasic_expected: list[torch.Tensor] = []
+-    phasic_prediction: list[torch.Tensor] = []
++    movement_expected: list[torch.Tensor] = []
++    movement_prediction: list[torch.Tensor] = []
+ 
+     with torch.no_grad():
+         for batch in loader:
+@@ -283,20 +265,15 @@ def collect_rswa_predictions(
+                 continue
+             with _autocast_context(device, amp):
+                 outputs = model(emg, mask=padding_mask)
+-            tonic_pred = (torch.sigmoid(outputs["tonic_logits"]) >= threshold).long()
+-            phasic_pred = (torch.sigmoid(outputs["phasic_logits"]) >= threshold).long()
+-            tonic_expected.append(batch["tonic_labels"].to(device)[valid_mask].long().cpu())
+-            tonic_prediction.append(tonic_pred[valid_mask].cpu())
+-            phasic_expected.append(batch["phasic_labels"].to(device)[valid_mask].long().cpu())
+-            phasic_prediction.append(phasic_pred[valid_mask].cpu())
+-
+-    if not tonic_expected:
++            movement_pred = (torch.sigmoid(outputs["movement_logits"]) >= threshold).long()
++            movement_expected.append(batch["movement_labels"].to(device)[valid_mask].long().cpu())
++            movement_prediction.append(movement_pred[valid_mask].cpu())
++
++    if not movement_expected:
+         raise RuntimeError("Nenhuma predição RSWA válida foi encontrada.")
+     return {
+-        "tonic_expected": torch.cat(tonic_expected).numpy(),
+-        "tonic_prediction": torch.cat(tonic_prediction).numpy(),
+-        "phasic_expected": torch.cat(phasic_expected).numpy(),
+-        "phasic_prediction": torch.cat(phasic_prediction).numpy(),
++        "movement_expected": torch.cat(movement_expected).numpy(),
++        "movement_prediction": torch.cat(movement_prediction).numpy(),
+     }
+ 
+ 
+diff --git a/src/sleep_rswa/training/losses.py b/src/sleep_rswa/training/losses.py
+index f9e2cc9..b6b6095 100644
+--- a/src/sleep_rswa/training/losses.py
++++ b/src/sleep_rswa/training/losses.py
+@@ -5,7 +5,8 @@ class StagingLoss(nn.Module):
+     def forward(self,logits,targets,mask):
+         loss=self.ce(logits.reshape(-1,5),targets.reshape(-1)).reshape_as(targets); return loss[mask].mean()
+ class RSWALoss(nn.Module):
+-    def __init__(self,tonic_pos_weight=None,phasic_pos_weight=None):
+-        super().__init__(); self.tonic=nn.BCEWithLogitsLoss(pos_weight=tonic_pos_weight,reduction="none"); self.phasic=nn.BCEWithLogitsLoss(pos_weight=phasic_pos_weight,reduction="none")
+-    def forward(self,outputs,tonic_targets,phasic_targets,mask):
+-        tl=self.tonic(outputs["tonic_logits"],tonic_targets); pl=self.phasic(outputs["phasic_logits"],phasic_targets); return (tl[mask].mean()+pl[mask].mean())/2
++    """BCE unica sobre a cabeca 'movement' (any = tonico OU fasico)."""
++    def __init__(self,movement_pos_weight=None):
++        super().__init__(); self.movement=nn.BCEWithLogitsLoss(pos_weight=movement_pos_weight,reduction="none")
++    def forward(self,outputs,movement_targets,mask):
++        ml=self.movement(outputs["movement_logits"],movement_targets); return ml[mask].mean()
+diff --git a/tests/test_shapes.py b/tests/test_shapes.py
+index a247f2b..d7692de 100644
+--- a/tests/test_shapes.py
++++ b/tests/test_shapes.py
+@@ -4,5 +4,4 @@ def test_output_shapes():
+     model=SleepStagingRSWASystem().eval(); b,t=1,4
+     with torch.no_grad(): out=model(torch.randn(b,t,4,900),torch.randn(b,t,1,300),torch.ones(b,t,dtype=torch.bool))
+     assert out["staging_logits"].shape==(b,t,5)
+-    assert out["tonic_logits"].shape==(b,t)
+-    assert out["phasic_logits"].shape==(b,t)
++    assert out["movement_logits"].shape==(b,t)

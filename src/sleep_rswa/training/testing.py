@@ -65,6 +65,9 @@ def _binary_metrics(expected: np.ndarray, prediction: np.ndarray) -> dict[str, f
     }
 
 
+_HEADS = ("tonic", "phasic", "any")
+
+
 def evaluate_movement_test_set(
     *,
     test_loader: Any,
@@ -74,25 +77,35 @@ def evaluate_movement_test_set(
     logger: Any,
     figures_dir: Path,
     amp: bool = True,
-    threshold: float = 0.5,
+    threshold: float | dict[str, float] = 0.5,
 ) -> dict[str, Any]:
-    """Avalia o movimento no teste held-out com o best.pt de cada fold + ensemble.
+    """Avalia as 3 cabecas (tonic/phasic/any) no teste held-out, por fold + ensemble.
 
     ``fold_checkpoints``: lista de ``{"fold": int, "best_checkpoint": Path}``.
-    O ensemble alinha os folds por chave estável (subject_id#mini_epoch_index) e
-    faz a média das probabilidades antes do threshold.
+    ``threshold`` pode ser um float unico (mesmo limiar nas 3 cabecas) ou um
+    dict ``{"tonic": t, "phasic": t, "any": t}`` com o limiar selecionado por
+    cabeca (ver seleção de limiar por cabeça). O ensemble alinha os folds por
+    chave estável (subject_id#mini_epoch_index) e faz a média das
+    probabilidades antes do threshold -- por cabeça, independentemente.
+    Retorna um dict com uma entrada por cabeça (``tonic``/``phasic``/``any``)
+    e o alias histórico ``movement`` (união das 3, mesma semântica de antes).
     """
+    if isinstance(threshold, dict):
+        thr = {h: float(threshold[h]) for h in _HEADS}
+    else:
+        thr = {h: float(threshold) for h in _HEADS}
+
     figures_dir.mkdir(parents=True, exist_ok=True)
     labels = [0, 1]
     display_labels = ["Negative", "Positive"]
 
     logger.info("=" * 80)
-    logger.info(f"FASE DE TESTE (movimento) | folds={len(fold_checkpoints)}")
+    logger.info(f"FASE DE TESTE (tonic/phasic/any) | folds={len(fold_checkpoints)}")
     logger.info("=" * 80)
 
-    per_fold: list[dict[str, float]] = []
-    prob_sum: np.ndarray | None = None
-    ref_expected: np.ndarray | None = None
+    per_fold: dict[str, list[dict[str, float]]] = {h: [] for h in (*_HEADS, "movement")}
+    prob_sum: dict[str, np.ndarray | None] = {h: None for h in (*_HEADS, "movement")}
+    ref_expected: dict[str, np.ndarray | None] = {h: None for h in (*_HEADS, "movement")}
     ref_keys: np.ndarray | None = None
 
     for entry in fold_checkpoints:
@@ -104,57 +117,64 @@ def evaluate_movement_test_set(
 
         model = build_model().to(device)
         load_checkpoint(checkpoint_path, model, device)
-        result = collect_rswa_predictions(model, test_loader, device, amp=amp, threshold=threshold)
+        result = collect_rswa_predictions(model, test_loader, device, amp=amp, threshold=thr)
 
-        expected = result["movement_expected"]
-        prediction = result["movement_prediction"]
-        probs = result["movement_probability"]
         keys = np.array(
             [f"{s}#{i}" for s, i in zip(result["subject_id"], result["mini_epoch_index"])],
             dtype=object,
         )
 
-        m = _binary_metrics(expected, prediction)
-        logger.info(f"TESTE fold {fold} (movimento): f1={m['f1']:.4f} kappa={m['kappa']:.4f} "
-                    f"pos={m['n_positives']}/{m['n_samples']}")
-        per_fold.append({"fold": int(fold), **m})
+        for h in (*_HEADS, "movement"):
+            expected = result[f"{h}_expected"]
+            prediction = result[f"{h}_prediction"]
+            probs = result[f"{h}_probability"]
 
-        plot_confusion_matrix(
-            expected, prediction, figures_dir / f"confusion_matrix_movement_test_fold_{fold}.png",
-            labels=labels, display_labels=display_labels, title=f"Movement TEST - Fold {fold}",
-        )
+            m = _binary_metrics(expected, prediction)
+            logger.info(f"TESTE fold {fold} ({h}): f1={m['f1']:.4f} kappa={m['kappa']:.4f} "
+                        f"pos={m['n_positives']}/{m['n_samples']}")
+            per_fold[h].append({"fold": int(fold), **m})
 
-        if prob_sum is None:
-            prob_sum = probs.copy()
-            ref_expected = expected
-            ref_keys = keys
-        else:
-            if not np.array_equal(keys, ref_keys):
-                order = {k: j for j, k in enumerate(keys)}
-                idx = np.array([order[k] for k in ref_keys], dtype=np.int64)
-                probs = probs[idx]
-            prob_sum = prob_sum + probs
+            plot_confusion_matrix(
+                expected, prediction, figures_dir / f"confusion_matrix_{h}_test_fold_{fold}.png",
+                labels=labels, display_labels=display_labels, title=f"{h.capitalize()} TEST - Fold {fold}",
+            )
 
-    test_summary: dict[str, Any] = {"n_subjects": len(test_loader.dataset), "per_fold": per_fold}
+            if prob_sum[h] is None:
+                prob_sum[h] = probs.copy()
+                ref_expected[h] = expected
+            else:
+                if ref_keys is not None and not np.array_equal(keys, ref_keys):
+                    order = {k: j for j, k in enumerate(keys)}
+                    idx = np.array([order[k] for k in ref_keys], dtype=np.int64)
+                    probs = probs[idx]
+                prob_sum[h] = prob_sum[h] + probs
 
-    if prob_sum is not None and ref_expected is not None:
-        n_folds = len(per_fold)
-        ensemble_pred = (prob_sum / n_folds >= threshold).astype(np.int64)
-        m = _binary_metrics(ref_expected, ensemble_pred)
-        logger.info(f"TESTE ENSEMBLE movimento ({n_folds} folds): f1={m['f1']:.4f} kappa={m['kappa']:.4f}")
+        ref_keys = keys
 
-        plot_confusion_matrix(
-            ref_expected, ensemble_pred, figures_dir / "confusion_matrix_movement_test_ensemble.png",
-            labels=labels, display_labels=display_labels, title="Movement TEST - Ensemble",
-        )
-        plot_confusion_matrix(
-            ref_expected, ensemble_pred, figures_dir / "confusion_matrix_movement_test_ensemble_normalized.png",
-            labels=labels, display_labels=display_labels, normalize="true", title="Movement TEST - Ensemble normalizada",
-        )
-        f1_vals = np.asarray([f["f1"] for f in per_fold], dtype=np.float64)
-        test_summary["per_fold_f1_mean"] = float(f1_vals.mean()) if f1_vals.size else None
-        test_summary["per_fold_f1_std"] = float(f1_vals.std(ddof=1)) if f1_vals.size > 1 else 0.0
-        test_summary["ensemble"] = {"n_folds": n_folds, **m}
+    test_summary: dict[str, Any] = {"n_subjects": len(test_loader.dataset)}
+
+    for h in (*_HEADS, "movement"):
+        head_summary: dict[str, Any] = {"per_fold": per_fold[h]}
+        if prob_sum[h] is not None and ref_expected[h] is not None:
+            n_folds = len(per_fold[h])
+            ensemble_pred = (prob_sum[h] / n_folds >= thr.get(h, 0.5)).astype(np.int64)
+            m = _binary_metrics(ref_expected[h], ensemble_pred)
+            logger.info(f"TESTE ENSEMBLE {h} ({n_folds} folds): f1={m['f1']:.4f} kappa={m['kappa']:.4f}")
+
+            plot_confusion_matrix(
+                ref_expected[h], ensemble_pred, figures_dir / f"confusion_matrix_{h}_test_ensemble.png",
+                labels=labels, display_labels=display_labels, title=f"{h.capitalize()} TEST - Ensemble",
+            )
+            plot_confusion_matrix(
+                ref_expected[h], ensemble_pred, figures_dir / f"confusion_matrix_{h}_test_ensemble_normalized.png",
+                labels=labels, display_labels=display_labels, normalize="true",
+                title=f"{h.capitalize()} TEST - Ensemble normalizada",
+            )
+            f1_vals = np.asarray([f["f1"] for f in per_fold[h]], dtype=np.float64)
+            head_summary["per_fold_f1_mean"] = float(f1_vals.mean()) if f1_vals.size else None
+            head_summary["per_fold_f1_std"] = float(f1_vals.std(ddof=1)) if f1_vals.size > 1 else 0.0
+            head_summary["ensemble"] = {"n_folds": n_folds, **m}
+        test_summary[h] = head_summary
 
     return test_summary
 

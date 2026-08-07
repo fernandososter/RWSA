@@ -14,6 +14,12 @@ ao notebook:
      gravados no .pt. Era o elo faltante — o notebook carregava os eventos nas
      annotations do MNE mas nunca os transformava em rotulos.
 
+  3. Basal de EMG na fase REM (rem_baseline_uv): percentil 10 do envelope RMS
+     do EMG dentro das mini-epocas REM, em microvolts BRUTOS (sem
+     normalizacao -- ver rem_baseline.py). Adicionado em 2026-08-06 para uso
+     futuro por detectores de eventos tonico/any/fasico; por ora e SO
+     gravado no .pt, nenhum detector foi alterado para consumi-lo.
+
 Etapas
 ──────
 1. Carrega EDF + hipnograma (.mat) alinhado + CSV de RSWA (se houver)
@@ -25,6 +31,7 @@ Etapas
 7. Sub-segmenta 30s -> mini-epocas de 3s (300 amostras)
 8. Expande stages 30s -> mini-epocas (np.repeat)
 9. Rasteriza eventos RSWA -> rotulos por mini-epoca (alinhados por annot_start)
+10. Calcula rem_baseline_uv (percentil 10 do envelope RMS do EMG em REM)
 
 Formato salvo (torch.save)
 ──────────────────────────
@@ -37,6 +44,8 @@ Formato salvo (torch.save)
   "phasic_labels": Tensor (T,)  float32  {0,1}
   "rswa_labels":   Tensor (T,)  int64    {0,1,2,3}
   "rswa_conf":     Tensor (T,)  float32  {0,1}  (validade p/ mascara da loss)
+  "rem_baseline_uv":       float  (uV brutos; NaN se exame sem mini-epoca REM)
+  "rem_baseline_n_epochs": int    (quantas mini-epocas REM entraram no calculo)
 }
 """
 from __future__ import annotations
@@ -64,6 +73,7 @@ from .annotations import (
     load_subject_annotations_from_csv,
 )
 from .rswa_labels import rasterize_rswa_annotations
+from .rem_baseline import compute_rem_baseline
 
 
 def preprocess_exam(
@@ -263,6 +273,15 @@ def preprocess_exam(
         print(f" [ALINHAMENTO] {len(signals)} mini-epocas | REM={n_rem} | "
               f"gap={n_gap} | tonic+={n_tonic} | phasic+={n_phasic}")
 
+    # ── 11. Basal de EMG na fase REM (percentil 10, uV brutos) ────────────
+    # Ver docstring de rem_baseline.py: nao usa tonic_labels/phasic_labels
+    # (funciona igual em exames revisados e nao revisados); nao altera
+    # nenhum detector -- so grava o valor no .pt para uso futuro.
+    rem_baseline = compute_rem_baseline(signals, stages_mini)
+    if verbose:
+        print(f" [REM BASELINE] {rem_baseline['rem_baseline_uv']:.2f} uV "
+              f"(n_mini_epocas_rem={rem_baseline['rem_baseline_n_epochs']})")
+
     return {
         "subject_id":    subject_id,
         "signals":       signals.astype(np.float32),
@@ -276,6 +295,8 @@ def preprocess_exam(
         "tonic_cov":     rswa["tonic_cov"],
         "phasic_cov":    rswa["phasic_cov"],
         "fs":            fs_target,
+        "rem_baseline_uv":       rem_baseline["rem_baseline_uv"],
+        "rem_baseline_n_epochs": rem_baseline["rem_baseline_n_epochs"],
     }
 
 
@@ -292,6 +313,12 @@ def _save_result(result: Dict, out_path: Path) -> None:
         "phasic_labels": torch.from_numpy(result["phasic_labels"]),
         "rswa_labels":   torch.from_numpy(result["rswa_labels"]),
         "rswa_conf":     torch.from_numpy(result["rswa_conf"]),
+        # Basal de EMG na fase REM (percentil 10, uV brutos) -- ver
+        # rem_baseline.py. Escalares Python simples (nao Tensor) porque sao
+        # um unico valor por exame, nao uma serie por mini-epoca; NaN quando
+        # o exame nao tem nenhuma mini-epoca REM (n_rem_epochs == 0).
+        "rem_baseline_uv":       result["rem_baseline_uv"],
+        "rem_baseline_n_epochs": result["rem_baseline_n_epochs"],
     }, out_path)
 
 

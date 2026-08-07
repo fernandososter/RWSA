@@ -20,7 +20,8 @@ Problema estrutural conhecido: quando o envelope de um evento real oscila em tor
 Aqui existem dois cortes, e a regra de transição usa cada um em um sentido diferente:
 
 k_on = 3,0 (mais alto): é preciso cruzar esse corte para iniciar um evento — exige evidência forte de que algo realmente começou.
-k_off = 1,5 (mais baixo): uma vez que o evento já está ativo, ele só termina quando o envelope cai abaixo desse corte mais baixo — basta evidência fraca para sustentá-lo.
+k_off = 1,5 (mais baixo): uma vez que o evento já está ativo, ele só termina quando o envelope cai abaixo desse corte mais baixo.
+Tempo de desligamento configurável: opcionalmente, o sinal pode ser obrigado a permanecer abaixo de k_off por um tempo mínimo antes de o evento ser encerrado. Quedas breves abaixo desse corte são reabsorvidas como parte do mesmo evento.
 Essa assimetria é o ponto central: para começar, o sinal precisa "provar" que é um evento real (limiar alto); mas para continuar sendo contado como o mesmo evento, ele só precisa não ter caído até o nível de repouso (limiar baixo). Pequenas flutuações de ruído que ficariam entre k_off e k_on — que fariam o limiar simples oscilar dentro e fora — não conseguem nem religar um evento já terminado (porque não chegam a k_on) nem desligar um evento em curso (porque não caem até k_off). É a mesma lógica usada classicamente em detecção de onset de EMG (Hodges & Bui) e em detecção de bordas em imagens (Canny), justamente para este fim.
 
 # Pos-processamento

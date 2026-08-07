@@ -1,5 +1,5 @@
 method,gt_type,n_intervals,n_same_type_detected,n_any_detected,n_none_detected,n_only_ambiguous,n_other_type_detected,n_clipped_intervals,mean_n_detected_total,mean_n_detected_phasic,mean_n_detected_tonic,mean_n_detected_ambiguous,same_type_rate,any_detection_rate
-double,phasic,12583,9698,12453,130,2140,615,0,2.698,1.965,0.163,0.571,0.770722,0.989669
-double,tonic,37,17,37,0,1,19,0,5.622,3.919,0.622,1.081,0.459459,1.0
+double,phasic,12583,9291,12052,531,2155,606,0,2.254,1.646,0.128,0.48,0.738377,0.9578
+double,tonic,37,16,35,2,2,17,0,4.27,2.73,0.622,0.919,0.432432,0.945946
 single,phasic,12583,9273,12525,58,2506,746,0,2.66,1.848,0.187,0.625,0.736947,0.995391
 single,tonic,37,20,37,0,2,15,0,5.351,3.541,0.757,1.054,0.540541,1.0
