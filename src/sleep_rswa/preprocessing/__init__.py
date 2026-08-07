@@ -1,9 +1,9 @@
 """
-Pacote de pre-processamento PSG: EDF + hipnograma (.mat) + RSWA (CSV) -> .pt.
+Pacote de pre-processamento PSG: EDF + hipnograma (.mat) + RSWA -> .pt.
 
 Versao modular do notebook Parser_Exames. Diferencas em relacao ao notebook:
   - ordem de canais corrigida para casar com src/sleep_rswa/config.py;
-  - rasterizacao de RSWA integrada (o .pt agora grava tonic/phasic/rswa labels).
+  - rotulagem RSWA integrada (CSV humano ou rota automatica CNN + limiar duplo).
 
 Uso rapido
 ──────────
@@ -18,6 +18,7 @@ Uso rapido
     python -m sleep_rswa.preprocessing --edf-dir ...
 """
 from .config import PathConfig, PSGConfig, FS_TARGET, EPOCH_SEC, N_CHANNELS
+from .auto_rswa import DEFAULT_AUTO_LABEL_MODEL, auto_label_rswa_from_signals
 from .preprocess import preprocess_exam, run_preprocessing
 from .parallel import run_preprocessing_parallel
 from .rswa_labels import rasterize_rswa_annotations
@@ -29,6 +30,8 @@ __all__ = [
     "FS_TARGET",
     "EPOCH_SEC",
     "N_CHANNELS",
+    "DEFAULT_AUTO_LABEL_MODEL",
+    "auto_label_rswa_from_signals",
     "preprocess_exam",
     "run_preprocessing",
     "run_preprocessing_parallel",

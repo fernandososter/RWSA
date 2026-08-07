@@ -15,6 +15,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--out-dir", type=Path, default=PathConfig.TENSOR_DIR)
     parser.add_argument("--mat-dir", type=Path, default=PathConfig.MAT_DIR)
     parser.add_argument("--rswa-dir", type=Path, default=PathConfig.RSWA_DIR)
+    parser.add_argument("--rswa-source", choices=("auto", "csv"), default="auto")
+    parser.add_argument("--auto-label-model-path", type=Path, default=None)
+    parser.add_argument("--auto-label-device", default="cpu")
+    parser.add_argument("--auto-label-cnn-threshold", type=float, default=None)
+    parser.add_argument("--auto-label-cnn-min-epochs", type=int, default=1)
+    parser.add_argument("--auto-label-k-on", type=float, default=3.0)
+    parser.add_argument("--auto-label-k-off", type=float, default=1.5)
+    parser.add_argument("--auto-label-k-off-hold-s", type=float, default=0.0)
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--parallel", action="store_true")
@@ -30,6 +38,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     kwargs = {
         "mat_dir": args.mat_dir,
         "rswa_dir": args.rswa_dir,
+        "rswa_source": args.rswa_source,
+        "auto_label_model_path": args.auto_label_model_path,
+        "auto_label_device": args.auto_label_device,
+        "auto_label_cnn_threshold": args.auto_label_cnn_threshold,
+        "auto_label_cnn_min_epochs": args.auto_label_cnn_min_epochs,
+        "auto_label_k_on": args.auto_label_k_on,
+        "auto_label_k_off": args.auto_label_k_off,
+        "auto_label_k_off_hold_s": args.auto_label_k_off_hold_s,
         "tonic_min_coverage": args.tonic_min_coverage,
         "phasic_min_coverage": args.phasic_min_coverage,
         "any_min_coverage": args.any_min_coverage,

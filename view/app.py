@@ -40,12 +40,15 @@ from classifier.movement_clf.model import MovementCNN
 
 # ---- estado global (configurado no main) ----
 CFG = {
+    "mode": "revisor",       # "revisor" (fluxo original, roda a CNN) | "revisao" (so le o .pt)
     "data_dir": PROJ / "classifier" / "data",
     "model_path": PROJ / "classifier" / "outputs" / "movement_cnn_final.pt",
     "out_dir": HERE / "revisado",
+    "revisao_out_dir": HERE / "revisao_binaria",
 }
 _MODEL = {"net": None, "window": 5, "threshold": 0.2}
 _CACHE = {}  # exam_name -> dict(emg, stages, scores, mask, events, hours)
+_REVISAO_CACHE = {}  # exam_name -> dict(emg, stages, labels, cov, events, hours)
 
 
 MAT_DIR = HERE / "mat"
@@ -274,6 +277,224 @@ def _events_payload(st):
     return out
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Modo revisao: SEM CNN. Eventos vem so dos 3 rotulos ja gravados no .pt
+# (tonic_labels/phasic_labels/any_labels, escritos por rasterize_rswa_annotations
+# ou por auto_rswa.auto_label_rswa_from_signals). Decisao humana e BINARIA:
+# correto/incorreto por evento (nao ha edicao de tipo/onset aqui -- isso e o
+# modo revisor original). Serve para auditar rapidamente a saida do pre-
+# processamento (CSV humano OU CNN+limiar-duplo) exame a exame.
+# ─────────────────────────────────────────────────────────────────────────────
+
+REVIEW_TYPES = ("tonic", "phasic", "any")
+
+
+def _events_from_pt_labels(tonic, phasic, any_labels, stages):
+    """Runs contiguos (>0.5) em cada um dos 3 rotulos -> lista de eventos.
+
+    Cada rotulo e tratado de forma independente (podem se sobrepor no tempo --
+    p.ex. um trecho marcado tonic pode tambem estar coberto por any se as
+    fronteiras de cobertura nao baterem exatamente; isso e esperado e cada
+    evento e revisado separadamente).
+    """
+    events = []
+    arrs = {"tonic": tonic, "phasic": phasic, "any": any_labels}
+    for etype in REVIEW_TYPES:
+        arr = arrs.get(etype)
+        if arr is None:
+            continue
+        arr = np.asarray(arr)
+        T = len(arr)
+        i = 0
+        while i < T:
+            if arr[i] > 0.5:
+                j = i
+                while j + 1 < T and arr[j + 1] > 0.5:
+                    j += 1
+                events.append({"epoch_start": i, "epoch_end": j + 1, "type": etype})
+                i = j + 1
+            else:
+                i += 1
+    events.sort(key=lambda e: (e["epoch_start"], e["type"]))
+    for i, ev in enumerate(events):
+        ev["id"] = i
+    return events
+
+
+def _prepare_review(exam_name):
+    """Le APENAS o .pt (sem rodar a CNN) -- rotulos das 3 cabecas ja gravadas."""
+    if exam_name in _REVISAO_CACHE:
+        return _REVISAO_CACHE[exam_name]
+    pt = CFG["data_dir"] / f"{exam_name}.pt"
+    obj = torch.load(pt, map_location="cpu", weights_only=False)
+
+    def _np(x):
+        return x.numpy() if isinstance(x, torch.Tensor) else (np.asarray(x) if x is not None else None)
+
+    signals = _np(obj["signals"])
+    stages = _np(obj["sleep_stages"]).astype(int)
+    tonic = _np(obj.get("tonic_labels"))
+    phasic = _np(obj.get("phasic_labels"))
+    any_labels = _np(obj.get("any_labels"))
+    tonic_cov = _np(obj.get("tonic_cov"))
+    phasic_cov = _np(obj.get("phasic_cov"))
+    any_cov = _np(obj.get("any_cov"))
+    label_source = obj.get("label_source", "desconhecido (CSV humano legado ou exame sem label_source)")
+
+    emg_raw = signals[:, 4, :].astype(np.float32)  # EMG mento (indice 4), sem z-score
+    events = _events_from_pt_labels(tonic, phasic, any_labels, stages)
+    cov_arrs = {"tonic": tonic_cov, "phasic": phasic_cov, "any": any_cov}
+    for ev in events:
+        e0, e1 = ev["epoch_start"], ev["epoch_end"]
+        st_seg = stages[e0:e1]
+        vals, cnts = np.unique(st_seg, return_counts=True) if len(st_seg) else ([], [])
+        dom = int(vals[np.argmax(cnts)]) if len(vals) else -1
+        cov = cov_arrs.get(ev["type"])
+        ev["onset_s"] = round(float(e0 * EPOCH_SEC), 1)
+        ev["duration_s"] = round(float((e1 - e0) * EPOCH_SEC), 1)
+        ev["stage"] = STAGE_NAMES.get(dom, "?")
+        ev["mean_coverage"] = round(float(cov[e0:e1].mean()), 3) if cov is not None and e1 > e0 else None
+
+    n_epochs = int(signals.shape[0])
+    st = {
+        "emg": emg_raw,
+        "stages": stages,
+        "tonic": tonic, "phasic": phasic, "any": any_labels,
+        "events": events,
+        "n_epochs": n_epochs,
+        "hours": n_epochs * EPOCH_SEC / 3600.0,
+        "subject_id": exam_name,
+        "label_source": label_source,
+    }
+    _REVISAO_CACHE[exam_name] = st
+    return st
+
+
+def _review_decisions_path(exam_name):
+    CFG["revisao_out_dir"].mkdir(parents=True, exist_ok=True)
+    return CFG["revisao_out_dir"] / f"{exam_name}_revisao.csv"
+
+
+def _load_review_decisions(exam_name):
+    """{event_id: {'decision':..., 'note':...}} a partir do CSV salvo (se existir)."""
+    path = _review_decisions_path(exam_name)
+    if not path.exists():
+        return {}
+    out = {}
+    with open(path, newline="") as f:
+        for row in csv.DictReader(f):
+            out[int(row["event_id"])] = {
+                "decision": row.get("decision", ""),
+                "note": row.get("note", ""),
+            }
+    return out
+
+
+def _save_review_decision(exam_name, event, decision, note=""):
+    """Grava/atualiza (upsert por event_id) uma decisao binaria no CSV do exame."""
+    path = _review_decisions_path(exam_name)
+    existing = {}
+    if path.exists():
+        with open(path, newline="") as f:
+            for row in csv.DictReader(f):
+                existing[int(row["event_id"])] = row
+    existing[event["id"]] = {
+        "event_id": event["id"],
+        "type": event["type"],
+        "onset_s": event["onset_s"],
+        "duration_s": event["duration_s"],
+        "stage": event["stage"],
+        "mean_coverage": event.get("mean_coverage"),
+        "decision": decision,       # "correto" | "incorreto"
+        "note": note,
+    }
+    fieldnames = ["event_id", "type", "onset_s", "duration_s", "stage", "mean_coverage", "decision", "note"]
+    rows = sorted(existing.values(), key=lambda r: int(r["event_id"]))
+    with open(path, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=fieldnames)
+        w.writeheader()
+        w.writerows(rows)
+    return path
+
+
+def build_review_report(exam_names, out_csv=None, out_md=None):
+    """Agrega os CSVs de decisao binaria de uma lista de exames em um relatorio
+    de acuracia por tipo (tonic/phasic/any) + geral. Retorna dict com as
+    contagens e os paths escritos (se out_csv/out_md informados).
+    """
+    per_type = {t: {"correto": 0, "incorreto": 0, "sem_decisao": 0} for t in REVIEW_TYPES}
+    per_exam_rows = []
+    for exam in exam_names:
+        path = _review_decisions_path(exam)
+        st = _prepare_review(exam)
+        decided = _load_review_decisions(exam)
+        for ev in st["events"]:
+            d = decided.get(ev["id"], {}).get("decision", "")
+            bucket = per_type.setdefault(ev["type"], {"correto": 0, "incorreto": 0, "sem_decisao": 0})
+            if d == "correto":
+                bucket["correto"] += 1
+            elif d == "incorreto":
+                bucket["incorreto"] += 1
+            else:
+                bucket["sem_decisao"] += 1
+            per_exam_rows.append({
+                "exam": exam, "event_id": ev["id"], "type": ev["type"],
+                "onset_s": ev["onset_s"], "duration_s": ev["duration_s"],
+                "stage": ev["stage"], "decision": d or "sem_decisao",
+            })
+
+    summary_rows = []
+    tot_correto = tot_incorreto = tot_sem = 0
+    for t in REVIEW_TYPES:
+        c = per_type[t]["correto"]; e = per_type[t]["incorreto"]; s = per_type[t]["sem_decisao"]
+        n_decidido = c + e
+        acc = round(100.0 * c / n_decidido, 1) if n_decidido else None
+        summary_rows.append({
+            "type": t, "n_correto": c, "n_incorreto": e, "n_sem_decisao": s,
+            "n_total": c + e + s, "acuracia_pct": acc,
+        })
+        tot_correto += c; tot_incorreto += e; tot_sem += s
+    n_decidido_tot = tot_correto + tot_incorreto
+    acc_tot = round(100.0 * tot_correto / n_decidido_tot, 1) if n_decidido_tot else None
+    summary_rows.append({
+        "type": "TOTAL", "n_correto": tot_correto, "n_incorreto": tot_incorreto,
+        "n_sem_decisao": tot_sem, "n_total": tot_correto + tot_incorreto + tot_sem,
+        "acuracia_pct": acc_tot,
+    })
+
+    if out_csv is not None:
+        out_csv = Path(out_csv)
+        out_csv.parent.mkdir(parents=True, exist_ok=True)
+        with open(out_csv, "w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=["type", "n_correto", "n_incorreto", "n_sem_decisao", "n_total", "acuracia_pct"])
+            w.writeheader()
+            w.writerows(summary_rows)
+
+    if out_md is not None:
+        out_md = Path(out_md)
+        out_md.parent.mkdir(parents=True, exist_ok=True)
+        lines = [
+            "# Relatorio de revisao binaria (correto/incorreto por tipo)",
+            "",
+            f"Exames incluidos: {', '.join(exam_names)}",
+            "",
+            "| Tipo | Corretos | Incorretos | Sem decisao | Total | Acuracia |",
+            "|---|---|---|---|---|---|",
+        ]
+        for r in summary_rows:
+            acc_str = f"{r['acuracia_pct']}%" if r["acuracia_pct"] is not None else "—"
+            lines.append(
+                f"| {r['type']} | {r['n_correto']} | {r['n_incorreto']} | "
+                f"{r['n_sem_decisao']} | {r['n_total']} | {acc_str} |"
+            )
+        lines.append("")
+        out_md.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    return {"summary": summary_rows, "per_event": per_exam_rows,
+            "out_csv": str(out_csv) if out_csv else None,
+            "out_md": str(out_md) if out_md else None}
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass  # silencioso
@@ -294,7 +515,8 @@ class Handler(BaseHTTPRequestHandler):
         q = parse_qs(u.query)
         try:
             if u.path in ("/", "/index.html"):
-                html = (HERE / "index.html").read_text(encoding="utf-8")
+                page = "revisao.html" if CFG["mode"] == "revisao" else "index.html"
+                html = (HERE / page).read_text(encoding="utf-8")
                 return self._send(200, html, "text/html; charset=utf-8")
 
             if u.path == "/api/exams":
@@ -357,6 +579,72 @@ class Handler(BaseHTTPRequestHandler):
                     "stages": stages, "movemask": movemask, "scores": scores,
                     "threshold": st["threshold"],
                 })
+
+            # ── modo revisao (sem CNN; eventos das 3 cabecas ja gravadas no .pt) ──
+            if u.path == "/api/revisao/exams":
+                exams = sorted(p.stem for p in CFG["data_dir"].glob("*.pt"))
+                return self._send(200, {"exams": exams})
+
+            if u.path == "/api/revisao/exam":
+                name = q["name"][0]
+                st = _prepare_review(name)
+                decided = _load_review_decisions(name)
+                events = []
+                for ev in st["events"]:
+                    d = decided.get(ev["id"], {})
+                    events.append({**ev, "decision": d.get("decision", ""), "note": d.get("note", "")})
+                n_decided = sum(1 for e in events if e["decision"])
+                return self._send(200, {
+                    "subject_id": st["subject_id"],
+                    "n_epochs": st["n_epochs"],
+                    "hours": round(st["hours"], 2),
+                    "fs": FS, "epoch_sec": EPOCH_SEC,
+                    "label_source": st["label_source"],
+                    "n_events": len(events),
+                    "n_decided": n_decided,
+                    "events": events,
+                })
+
+            if u.path == "/api/revisao/signal":
+                name = q["name"][0]
+                t0 = float(q.get("t0", ["0"])[0])
+                t1 = float(q.get("t1", ["30"])[0])
+                st = _prepare_review(name)
+                emg = st["emg"].reshape(-1)
+                fs = FS
+                i0 = max(0, int(t0 * fs)); i1 = min(len(emg), int(t1 * fs))
+                seg = emg[i0:i1]
+                maxpts = 4000
+                if len(seg) > maxpts:
+                    step = int(np.ceil(len(seg) / maxpts))
+                    seg = seg[::step]
+                else:
+                    step = 1
+                e0 = int(t0 // EPOCH_SEC); e1 = int(np.ceil(t1 / EPOCH_SEC))
+                stages = [STAGE_NAMES.get(int(s), "?") for s in st["stages"][e0:e1]]
+
+                def _mask_of(key):
+                    arr = st.get(key)
+                    if arr is None:
+                        return [False] * max(0, e1 - e0)
+                    return [bool(x > 0.5) for x in arr[e0:e1]]
+
+                return self._send(200, {
+                    "t0": t0, "t1": t1, "fs_eff": fs / step,
+                    "samples": seg.round(3).tolist(),
+                    "epoch_start": e0,
+                    "stages": stages,
+                    "tonic_mask": _mask_of("tonic"),
+                    "phasic_mask": _mask_of("phasic"),
+                    "any_mask": _mask_of("any"),
+                })
+
+            if u.path == "/api/revisao/report":
+                names_param = q.get("names", [""])[0]
+                exam_names = [n for n in names_param.split(",") if n] or \
+                    sorted(p.stem for p in CFG["data_dir"].glob("*.pt"))
+                report = build_review_report(exam_names)
+                return self._send(200, report)
         except Exception as e:
             import traceback
             return self._send(500, {"error": str(e), "trace": traceback.format_exc()})
@@ -421,6 +709,28 @@ class Handler(BaseHTTPRequestHandler):
                                         "n_deleted": len(decisions) - len(kept),
                                         "time_ref": "edf" if a0 is not None else "pt",
                                         "annot_start": a0})
+
+            if u.path == "/api/revisao/decision":
+                name = payload["exam"]
+                event_id = int(payload["event_id"])
+                decision = payload["decision"]  # "correto" | "incorreto"
+                note = payload.get("note", "")
+                if decision not in ("correto", "incorreto"):
+                    return self._send(400, {"error": "decision deve ser 'correto' ou 'incorreto'"})
+                st = _prepare_review(name)
+                ev = next((e for e in st["events"] if e["id"] == event_id), None)
+                if ev is None:
+                    return self._send(404, {"error": f"event_id {event_id} nao encontrado em {name}"})
+                path = _save_review_decision(name, ev, decision, note)
+                return self._send(200, {"saved": str(path), "event_id": event_id, "decision": decision})
+
+            if u.path == "/api/revisao/report":
+                exam_names = payload.get("exams") or \
+                    sorted(p.stem for p in CFG["data_dir"].glob("*.pt"))
+                out_csv = CFG["revisao_out_dir"] / "relatorio_revisao_binaria.csv"
+                out_md = CFG["revisao_out_dir"] / "relatorio_revisao_binaria.md"
+                report = build_review_report(exam_names, out_csv=out_csv, out_md=out_md)
+                return self._send(200, report)
         except Exception as e:
             import traceback
             return self._send(500, {"error": str(e), "trace": traceback.format_exc()})
@@ -433,15 +743,28 @@ def main():
     ap.add_argument("--model", default=str(CFG["model_path"]))
     ap.add_argument("--out", default=str(CFG["out_dir"]))
     ap.add_argument("--port", type=int, default=8000)
+    ap.add_argument("--mode", choices=["revisor", "revisao"], default="revisor",
+                     help="revisor: fluxo original (roda a CNN ao vivo, decide tonico/fasico/apaga). "
+                          "revisao: so le o .pt (3 cabecas ja gravadas), decisao binaria correto/incorreto.")
+    ap.add_argument("--revisao-out", default=str(CFG["revisao_out_dir"]),
+                     help="Diretorio de saida dos CSVs/relatorio do modo revisao.")
     args = ap.parse_args()
     CFG["data_dir"] = Path(args.data)
     CFG["model_path"] = Path(args.model)
     CFG["out_dir"] = Path(args.out)
+    CFG["revisao_out_dir"] = Path(args.revisao_out)
+    CFG["mode"] = args.mode
     srv = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
-    print(f"Revisor de movimento em http://localhost:{args.port}  (Ctrl+C para parar)")
+    label = "Revisor de movimento (CNN ao vivo)" if args.mode == "revisor" else \
+            "Modo revisao (binario, so le o .pt)"
+    print(f"{label} em http://localhost:{args.port}  (Ctrl+C para parar)")
+    print(f"  modo  : {CFG['mode']}")
     print(f"  dados : {CFG['data_dir']}")
-    print(f"  modelo: {CFG['model_path']}")
-    print(f"  saida : {CFG['out_dir']}")
+    if args.mode == "revisor":
+        print(f"  modelo: {CFG['model_path']}")
+        print(f"  saida : {CFG['out_dir']}")
+    else:
+        print(f"  saida : {CFG['revisao_out_dir']}")
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

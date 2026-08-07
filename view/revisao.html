@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Modo revisão — binário (tonic/phasic/any)</title>
+<style>
+  :root {
+    --bg:#0f1720; --panel:#182430; --ink:#e8eef4; --muted:#8aa0b4;
+    --tonic:#4da3ff; --phasic:#c77dff; --any:#ffb347; --ok:#39d98a; --bad:#ff5d6c;
+    --grid:#243444;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; font:14px/1.4 -apple-system,Segoe UI,Roboto,sans-serif;
+         background:var(--bg); color:var(--ink); }
+  header { display:flex; gap:14px; align-items:center; padding:10px 16px;
+           background:var(--panel); border-bottom:1px solid var(--grid); flex-wrap:wrap; }
+  header h1 { font-size:15px; margin:0 12px 0 0; font-weight:600; }
+  select, button { font:inherit; color:var(--ink); background:#22303d;
+                   border:1px solid var(--grid); border-radius:6px; padding:6px 10px; cursor:pointer; }
+  button:hover { border-color:var(--muted); }
+  button:disabled { opacity:.4; cursor:not-allowed; }
+  .pill { padding:2px 8px; border-radius:20px; font-size:12px; background:#22303d; color:var(--muted); }
+  main { display:grid; grid-template-columns: 1fr 340px; gap:0; height:calc(100vh - 52px); }
+  #plotwrap { padding:12px 16px; }
+  #canvas { width:100%; height:300px; background:#0b1219; border-radius:8px; border:1px solid var(--grid); }
+  .evinfo { font-size:13px; color:var(--muted); margin-top:8px; }
+  .evinfo b { color:var(--ink); }
+  .legend { display:flex; gap:12px; font-size:12px; color:var(--muted); margin-top:8px; flex-wrap:wrap; }
+  .legend span::before { content:"■ "; }
+  .lg-tonic::before{ color:var(--tonic); } .lg-phasic::before{ color:var(--phasic); } .lg-any::before{ color:var(--any); }
+  aside { background:var(--panel); border-left:1px solid var(--grid); overflow:auto; padding:12px; }
+  .actions { display:flex; gap:8px; margin:10px 0; }
+  .actions button { flex:1; font-weight:600; }
+  .btn-ok { background:var(--ok); color:#04120b; border-color:var(--ok); }
+  .btn-bad { background:var(--bad); color:#210307; border-color:var(--bad); }
+  .navrow { display:flex; align-items:center; gap:10px; margin-top:10px; }
+  .progress { font-size:12px; color:var(--muted); margin-bottom:8px; }
+  .evlist { display:flex; flex-direction:column; gap:4px; margin-top:10px; }
+  .evrow { display:grid; grid-template-columns: 26px 1fr auto; gap:6px; align-items:center;
+           padding:6px 8px; border-radius:6px; background:#141f29; cursor:pointer; border:1px solid transparent; }
+  .evrow:hover { border-color:var(--grid); }
+  .evrow.active { border-color:var(--ink); background:#1c2a37; }
+  .evrow .lab { font-size:11px; padding:1px 6px; border-radius:10px; text-align:center; }
+  .lab.tonic { background:var(--tonic); color:#04121f; }
+  .lab.phasic { background:var(--phasic); color:#180a24; }
+  .lab.any { background:var(--any); color:#241800; }
+  .dec { font-size:10px; padding:1px 5px; border-radius:8px; }
+  .dec.correto { background:#173a29; color:var(--ok); }
+  .dec.incorreto { background:#3a1720; color:var(--bad); }
+  .dec.pendente { background:#22303d; color:var(--muted); }
+  .report { margin-top:14px; border-top:1px solid var(--grid); padding-top:10px; }
+  table.acc { width:100%; border-collapse:collapse; font-size:12px; margin-top:8px; }
+  table.acc th, table.acc td { padding:4px 6px; border-bottom:1px solid var(--grid); text-align:left; }
+  kbd { background:#22303d; border:1px solid var(--grid); border-bottom-width:2px; border-radius:4px;
+        padding:1px 6px; font-size:11px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Modo revisão — binário</h1>
+  <select id="exam"></select>
+  <span id="meta" class="pill">—</span>
+  <span id="src" class="pill"></span>
+  <span style="flex:1"></span>
+  <button id="reportbtn">📊 Gerar relatório (todos os exames)</button>
+</header>
+<main>
+  <div id="plotwrap">
+    <canvas id="canvas" width="1200" height="300"></canvas>
+    <div class="legend">
+      <span class="lg-tonic">tonic</span>
+      <span class="lg-phasic">phasic</span>
+      <span class="lg-any">any</span>
+    </div>
+    <div class="evinfo" id="evinfo">Selecione um exame.</div>
+    <div class="navrow">
+      <button id="prev">&larr; Anterior <kbd>A</kbd></button>
+      <button id="next">Próximo &rarr; <kbd>D</kbd></button>
+      <span class="pill" id="evpos">—</span>
+    </div>
+    <div class="actions">
+      <button class="btn-ok" id="btn-correto">✔ Correto <kbd>C</kbd></button>
+      <button class="btn-bad" id="btn-incorreto">✘ Incorreto <kbd>X</kbd></button>
+    </div>
+    <div id="reportarea" class="report" hidden>
+      <b>Relatório de acurácia por tipo</b>
+      <table class="acc" id="acctable"></table>
+    </div>
+  </div>
+  <aside>
+    <div class="progress" id="progress">—</div>
+    <div class="evlist" id="evlist"></div>
+  </aside>
+</main>
+<script>
+const state = { exam: null, events: [], idx: 0, sig: null };
+
+async function api(path) {
+  const r = await fetch(path);
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+async function apiPost(path, body) {
+  const r = await fetch(path, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+
+async function loadExams() {
+  const {exams} = await api("/api/revisao/exams");
+  const sel = document.getElementById("exam");
+  sel.innerHTML = exams.map(e => `<option value="${e}">${e}</option>`).join("");
+  sel.onchange = () => loadExam(sel.value);
+  if (exams.length) { sel.value = exams[0]; await loadExam(exams[0]); }
+}
+
+async function loadExam(name) {
+  state.exam = name;
+  const data = await api(`/api/revisao/exam?name=${encodeURIComponent(name)}`);
+  state.events = data.events;
+  state.idx = 0;
+  document.getElementById("meta").textContent = `${data.n_epochs} mini-épocas · ${data.hours}h`;
+  document.getElementById("src").textContent = `fonte: ${data.label_source}`;
+  renderList();
+  if (state.events.length) await showEvent(0);
+  else document.getElementById("evinfo").textContent = "Nenhum evento (tonic/phasic/any) neste exame.";
+}
+
+function renderList() {
+  const el = document.getElementById("evlist");
+  const n_decided = state.events.filter(e => e.decision).length;
+  document.getElementById("progress").textContent = `${n_decided}/${state.events.length} revisados`;
+  el.innerHTML = state.events.map((ev, i) => {
+    const decCls = ev.decision === "correto" ? "correto" : ev.decision === "incorreto" ? "incorreto" : "pendente";
+    const decLabel = ev.decision || "pendente";
+    return `<div class="evrow" data-i="${i}"><span>${i+1}</span>
+      <span><span class="lab ${ev.type}">${ev.type}</span> ${ev.onset_s}s (${ev.duration_s}s) · ${ev.stage}</span>
+      <span class="dec ${decCls}">${decLabel}</span></div>`;
+  }).join("");
+  [...el.querySelectorAll(".evrow")].forEach(row => {
+    row.onclick = () => showEvent(parseInt(row.dataset.i));
+  });
+}
+
+async function showEvent(i) {
+  state.idx = i;
+  const ev = state.events[i];
+  document.getElementById("evpos").textContent = `${i+1} / ${state.events.length}`;
+  document.getElementById("evinfo").innerHTML =
+    `<b>Tipo:</b> ${ev.type} · <b>Onset:</b> ${ev.onset_s}s · <b>Duração:</b> ${ev.duration_s}s · ` +
+    `<b>Estágio:</b> ${ev.stage} · <b>Cobertura média:</b> ${ev.mean_coverage ?? "—"} · ` +
+    `<b>Decisão:</b> ${ev.decision || "pendente"}`;
+  [...document.querySelectorAll(".evrow")].forEach(r => r.classList.toggle("active", parseInt(r.dataset.i) === i));
+  const pad = 3.0;
+  const t0 = Math.max(0, ev.onset_s - pad);
+  const t1 = ev.onset_s + ev.duration_s + pad;
+  const sig = await api(`/api/revisao/signal?name=${encodeURIComponent(state.exam)}&t0=${t0}&t1=${t1}`);
+  drawSignal(sig, ev, t0);
+}
+
+function drawSignal(sig, ev, t0) {
+  const c = document.getElementById("canvas");
+  const ctx = c.getContext("2d");
+  ctx.clearRect(0, 0, c.width, c.height);
+  const samples = sig.samples;
+  if (!samples.length) return;
+  const maxAbs = Math.max(1e-9, ...samples.map(Math.abs));
+  const midY = c.height / 2;
+  const scaleY = (c.height / 2 - 10) / maxAbs;
+  const scaleX = c.width / samples.length;
+
+  const colors = {tonic: "#4da3ff", phasic: "#c77dff", any: "#ffb347"};
+  const maskKey = ev.type + "_mask";
+  const mask = sig[maskKey] || [];
+  const epochSec = 3.0;
+  const nEpochsInWin = mask.length;
+  if (nEpochsInWin) {
+    const pxPerEpoch = c.width / nEpochsInWin;
+    ctx.fillStyle = colors[ev.type] + "33";
+    mask.forEach((on, ei) => { if (on) ctx.fillRect(ei * pxPerEpoch, 0, pxPerEpoch, c.height); });
+  }
+
+  ctx.strokeStyle = "#7fd4ff";
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  samples.forEach((v, i) => {
+    const x = i * scaleX, y = midY - v * scaleY;
+    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  });
+  ctx.stroke();
+}
+
+async function decide(decision) {
+  const ev = state.events[state.idx];
+  await apiPost("/api/revisao/decision", {exam: state.exam, event_id: ev.id, decision});
+  ev.decision = decision;
+  renderList();
+  if (state.idx < state.events.length - 1) await showEvent(state.idx + 1);
+}
+
+document.getElementById("btn-correto").onclick = () => decide("correto");
+document.getElementById("btn-incorreto").onclick = () => decide("incorreto");
+document.getElementById("prev").onclick = () => { if (state.idx > 0) showEvent(state.idx - 1); };
+document.getElementById("next").onclick = () => { if (state.idx < state.events.length - 1) showEvent(state.idx + 1); };
+document.getElementById("reportbtn").onclick = async () => {
+  const rep = await apiPost("/api/revisao/report", {});
+  const area = document.getElementById("reportarea");
+  const tbl = document.getElementById("acctable");
+  tbl.innerHTML = "<tr><th>Tipo</th><th>Corretos</th><th>Incorretos</th><th>Sem decisão</th><th>Acurácia</th></tr>" +
+    rep.summary.map(r => `<tr><td>${r.type}</td><td>${r.n_correto}</td><td>${r.n_incorreto}</td>` +
+      `<td>${r.n_sem_decisao}</td><td>${r.acuracia_pct !== null ? r.acuracia_pct + "%" : "—"}</td></tr>`).join("");
+  area.hidden = false;
+};
+
+document.addEventListener("keydown", (e) => {
+  if (e.target.tagName === "SELECT") return;
+  if (e.key === "c" || e.key === "C") decide("correto");
+  if (e.key === "x" || e.key === "X") decide("incorreto");
+  if (e.key === "a" || e.key === "A") { if (state.idx > 0) showEvent(state.idx - 1); }
+  if (e.key === "d" || e.key === "D") { if (state.idx < state.events.length - 1) showEvent(state.idx + 1); }
+});
+
+loadExams();
+</script>
+</body>
+</html>

@@ -9,10 +9,10 @@ ao notebook:
      (staging=(0,1,2,3), emg_channel_index=4).
 
   2. Rasterizacao de RSWA integrada: apos expandir os estagios para mini-epocas
-     de 3 s, os eventos do CSV (<subject>_rswa.csv) sao convertidos em rotulos
-     por mini-epoca (tonic_labels, phasic_labels, rswa_labels, rswa_conf) e
-     gravados no .pt. Era o elo faltante — o notebook carregava os eventos nas
-     annotations do MNE mas nunca os transformava em rotulos.
+     de 3 s, os eventos do CSV (<subject>_rswa.csv) OU a rota automatica
+     (CNN de movimento + limiar duplo) sao convertidos em rotulos por
+     mini-epoca (tonic_labels, phasic_labels, rswa_labels, rswa_conf) e
+     gravados no .pt.
 
   3. Basal de EMG na fase REM (rem_baseline_uv): percentil 10 do envelope RMS
      do EMG dentro das mini-epocas REM, em microvolts BRUTOS (sem
@@ -22,7 +22,7 @@ ao notebook:
 
 Etapas
 ──────
-1. Carrega EDF + hipnograma (.mat) alinhado + CSV de RSWA (se houver)
+1. Carrega EDF + hipnograma (.mat) alinhado + CSV de RSWA (se rswa_source=csv)
 2. Resolve canais (ausentes -> zeros + channel_mask=False)
 3. Constroi stage_map, cropa o raw em [annot_start, annot_end]
 4. Filtra por tipo (EMG/EEG/EOG) + notch, reamostra para 100 Hz
@@ -77,6 +77,7 @@ from .annotations import (
     find_annotations_csv_file,
     load_subject_annotations_from_csv,
 )
+from .auto_rswa import DEFAULT_AUTO_LABEL_MODEL, auto_label_rswa_from_signals
 from .rswa_labels import rasterize_rswa_annotations
 from .rem_baseline import compute_rem_baseline
 
@@ -89,6 +90,14 @@ def preprocess_exam(
     *,
     mat_dir: Optional[Path] = None,
     rswa_dir: Optional[Path] = None,
+    rswa_source: str = "auto",
+    auto_label_model_path: str | Path = DEFAULT_AUTO_LABEL_MODEL,
+    auto_label_device: str = "cpu",
+    auto_label_cnn_threshold: float | None = None,
+    auto_label_cnn_min_epochs: int = 1,
+    auto_label_k_on: float = 3.0,
+    auto_label_k_off: float = 1.5,
+    auto_label_k_off_hold_s: float = 0.0,
     tonic_min_coverage: float = 0.5,
     phasic_min_coverage: float = 0.0,
     any_min_coverage: float = 0.0,
@@ -102,9 +111,14 @@ def preprocess_exam(
 
     edf_path = Path(edf_path)
     subject_id = edf_path.stem
+    rswa_source = rswa_source.strip().lower()
+    if rswa_source not in {"csv", "auto"}:
+        raise ValueError(f"rswa_source invalido: {rswa_source!r}. Use 'csv' ou 'auto'.")
 
     mat_dir = Path(mat_dir) if mat_dir is not None else PathConfig.MAT_DIR
     rswa_dir = Path(rswa_dir) if rswa_dir is not None else PathConfig.RSWA_DIR
+    if auto_label_model_path is None:
+        auto_label_model_path = DEFAULT_AUTO_LABEL_MODEL
 
     # ── 1. Carrega EDF + hipnograma + CSV de RSWA ─────────────────────────
     rswa_csv_path = None
@@ -121,25 +135,30 @@ def preprocess_exam(
             raw=raw, mat_path=scores_path, include_movement=False,
         )
 
-        rswa_csv_path = find_annotations_csv_file(
-            subject_id=subject_id, csv_dir=rswa_dir,
-        )
-        if rswa_csv_path is not None:
-            print(f"[CSV ANNOTATIONS] Encontrou {rswa_csv_path}")
-            new = load_subject_annotations_from_csv(
-                csv_path=rswa_csv_path,
-                subject_id=subject_id,
-                orig_time=annotations.orig_time,
+        if rswa_source == "csv":
+            rswa_csv_path = find_annotations_csv_file(
+                subject_id=subject_id, csv_dir=rswa_dir,
             )
-            if len(new):
-                raw.set_annotations(annotations + new, emit_warning=False)
-                print(f"[CSV ANNOTATIONS] {len(new)} anotacoes RSWA adicionadas "
-                      f"para {subject_id}")
+            if rswa_csv_path is not None:
+                print(f"[CSV ANNOTATIONS] Encontrou {rswa_csv_path}")
+                new = load_subject_annotations_from_csv(
+                    csv_path=rswa_csv_path,
+                    subject_id=subject_id,
+                    orig_time=annotations.orig_time,
+                )
+                if len(new):
+                    raw.set_annotations(annotations + new, emit_warning=False)
+                    print(f"[CSV ANNOTATIONS] {len(new)} anotacoes RSWA adicionadas "
+                          f"para {subject_id}")
+                else:
+                    raw.set_annotations(annotations, emit_warning=False)
+                    print(f"[CSV ANNOTATIONS] nenhuma anotacao RSWA para {subject_id}")
             else:
                 raw.set_annotations(annotations, emit_warning=False)
-                print(f"[CSV ANNOTATIONS] nenhuma anotacao RSWA para {subject_id}")
+                print(f"[CSV ANNOTATIONS] arquivo nao encontrado para {subject_id}")
         else:
             raw.set_annotations(annotations, emit_warning=False)
+            print("[RSWA SOURCE] auto (CNN + limiar duplo) — CSV nao sera usado")
 
         print(f"[ANNOTATION TOTAL] {len(raw.annotations)}")
         print(f"[ANNOTATION COUNTS] {count_annotations_by_description(raw.annotations)}")
@@ -258,19 +277,35 @@ def preprocess_exam(
             print(f"  [SKIP] {subject_id}: nenhuma mini-epoca com estagio valido.")
         return None
 
-    # ── 10. Rasteriza eventos RSWA -> rotulos por mini-epoca ──────────────
-    # Onsets do CSV estao no referencial do EDF bruto; subtraimos annot_start
-    # (mesmo crop dos estagios) para alinhar a grade de mini-epocas.
-    rswa = rasterize_rswa_annotations(
-        csv_path=rswa_csv_path,
-        subject_id=subject_id,
-        stages_mini=stages_mini,
-        annot_start=annot_start,
-        epoch_sec=float(epoch_sec),
-        tonic_min_coverage=tonic_min_coverage,
-        phasic_min_coverage=phasic_min_coverage,
-        any_min_coverage=any_min_coverage,
-    )
+    # ── 10. Gera rotulos RSWA -> mini-epocas ───────────────────────────────
+    if rswa_source == "csv":
+        # Onsets do CSV estao no referencial do EDF bruto; subtraimos annot_start
+        # (mesmo crop dos estagios) para alinhar a grade de mini-epocas.
+        rswa = rasterize_rswa_annotations(
+            csv_path=rswa_csv_path,
+            subject_id=subject_id,
+            stages_mini=stages_mini,
+            annot_start=annot_start,
+            epoch_sec=float(epoch_sec),
+            tonic_min_coverage=tonic_min_coverage,
+            phasic_min_coverage=phasic_min_coverage,
+            any_min_coverage=any_min_coverage,
+        )
+    else:
+        rswa = auto_label_rswa_from_signals(
+            signals,
+            stages_mini,
+            model_path=auto_label_model_path,
+            device=auto_label_device,
+            cnn_threshold=auto_label_cnn_threshold,
+            cnn_min_epochs=auto_label_cnn_min_epochs,
+            k_on=auto_label_k_on,
+            k_off=auto_label_k_off,
+            k_off_hold_s=auto_label_k_off_hold_s,
+            tonic_min_coverage=tonic_min_coverage,
+            phasic_min_coverage=phasic_min_coverage,
+            any_min_coverage=any_min_coverage,
+        )
 
     if verbose:
         n_rem = int((stages_mini == 4).sum())
@@ -279,6 +314,16 @@ def preprocess_exam(
         n_phasic = int(rswa["phasic_labels"].sum())
         print(f" [ALINHAMENTO] {len(signals)} mini-epocas | REM={n_rem} | "
               f"gap={n_gap} | tonic+={n_tonic} | phasic+={n_phasic}")
+        if rswa_source == "auto":
+            print(
+                f" [AUTO RSWA] candidatos_cnn={rswa['n_cnn_candidates']} "
+                f"confirmados={rswa['n_confirmed_events']} "
+                f"descartados={rswa['n_discarded_windows']} "
+                f"limiar_cnn={rswa['cnn_threshold']:.3f} "
+                f"k_on={rswa['k_on']:.3f} "
+                f"k_off={rswa['k_off']:.3f} "
+                f"k_off_hold_s={rswa['k_off_hold_s']:.3f}"
+            )
 
     # ── 11. Basal de EMG na fase REM (percentil 10, uV brutos) ────────────
     # Ver docstring de rem_baseline.py: nao usa tonic_labels/phasic_labels
@@ -304,6 +349,7 @@ def preprocess_exam(
         "phasic_cov":    rswa["phasic_cov"],
         "any_cov":       rswa["any_cov"],
         "fs":            fs_target,
+        "label_source":  rswa.get("label_source", "csv_rswa_annotations_v1"),
         "rem_baseline_uv":       rem_baseline["rem_baseline_uv"],
         "rem_baseline_n_epochs": rem_baseline["rem_baseline_n_epochs"],
     }
@@ -326,6 +372,7 @@ def _save_result(result: Dict, out_path: Path) -> None:
         "tonic_cov":     torch.from_numpy(result["tonic_cov"]),
         "phasic_cov":    torch.from_numpy(result["phasic_cov"]),
         "any_cov":       torch.from_numpy(result["any_cov"]),
+        "label_source":  result["label_source"],
         # Basal de EMG na fase REM (percentil 10, uV brutos) -- ver
         # rem_baseline.py. Escalares Python simples (nao Tensor) porque sao
         # um unico valor por exame, nao uma serie por mini-epoca; NaN quando

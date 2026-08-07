@@ -1,0 +1,6 @@
+event_id,type,onset_s,duration_s,stage,mean_coverage,decision,note
+0,phasic,150.0,6.0,REM,0.345,correto,
+1,any,156.0,9.0,REM,0.774,correto,
+2,phasic,210.0,6.0,REM,0.325,correto,
+3,any,216.0,9.0,REM,0.779,incorreto,falso positivo - artefato
+4,any,231.0,6.0,REM,0.872,incorreto,falso positivo - artefato

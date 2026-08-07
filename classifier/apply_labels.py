@@ -2,9 +2,17 @@
 Aplica rotulos revisados (CSV) nos tensores .pt de treino.
 
 Le classifier/labels/<exame>_revisado.csv (mesmo formato gravado pelo /api/save
-do view/: subject_id, onset_s, duration_s, type, score — so linhas type in
-{tonic, phasic}, ja que o app so exporta eventos confirmados) e escreve
-tonic_labels/phasic_labels no .pt correspondente em classifier/data/<exame>.pt.
+do view/: subject_id, onset_s, duration_s, type, score — linhas type in
+{tonic, phasic, any}) e escreve tonic_labels/phasic_labels/any_labels no .pt
+correspondente em classifier/data/<exame>.pt.
+
+Precedencia any_labels: se o CSV revisado NAO contem nenhuma linha type=any
+para o exame (caso comum enquanto a UI de revisao nao suporta "any", ou
+CSVs antigos gerados antes dessa correcao), any_labels do .pt e PRESERVADO
+como esta (tipicamente a saida da CNN via classifier/auto_label.py) -- nao e
+zerado por omissao. Se o CSV contem ao menos uma linha type=any, ela passa a
+ser a fonte de verdade e any_labels e sobrescrito por completo (mesmo
+comportamento de tonic/phasic: revisao humana explicita sempre vence).
 
 Fonte dos CSVs: classifier/labels/ (copias que voce arquiva como "originais").
 Este script NAO le nada de view/revisado/ — so consulta classifier/labels/exam_config.json
@@ -69,7 +77,7 @@ def read_label_csv(path: Path) -> list[dict]:
     rows = []
     with open(path, newline="") as f:
         for d in csv.DictReader(f):
-            if d["type"] not in ("tonic", "phasic"):
+            if d["type"] not in ("tonic", "phasic", "any"):
                 continue
             rows.append({
                 "onset_s": float(d["onset_s"]),
@@ -104,6 +112,8 @@ def apply_one(exam: str, offsets: dict, time_ref: str, dry_run: bool) -> dict:
     rows = read_label_csv(csv_path)
     tonic = np.zeros(T, dtype=np.float32)
     phasic = np.zeros(T, dtype=np.float32)
+    any_ = np.zeros(T, dtype=np.float32)
+    has_any_row = any(r["type"] == "any" for r in rows)
     n_warn = 0
     for r in rows:
         pt_onset = r["onset_s"] - a0
@@ -116,13 +126,34 @@ def apply_one(exam: str, offsets: dict, time_ref: str, dry_run: bool) -> dict:
         if i0c >= i1c:
             n_warn += 1  # evento cai totalmente fora do exame (offset errado?)
             continue
-        arr = tonic if r["type"] == "tonic" else phasic
+        if r["type"] == "tonic":
+            arr = tonic
+        elif r["type"] == "phasic":
+            arr = phasic
+        else:
+            arr = any_
         arr[i0c:i1c] = 1.0
 
-    movement = (tonic > 0.5) | (phasic > 0.5)
+    # Precedencia any_labels: so sobrescreve se o CSV revisado tiver >=1 linha
+    # type=any explicita. Sem isso, preserva o any_labels que ja estiver no
+    # .pt (tipicamente escrito por classifier/auto_label.py) -- nao zera por
+    # omissao apenas porque a revisao humana ainda nao tratou de "any".
+    if has_any_row:
+        any_final = any_
+        any_source = "human_reviewed_csv"
+    else:
+        existing_any = obj.get("any_labels")
+        if existing_any is not None:
+            any_final = existing_any.numpy().astype(np.float32) if hasattr(existing_any, "numpy") else np.asarray(existing_any, dtype=np.float32)
+        else:
+            any_final = any_  # zeros -- exame nunca teve any_labels
+        any_source = "preserved_existing"
+
+    movement = (tonic > 0.5) | (phasic > 0.5) | (any_final > 0.5)
     summary = {
         "exam": exam, "T": T, "n_events": len(rows),
         "n_tonic_epochs": int(tonic.sum()), "n_phasic_epochs": int(phasic.sum()),
+        "n_any_epochs": int((any_final > 0.5).sum()), "any_source": any_source,
         "n_movement_epochs": int(movement.sum()),
         "prevalence_pct": round(100 * float(movement.mean()), 2),
         "annot_start_used": a0, "n_alignment_warnings": n_warn,
@@ -135,6 +166,8 @@ def apply_one(exam: str, offsets: dict, time_ref: str, dry_run: bool) -> dict:
             shutil.copy2(pt_path, backup_path)
         obj["tonic_labels"] = torch.from_numpy(tonic)
         obj["phasic_labels"] = torch.from_numpy(phasic)
+        obj["any_labels"] = torch.from_numpy(np.asarray(any_final, dtype=np.float32))
+        obj["label_source"] = "human_reviewed"
         torch.save(obj, pt_path)
 
     return summary

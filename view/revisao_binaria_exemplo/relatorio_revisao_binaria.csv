@@ -1,0 +1,5 @@
+type,n_correto,n_incorreto,n_sem_decisao,n_total,acuracia_pct
+tonic,0,0,0,0,
+phasic,2,0,11,13,100.0
+any,1,2,5,8,33.3
+TOTAL,3,2,16,21,60.0
