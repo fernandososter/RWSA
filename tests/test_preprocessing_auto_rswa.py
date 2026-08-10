@@ -5,6 +5,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+import torch
 
 
 def load_auto_rswa_module(tmp_path):
@@ -15,6 +16,17 @@ def load_auto_rswa_module(tmp_path):
     if str(src_dir) not in sys.path:
         sys.path.insert(0, str(src_dir))
     module = importlib.import_module("sleep_rswa.preprocessing.auto_rswa")
+    return importlib.reload(module)
+
+
+def load_preprocess_module(tmp_path):
+    os.environ["MNE_USE_NUMBA"] = "false"
+    os.environ["_MNE_FAKE_HOME_DIR"] = str(tmp_path)
+    os.environ["MNE_DONTWRITE_HOME"] = "true"
+    src_dir = Path(__file__).resolve().parents[1] / "src"
+    if str(src_dir) not in sys.path:
+        sys.path.insert(0, str(src_dir))
+    module = importlib.import_module("sleep_rswa.preprocessing.preprocess")
     return importlib.reload(module)
 
 
@@ -89,3 +101,55 @@ def test_auto_label_rswa_from_signals_uses_cnn_candidates_and_window_detector(tm
     assert np.array_equal(result["rswa_labels"], np.zeros(4, dtype=np.int64))
     assert np.array_equal(result["rswa_conf"], np.array([1.0, 1.0, 1.0, 0.0], dtype=np.float32))
     assert result["label_source"] == "auto_cnn_limiar_duplo_v1"
+
+
+def test_save_result_persists_label_metadata(tmp_path):
+    preprocess = load_preprocess_module(tmp_path)
+
+    out_path = tmp_path / "exam.pt"
+    result = {
+        "signals": np.zeros((2, 5, 300), dtype=np.float32),
+        "sleep_stages": np.array([4, 4], dtype=np.int64),
+        "channel_mask": np.array([True, True, True, True, True], dtype=bool),
+        "channel_names": ["C3", "C4", "O1", "EOG", "EMG"],
+        "tonic_labels": np.array([1.0, 0.0], dtype=np.float32),
+        "phasic_labels": np.array([0.0, 1.0], dtype=np.float32),
+        "any_labels": np.array([0.0, 0.0], dtype=np.float32),
+        "rswa_labels": np.array([2, 1], dtype=np.int64),
+        "rswa_conf": np.array([1.0, 1.0], dtype=np.float32),
+        "tonic_cov": np.array([1.0, 0.0], dtype=np.float32),
+        "phasic_cov": np.array([0.0, 1.0], dtype=np.float32),
+        "any_cov": np.array([0.0, 0.0], dtype=np.float32),
+        "label_source": "auto_cnn_limiar_duplo_v1",
+        "label_metadata": {
+            "rswa_source": "auto",
+            "label_source": "auto_cnn_limiar_duplo_v1",
+            "coverage_thresholds": {
+                "tonic_min_coverage": 0.5,
+                "phasic_min_coverage": 0.0,
+                "any_min_coverage": 0.0,
+            },
+            "auto_label": {
+                "model_path": "classifier/outputs/movement_cnn_final.pt",
+                "device": "cpu",
+                "cnn_threshold": 0.2,
+                "cnn_min_epochs": 1,
+                "k_on": 3.0,
+                "k_off": 1.5,
+                "k_off_hold_s": 0.0,
+                "n_cnn_candidates": 2,
+                "n_confirmed_events": 2,
+                "n_discarded_windows": 0,
+            },
+        },
+        "rem_baseline_uv": 1.23,
+        "rem_baseline_n_epochs": 2,
+    }
+
+    preprocess._save_result(result, out_path)
+    saved = torch.load(out_path, map_location="cpu", weights_only=False)
+
+    assert saved["label_metadata"]["rswa_source"] == "auto"
+    assert saved["label_metadata"]["auto_label"]["k_on"] == pytest.approx(3.0)
+    assert saved["label_metadata"]["auto_label"]["k_off"] == pytest.approx(1.5)
+    assert saved["label_metadata"]["auto_label"]["cnn_threshold"] == pytest.approx(0.2)

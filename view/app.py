@@ -30,6 +30,7 @@ import torch
 
 HERE = Path(__file__).resolve().parent
 PROJ = HERE.parent
+VIEW_REVISAO_VERSION = "revisao-2026-08-08-01"
 if str(PROJ) not in sys.path:
     sys.path.insert(0, str(PROJ))
 
@@ -289,6 +290,47 @@ def _events_payload(st):
 REVIEW_TYPES = ("tonic", "phasic", "any")
 
 
+def _quantile_1d(values, q):
+    arr = np.asarray(values, dtype=np.float64)
+    if arr.size == 0:
+        return 0.0
+    return float(np.quantile(arr, q))
+
+
+def _build_display_trace(samples, *, n_cols=320, clip=1.5):
+    """Normaliza um trecho 1D de EMG para exibicao e resume por colunas.
+
+    A normalizacao e apenas para visualizacao: centraliza na mediana da janela
+    e escala pelo percentil 98 do valor absoluto. O retorno fica em [-clip, clip]
+    com agregacao min/max/mean por coluna para renderizacao robusta.
+    """
+    arr = np.asarray(samples, dtype=np.float64)
+    if arr.size == 0:
+        return {"columns": [], "median": 0.0, "robust_scale": 1.0, "n_samples": 0}
+
+    median = _quantile_1d(arr, 0.5)
+    centered = arr - median
+    robust_scale = max(1e-9, _quantile_1d(np.abs(centered), 0.98))
+    norm = np.clip(centered / robust_scale, -clip, clip)
+
+    n_cols = int(max(32, min(int(n_cols), len(norm))))
+    bucket_size = int(np.ceil(len(norm) / n_cols))
+    columns = []
+    for start in range(0, len(norm), bucket_size):
+        chunk = norm[start:start + bucket_size]
+        columns.append({
+            "lo": float(chunk.min()),
+            "hi": float(chunk.max()),
+            "mean": float(chunk.mean()),
+        })
+    return {
+        "columns": columns,
+        "median": median,
+        "robust_scale": robust_scale,
+        "n_samples": int(arr.size),
+    }
+
+
 def _events_from_pt_labels(tonic, phasic, any_labels, stages):
     """Runs contiguos (>0.5) em cada um dos 3 rotulos -> lista de eventos.
 
@@ -321,6 +363,16 @@ def _events_from_pt_labels(tonic, phasic, any_labels, stages):
     return events
 
 
+def _event_counts_by_type(events):
+    counts = {etype: 0 for etype in REVIEW_TYPES}
+    for ev in events:
+        etype = ev.get("type")
+        if etype in counts:
+            counts[etype] += 1
+    counts["total"] = sum(counts.values())
+    return counts
+
+
 def _prepare_review(exam_name):
     """Le APENAS o .pt (sem rodar a CNN) -- rotulos das 3 cabecas ja gravadas."""
     if exam_name in _REVISAO_CACHE:
@@ -340,6 +392,12 @@ def _prepare_review(exam_name):
     phasic_cov = _np(obj.get("phasic_cov"))
     any_cov = _np(obj.get("any_cov"))
     label_source = obj.get("label_source", "desconhecido (CSV humano legado ou exame sem label_source)")
+    label_metadata = obj.get("label_metadata")
+    if not isinstance(label_metadata, dict):
+        label_metadata = {}
+    else:
+        label_metadata = dict(label_metadata)
+    label_metadata.setdefault("label_source", label_source)
 
     emg_raw = signals[:, 4, :].astype(np.float32)  # EMG mento (indice 4), sem z-score
     events = _events_from_pt_labels(tonic, phasic, any_labels, stages)
@@ -360,11 +418,14 @@ def _prepare_review(exam_name):
         "emg": emg_raw,
         "stages": stages,
         "tonic": tonic, "phasic": phasic, "any": any_labels,
+        "tonic_cov": tonic_cov, "phasic_cov": phasic_cov, "any_cov": any_cov,
         "events": events,
+        "event_counts": _event_counts_by_type(events),
         "n_epochs": n_epochs,
         "hours": n_epochs * EPOCH_SEC / 3600.0,
         "subject_id": exam_name,
         "label_source": label_source,
+        "label_metadata": label_metadata,
     }
     _REVISAO_CACHE[exam_name] = st
     return st
@@ -506,6 +567,9 @@ class Handler(BaseHTTPRequestHandler):
             body = body.encode("utf-8")
         self.send_response(code)
         self.send_header("Content-Type", ctype)
+        self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+        self.send_header("Pragma", "no-cache")
+        self.send_header("Expires", "0")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -517,6 +581,7 @@ class Handler(BaseHTTPRequestHandler):
             if u.path in ("/", "/index.html"):
                 page = "revisao.html" if CFG["mode"] == "revisao" else "index.html"
                 html = (HERE / page).read_text(encoding="utf-8")
+                html = html.replace("__VIEW_REVISAO_VERSION__", VIEW_REVISAO_VERSION)
                 return self._send(200, html, "text/html; charset=utf-8")
 
             if u.path == "/api/exams":
@@ -600,7 +665,10 @@ class Handler(BaseHTTPRequestHandler):
                     "hours": round(st["hours"], 2),
                     "fs": FS, "epoch_sec": EPOCH_SEC,
                     "label_source": st["label_source"],
+                    "view_revision": VIEW_REVISAO_VERSION,
+                    "label_metadata": st["label_metadata"],
                     "n_events": len(events),
+                    "event_counts": st["event_counts"],
                     "n_decided": n_decided,
                     "events": events,
                 })
@@ -620,6 +688,7 @@ class Handler(BaseHTTPRequestHandler):
                     seg = seg[::step]
                 else:
                     step = 1
+                display_trace = _build_display_trace(seg, n_cols=320, clip=1.5)
                 e0 = int(t0 // EPOCH_SEC); e1 = int(np.ceil(t1 / EPOCH_SEC))
                 stages = [STAGE_NAMES.get(int(s), "?") for s in st["stages"][e0:e1]]
 
@@ -629,14 +698,24 @@ class Handler(BaseHTTPRequestHandler):
                         return [False] * max(0, e1 - e0)
                     return [bool(x > 0.5) for x in arr[e0:e1]]
 
+                def _cov_of(key):
+                    arr = st.get(key)
+                    if arr is None:
+                        return [0.0] * max(0, e1 - e0)
+                    return [round(float(x), 4) for x in arr[e0:e1]]
+
                 return self._send(200, {
                     "t0": t0, "t1": t1, "fs_eff": fs / step,
                     "samples": seg.round(3).tolist(),
+                    "display_trace": display_trace,
                     "epoch_start": e0,
                     "stages": stages,
                     "tonic_mask": _mask_of("tonic"),
                     "phasic_mask": _mask_of("phasic"),
                     "any_mask": _mask_of("any"),
+                    "tonic_cov": _cov_of("tonic_cov"),
+                    "phasic_cov": _cov_of("phasic_cov"),
+                    "any_cov": _cov_of("any_cov"),
                 })
 
             if u.path == "/api/revisao/report":

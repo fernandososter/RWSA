@@ -5,6 +5,13 @@ EMG e confirmar cada evento como **tônico** / **fásico**, ou **apagar** falsos
 positivos. Exporta um CSV revisado no **tempo do EDF** — pronto para re-treinar
 o modelo a partir do tempo 0 do EDF.
 
+O `view/` agora tem **dois modos**:
+
+- `revisor` — fluxo original; roda a CNN ao vivo e permite editar/apagar eventos.
+- `revisao` — auditoria binária dos labels já gravados no `.pt`; lê
+  `tonic_labels`, `phasic_labels`, `any_labels`, coberturas e `label_metadata`
+  diretamente do tensor salvo, sem rodar a CNN.
+
 > Isolamento: `view/` importa de `classifier/` (o detector), mas **nunca** de
 > `src/sleep_rswa`. O contrato de isolamento é `classifier` ↔ `src/sleep_rswa`.
 
@@ -119,10 +126,23 @@ tempo do `.pt` com aviso, como antes. do `.pt`.
 ```bash
 python view/app.py           # http://localhost:8000
 python view/app.py --port 8080 --data classifier/data --model classifier/outputs/movement_cnn_final.pt
+python view/app.py --mode revisao --data classifier/data
 ```
 
 Abra o endereço no navegador. Atalhos: `←`/`→` navegar · `T` tônico · `F` fásico ·
 `D` apagar. "Salvar CSV revisado" grava em `view/revisado/`.
+
+### Modo `revisao`
+
+No modo `revisao`, a interface:
+
+- lista eventos `tonic`, `phasic` e `any` reconstruídos a partir do `.pt`;
+- mostra `label_source` e `label_metadata` salvos no preprocessamento;
+- exibe no traçado as três classes simultaneamente, com opacidade proporcional
+  à cobertura (`tonic_cov`, `phasic_cov`, `any_cov`);
+- permite marcar cada evento como `correto` ou `incorreto`;
+- salva decisões em `view/revisao_binaria/<exame>_revisao.csv`;
+- gera um relatório agregado com `POST /api/revisao/report`.
 
 ## Arquivos
 

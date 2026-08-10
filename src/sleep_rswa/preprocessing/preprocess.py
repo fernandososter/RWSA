@@ -49,6 +49,8 @@ Formato salvo (torch.save)
   "tonic_cov":     Tensor (T,)  float32  0..1   (fracao de cobertura, diagnostico)
   "phasic_cov":    Tensor (T,)  float32  0..1
   "any_cov":       Tensor (T,)  float32  0..1
+  "label_metadata": dict        (metadados da origem dos labels; inclui
+                                 parametros do auto-label quando rswa_source=auto)
   "rem_baseline_uv":       float  (uV brutos; NaN se exame sem mini-epoca REM)
   "rem_baseline_n_epochs": int    (quantas mini-epocas REM entraram no calculo)
 }
@@ -334,6 +336,32 @@ def preprocess_exam(
         print(f" [REM BASELINE] {rem_baseline['rem_baseline_uv']:.2f} uV "
               f"(n_mini_epocas_rem={rem_baseline['rem_baseline_n_epochs']})")
 
+    label_source = rswa.get("label_source", "csv_rswa_annotations_v1")
+    label_metadata = {
+        "rswa_source": rswa_source,
+        "label_source": label_source,
+        "coverage_thresholds": {
+            "tonic_min_coverage": float(tonic_min_coverage),
+            "phasic_min_coverage": float(phasic_min_coverage),
+            "any_min_coverage": float(any_min_coverage),
+        },
+    }
+    if rswa_source == "csv":
+        label_metadata["csv_annotations_path"] = str(rswa_csv_path) if rswa_csv_path is not None else None
+    else:
+        label_metadata["auto_label"] = {
+            "model_path": str(Path(auto_label_model_path)),
+            "device": str(auto_label_device),
+            "cnn_threshold": float(rswa["cnn_threshold"]),
+            "cnn_min_epochs": int(auto_label_cnn_min_epochs),
+            "k_on": float(rswa["k_on"]),
+            "k_off": float(rswa["k_off"]),
+            "k_off_hold_s": float(rswa["k_off_hold_s"]),
+            "n_cnn_candidates": int(rswa["n_cnn_candidates"]),
+            "n_confirmed_events": int(rswa["n_confirmed_events"]),
+            "n_discarded_windows": int(rswa["n_discarded_windows"]),
+        }
+
     return {
         "subject_id":    subject_id,
         "signals":       signals.astype(np.float32),
@@ -349,7 +377,8 @@ def preprocess_exam(
         "phasic_cov":    rswa["phasic_cov"],
         "any_cov":       rswa["any_cov"],
         "fs":            fs_target,
-        "label_source":  rswa.get("label_source", "csv_rswa_annotations_v1"),
+        "label_source":  label_source,
+        "label_metadata": label_metadata,
         "rem_baseline_uv":       rem_baseline["rem_baseline_uv"],
         "rem_baseline_n_epochs": rem_baseline["rem_baseline_n_epochs"],
     }
@@ -373,6 +402,7 @@ def _save_result(result: Dict, out_path: Path) -> None:
         "phasic_cov":    torch.from_numpy(result["phasic_cov"]),
         "any_cov":       torch.from_numpy(result["any_cov"]),
         "label_source":  result["label_source"],
+        "label_metadata": result["label_metadata"],
         # Basal de EMG na fase REM (percentil 10, uV brutos) -- ver
         # rem_baseline.py. Escalares Python simples (nao Tensor) porque sao
         # um unico valor por exame, nao uma serie por mini-epoca; NaN quando
