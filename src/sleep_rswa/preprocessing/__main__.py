@@ -15,7 +15,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--out-dir", type=Path, default=PathConfig.TENSOR_DIR)
     parser.add_argument("--mat-dir", type=Path, default=PathConfig.MAT_DIR)
     parser.add_argument("--rswa-dir", type=Path, default=PathConfig.RSWA_DIR)
-    parser.add_argument("--rswa-source", choices=("auto", "csv"), default="auto")
+    parser.add_argument("--rswa-source", choices=("auto", "csv", "aasm"), default="auto")
     parser.add_argument("--auto-label-model-path", type=Path, default=None)
     parser.add_argument("--auto-label-device", default="cpu")
     parser.add_argument("--auto-label-cnn-threshold", type=float, default=None)
@@ -30,6 +30,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--tonic-min-coverage", type=float, default=0.5)
     parser.add_argument("--phasic-min-coverage", type=float, default=0.0)
     parser.add_argument("--any-min-coverage", type=float, default=0.0)
+    parser.add_argument(
+        "--aasm-atonia-pct", type=float, default=None,
+        help=(
+            "Percentil do envelope RMS de EMG em REM usado como nivel de "
+            "atonia p/ rswa_source=aasm (default: usa rem_baseline_uv, "
+            "percentil 10 -- ver AVISO DE CALIBRACAO em aasm_rule.py antes "
+            "de usar em producao)."
+        ),
+    )
     return parser
 
 
@@ -49,6 +58,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "tonic_min_coverage": args.tonic_min_coverage,
         "phasic_min_coverage": args.phasic_min_coverage,
         "any_min_coverage": args.any_min_coverage,
+        "aasm_atonia_pct": args.aasm_atonia_pct,
     }
 
     if args.parallel:

@@ -9,10 +9,13 @@ ao notebook:
      (staging=(0,1,2,3), emg_channel_index=4).
 
   2. Rasterizacao de RSWA integrada: apos expandir os estagios para mini-epocas
-     de 3 s, os eventos do CSV (<subject>_rswa.csv) OU a rota automatica
-     (CNN de movimento + limiar duplo) sao convertidos em rotulos por
-     mini-epoca (tonic_labels, phasic_labels, rswa_labels, rswa_conf) e
-     gravados no .pt.
+     de 3 s, os eventos do CSV (<subject>_rswa.csv), a rota automatica
+     (CNN de movimento + limiar duplo, rswa_source="auto") OU a regra textual
+     da AASM (2023a) (rswa_source="aasm", ver aasm_rule.py -- EXPERIMENTAL,
+     NAO usar em treinamento sem recalibrar aasm_atonia_pct primeiro, ver
+     docs/relatorio_impacto_regra_aasm.md secao 4/5) sao convertidos em
+     rotulos por mini-epoca (tonic_labels, phasic_labels, rswa_labels,
+     rswa_conf) e gravados no .pt.
 
   3. Basal de EMG na fase REM (rem_baseline_uv): percentil 10 do envelope RMS
      do EMG dentro das mini-epocas REM, em microvolts BRUTOS (sem
@@ -82,6 +85,7 @@ from .annotations import (
 from .auto_rswa import DEFAULT_AUTO_LABEL_MODEL, auto_label_rswa_from_signals
 from .rswa_labels import rasterize_rswa_annotations
 from .rem_baseline import compute_rem_baseline
+from .aasm_rule import label_exam_with_aasm_rule, AASM_CALIBRATION_WARNING
 
 
 def preprocess_exam(
@@ -103,6 +107,7 @@ def preprocess_exam(
     tonic_min_coverage: float = 0.5,
     phasic_min_coverage: float = 0.0,
     any_min_coverage: float = 0.0,
+    aasm_atonia_pct: float | None = None,
 ) -> Optional[Dict]:
     """
     Pre-processa um unico exame EDF. Retorna dict (ver formato no topo do modulo)
@@ -114,8 +119,8 @@ def preprocess_exam(
     edf_path = Path(edf_path)
     subject_id = edf_path.stem
     rswa_source = rswa_source.strip().lower()
-    if rswa_source not in {"csv", "auto"}:
-        raise ValueError(f"rswa_source invalido: {rswa_source!r}. Use 'csv' ou 'auto'.")
+    if rswa_source not in {"csv", "auto", "aasm"}:
+        raise ValueError(f"rswa_source invalido: {rswa_source!r}. Use 'csv', 'auto' ou 'aasm'.")
 
     mat_dir = Path(mat_dir) if mat_dir is not None else PathConfig.MAT_DIR
     rswa_dir = Path(rswa_dir) if rswa_dir is not None else PathConfig.RSWA_DIR
@@ -160,7 +165,7 @@ def preprocess_exam(
                 print(f"[CSV ANNOTATIONS] arquivo nao encontrado para {subject_id}")
         else:
             raw.set_annotations(annotations, emit_warning=False)
-            print("[RSWA SOURCE] auto (CNN + limiar duplo) — CSV nao sera usado")
+            print(f"[RSWA SOURCE] {rswa_source} — CSV nao sera usado")
 
         print(f"[ANNOTATION TOTAL] {len(raw.annotations)}")
         print(f"[ANNOTATION COUNTS] {count_annotations_by_description(raw.annotations)}")
@@ -279,7 +284,18 @@ def preprocess_exam(
             print(f"  [SKIP] {subject_id}: nenhuma mini-epoca com estagio valido.")
         return None
 
-    # ── 10. Gera rotulos RSWA -> mini-epocas ───────────────────────────────
+    # ── 10. Basal de EMG na fase REM (percentil 10, uV brutos) ────────────
+    # Ver docstring de rem_baseline.py: nao usa tonic_labels/phasic_labels
+    # (funciona igual em exames revisados e nao revisados); nao altera
+    # nenhum detector -- so grava o valor no .pt para uso futuro. Movido
+    # para ANTES da geracao de rotulos porque rswa_source="aasm" precisa
+    # deste valor como referencia de amplitude (nivel de atonia REM).
+    rem_baseline = compute_rem_baseline(signals, stages_mini)
+    if verbose:
+        print(f" [REM BASELINE] {rem_baseline['rem_baseline_uv']:.2f} uV "
+              f"(n_mini_epocas_rem={rem_baseline['rem_baseline_n_epochs']})")
+
+    # ── 11. Gera rotulos RSWA -> mini-epocas ───────────────────────────────
     if rswa_source == "csv":
         # Onsets do CSV estao no referencial do EDF bruto; subtraimos annot_start
         # (mesmo crop dos estagios) para alinhar a grade de mini-epocas.
@@ -292,6 +308,21 @@ def preprocess_exam(
             tonic_min_coverage=tonic_min_coverage,
             phasic_min_coverage=phasic_min_coverage,
             any_min_coverage=any_min_coverage,
+        )
+    elif rswa_source == "aasm":
+        # ATENCAO -- ver AASM_CALIBRATION_WARNING (aasm_rule.py) e
+        # docs/relatorio_impacto_regra_aasm.md secao 4: com o percentil de
+        # atonia atual (10.0, herdado de rem_baseline_uv) o criterio de
+        # amplitude satura phasic/any. NAO usar em treinamento sem antes
+        # recalibrar `aasm_atonia_pct` e revalidar contra CSVs revisados.
+        if verbose:
+            print(f" [AASM RSWA][AVISO] {AASM_CALIBRATION_WARNING}")
+        rswa = label_exam_with_aasm_rule(
+            signals,
+            stages_mini,
+            rem_baseline["rem_baseline_uv"],
+            rem_baseline["rem_baseline_n_epochs"],
+            atonia_pct=aasm_atonia_pct,
         )
     else:
         rswa = auto_label_rswa_from_signals(
@@ -326,15 +357,15 @@ def preprocess_exam(
                 f"k_off={rswa['k_off']:.3f} "
                 f"k_off_hold_s={rswa['k_off_hold_s']:.3f}"
             )
-
-    # ── 11. Basal de EMG na fase REM (percentil 10, uV brutos) ────────────
-    # Ver docstring de rem_baseline.py: nao usa tonic_labels/phasic_labels
-    # (funciona igual em exames revisados e nao revisados); nao altera
-    # nenhum detector -- so grava o valor no .pt para uso futuro.
-    rem_baseline = compute_rem_baseline(signals, stages_mini)
-    if verbose:
-        print(f" [REM BASELINE] {rem_baseline['rem_baseline_uv']:.2f} uV "
-              f"(n_mini_epocas_rem={rem_baseline['rem_baseline_n_epochs']})")
+        elif rswa_source == "aasm":
+            print(
+                f" [AASM RSWA] n_rem_macro_epochs={rswa['n_rem_macro_epochs']} "
+                f"n_tonic_macro_epochs={rswa['n_tonic_macro_epochs']} "
+                f"n_phasic_macro_epochs={rswa['n_phasic_macro_epochs']} "
+                f"atonia_source={rswa['atonia_source']} "
+                f"atonia_baseline_uv={rswa['atonia_baseline_uv']:.3f} "
+                f"atonia_pct_used={rswa['atonia_pct_used']:.1f}"
+            )
 
     label_source = rswa.get("label_source", "csv_rswa_annotations_v1")
     label_metadata = {
@@ -348,6 +379,16 @@ def preprocess_exam(
     }
     if rswa_source == "csv":
         label_metadata["csv_annotations_path"] = str(rswa_csv_path) if rswa_csv_path is not None else None
+    elif rswa_source == "aasm":
+        label_metadata["aasm_rule"] = {
+            "atonia_baseline_uv": float(rswa["atonia_baseline_uv"]),
+            "atonia_source": rswa["atonia_source"],
+            "atonia_pct_used": float(rswa["atonia_pct_used"]),
+            "n_rem_macro_epochs": int(rswa["n_rem_macro_epochs"]),
+            "n_tonic_macro_epochs": int(rswa["n_tonic_macro_epochs"]),
+            "n_phasic_macro_epochs": int(rswa["n_phasic_macro_epochs"]),
+            "calibration_warning": AASM_CALIBRATION_WARNING,
+        }
     else:
         label_metadata["auto_label"] = {
             "model_path": str(Path(auto_label_model_path)),
