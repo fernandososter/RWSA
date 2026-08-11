@@ -288,6 +288,7 @@ def _events_payload(st):
 # ─────────────────────────────────────────────────────────────────────────────
 
 REVIEW_TYPES = ("tonic", "phasic", "any")
+REVIEW_AASM_MACRO_EPOCHS = 10
 
 
 def _quantile_1d(values, q):
@@ -331,7 +332,35 @@ def _build_display_trace(samples, *, n_cols=320, clip=1.5):
     }
 
 
-def _events_from_pt_labels(tonic, phasic, any_labels, stages):
+def _split_review_run(epoch_start, epoch_end, *, label_metadata=None):
+    """Quebra um run contiguo em subeventos aproximados para revisao.
+
+    Regra especial para rswa_source="aasm": como a decisao AASM e feita no
+    nivel de macro-epocas de 30s, um run contiguo pode virar um bloco muito
+    longo quando varias macro-epocas consecutivas fecham positivo. Para a UI
+    de revisao, quebramos esse run nas fronteiras de 30s (10 mini-epocas),
+    preservando a informacao aproximada sem aglutinar tudo em um unico evento.
+    """
+    rswa_source = None
+    if isinstance(label_metadata, dict):
+        rswa_source = label_metadata.get("rswa_source")
+    if rswa_source != "aasm":
+        return [(epoch_start, epoch_end)]
+
+    chunks = []
+    cur = int(epoch_start)
+    macro = REVIEW_AASM_MACRO_EPOCHS
+    end = int(epoch_end)
+    while cur < end:
+        next_boundary = ((cur // macro) + 1) * macro
+        chunk_end = min(end, next_boundary)
+        if chunk_end > cur:
+            chunks.append((cur, chunk_end))
+        cur = chunk_end
+    return chunks or [(epoch_start, epoch_end)]
+
+
+def _events_from_pt_labels(tonic, phasic, any_labels, stages, *, label_metadata=None):
     """Runs contiguos (>0.5) em cada um dos 3 rotulos -> lista de eventos.
 
     Cada rotulo e tratado de forma independente (podem se sobrepor no tempo --
@@ -353,7 +382,16 @@ def _events_from_pt_labels(tonic, phasic, any_labels, stages):
                 j = i
                 while j + 1 < T and arr[j + 1] > 0.5:
                     j += 1
-                events.append({"epoch_start": i, "epoch_end": j + 1, "type": etype})
+                for split_start, split_end in _split_review_run(
+                    i, j + 1, label_metadata=label_metadata
+                ):
+                    events.append(
+                        {
+                            "epoch_start": split_start,
+                            "epoch_end": split_end,
+                            "type": etype,
+                        }
+                    )
                 i = j + 1
             else:
                 i += 1
@@ -400,7 +438,13 @@ def _prepare_review(exam_name):
     label_metadata.setdefault("label_source", label_source)
 
     emg_raw = signals[:, 4, :].astype(np.float32)  # EMG mento (indice 4), sem z-score
-    events = _events_from_pt_labels(tonic, phasic, any_labels, stages)
+    events = _events_from_pt_labels(
+        tonic,
+        phasic,
+        any_labels,
+        stages,
+        label_metadata=label_metadata,
+    )
     cov_arrs = {"tonic": tonic_cov, "phasic": phasic_cov, "any": any_cov}
     for ev in events:
         e0, e1 = ev["epoch_start"], ev["epoch_end"]

@@ -68,6 +68,24 @@ PHASIC_LO_S = 0.1
 PHASIC_HI_S = 5.0
 PHASIC_MIN_MINI_FRACTION = 0.5   # >= 5 de 10 mini-epocas com burst fasico
 
+# Piso de duracao para o criterio "any". O texto da AASM (2023a) define
+# "any chin EMG activity" SEM piso de duracao ("without regard to the
+# duration of the activity"), mas isso, aplicado literalmente a um limiar
+# simples de amplitude sobre o envelope RMS, faz "any" herdar 100% da
+# sensibilidade do detector a ruido de linha de base: em dados reais,
+# 50-66% dos segmentos brutos que cruzam o limiar de amplitude duram
+# menos que PHASIC_LO_S (alguns de apenas 1 amostra = 10ms) -- oscilacao
+# do envelope no ruido de fundo, nao atividade muscular visivel. Sem
+# piso, isso faz "any" marcar como positivo qualquer trecho onde o
+# tracado simplesmente sobe um pouco, sem corresponder a um evento real.
+# Usamos o mesmo piso ja validado para o burst fasico (PHASIC_LO_S=0.1s)
+# como corte de plausibilidade minima -- nao para reinterpretar o texto
+# da AASM (que continua sem limite SUPERIOR aqui: um segmento de 5-15s,
+# por exemplo, ainda conta como "any" mesmo nao contando isoladamente
+# nem para tonico nem para fasico), apenas para excluir cruzamentos de
+# limiar mais curtos do que a resolucao temporal minima de um burst real.
+ANY_MIN_SEG_S = PHASIC_LO_S      # 0.1s -- piso de plausibilidade para "any"
+
 
 def rms_envelope(x: np.ndarray, win_sec: float = 0.1, fs: int = FS) -> np.ndarray:
     """Envelope RMS de janela deslizante (mesmo comprimento da entrada).
@@ -183,6 +201,7 @@ def classify_macro_epoch(
     phasic_lo_s: float = PHASIC_LO_S,
     phasic_hi_s: float = PHASIC_HI_S,
     phasic_min_mini_fraction: float = PHASIC_MIN_MINI_FRACTION,
+    any_min_seg_s: float = ANY_MIN_SEG_S,
 ) -> dict:
     """Aplica os 3 criterios da AASM a UMA epoca de 30s (estagio R) ja
     isolada. `env_uv` deve ter exatamente mini_per_macro*epoch_sec*fs
@@ -218,9 +237,17 @@ def classify_macro_epoch(
     n_phasic_mini = int(phasic_mini.sum())
     phasic = n_phasic_mini >= round(phasic_min_mini_fraction * mini_per_macro)
 
-    # --- any: qualquer atividade >= limiar, por mini-epoca (superset) ---
+    # --- any: qualquer atividade >= limiar, por mini-epoca (superset de
+    # tonic/phasic; nao ha piso SUPERIOR de duracao -- um segmento longo
+    # que ja disparou tonic tambem conta para any). Piso INFERIOR de
+    # any_min_seg_s exclui cruzamentos de limiar mais curtos que a
+    # resolucao minima de um burst real (ruido de envelope), que o texto
+    # da AASM nao antecipa ao dizer "sem considerar a duracao" -- ver
+    # ANY_MIN_SEG_S acima.
     any_mini = np.zeros(mini_per_macro, dtype=bool)
-    for s, e in segs:
+    for (s, e), dur_s in zip(segs, durations_s):
+        if dur_s < any_min_seg_s:
+            continue
         m0 = s // n_mini_samples
         m1 = (e - 1) // n_mini_samples
         for m in range(max(0, m0), min(mini_per_macro - 1, m1) + 1):

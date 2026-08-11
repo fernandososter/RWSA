@@ -61,3 +61,45 @@ def test_prepare_review_reads_label_metadata_and_events(tmp_path):
     assert st["events"][0]["mean_coverage"] == pytest.approx(1.0)
     assert st["events"][1]["mean_coverage"] == pytest.approx(0.75)
     assert st["events"][2]["mean_coverage"] == pytest.approx(0.5)
+
+
+def test_prepare_review_splits_aasm_runs_by_macro_epoch(tmp_path):
+    app = load_view_app_module()
+    app._REVISAO_CACHE.clear()
+    app.CFG["data_dir"] = tmp_path
+    app.CFG["revisao_out_dir"] = tmp_path / "revisao"
+
+    exam_path = tmp_path / "exam_aasm.pt"
+    tonic = torch.zeros(25, dtype=torch.float32)
+    phasic = torch.zeros(25, dtype=torch.float32)
+    any_labels = torch.zeros(25, dtype=torch.float32)
+    phasic[0:25] = 1.0
+    any_labels[0:25] = 1.0
+
+    torch.save(
+        {
+            "signals": torch.zeros((25, 5, 300), dtype=torch.float32),
+            "sleep_stages": torch.full((25,), 4, dtype=torch.int64),
+            "tonic_labels": tonic,
+            "phasic_labels": phasic,
+            "any_labels": any_labels,
+            "tonic_cov": tonic.clone(),
+            "phasic_cov": phasic.clone(),
+            "any_cov": any_labels.clone(),
+            "label_source": "aasm_rule_v1",
+            "label_metadata": {
+                "rswa_source": "aasm",
+                "label_source": "aasm_rule_v1",
+            },
+        },
+        exam_path,
+    )
+
+    st = app._prepare_review("exam_aasm")
+
+    phasic_events = [ev for ev in st["events"] if ev["type"] == "phasic"]
+    any_events = [ev for ev in st["events"] if ev["type"] == "any"]
+
+    assert [ev["duration_s"] for ev in phasic_events] == [30.0, 30.0, 15.0]
+    assert [ev["onset_s"] for ev in phasic_events] == [0.0, 30.0, 60.0]
+    assert [ev["duration_s"] for ev in any_events] == [30.0, 30.0, 15.0]

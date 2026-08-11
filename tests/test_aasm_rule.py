@@ -2,8 +2,10 @@
 Testes deterministicos dos 3 criterios da regra AASM (2023a) em
 src/sleep_rswa/preprocessing/aasm_rule.py: tonico (soma de segmentos >5s
 cobrindo >=50% da epoca de 30s), fasico (>=5 das 10 mini-epocas de 3s com
-burst 0.1-5.0s) e any (superset -- qualquer atividade acima do limiar,
-independente de duracao).
+burst 0.1-5.0s) e any (superset de tonic/phasic -- qualquer atividade
+acima do limiar, exceto cruzamentos mais curtos que o piso de plausibilidade
+ANY_MIN_SEG_S=0.1s, que existem para filtrar ruido de envelope RMS e nao
+correspondem a burst muscular real; ver aasm_rule.ANY_MIN_SEG_S).
 
 Todos os casos usam amplitude e duracao construidas a mao (sem ruido) para
 que o resultado esperado seja exato e nao dependa de nenhum ajuste de
@@ -145,6 +147,47 @@ class TestAny:
         _put_segment(env, start_s=0.0, dur_s=10.0, amplitude_uv=1.5 * BASELINE_UV)  # < 2x baseline
         result = ar.classify_macro_epoch(env, THRESHOLD_UV)
         assert not result["any_mini"].any()
+
+    def test_noise_segment_shorter_than_floor_does_not_trigger_any(self):
+        # Segmento de 20ms (< ANY_MIN_SEG_S=0.1s): cruzamento de limiar por
+        # ruido de envelope, nao um burst real -- nao deve marcar any_mini.
+        env = _flat_epoch()
+        _put_segment(env, start_s=1.5, dur_s=0.02, amplitude_uv=30.0)
+        result = ar.classify_macro_epoch(env, THRESHOLD_UV)
+        assert not result["any_mini"].any()
+        assert result["tonic"] is False
+        assert result["phasic"] is False
+
+    def test_segment_exactly_at_any_floor_triggers_any(self):
+        # Segmento de exatamente ANY_MIN_SEG_S=0.1s: no piso, deve contar.
+        env = _flat_epoch()
+        _put_segment(env, start_s=1.5, dur_s=ar.ANY_MIN_SEG_S, amplitude_uv=30.0)
+        result = ar.classify_macro_epoch(env, THRESHOLD_UV)
+        assert result["any_mini"][0].item() is True or bool(result["any_mini"][0])
+        assert result["tonic"] is False
+        assert result["phasic"] is False
+
+    def test_multiple_subfloor_noise_blips_never_trigger_any(self):
+        # Varios cruzamentos de limiar de 10ms espalhados pela epoca inteira
+        # (mesmo padrao de ruido de envelope observado em dados reais) --
+        # nenhum isoladamente atinge o piso, entao any_mini deve ficar
+        # todo zero, mesmo com 10 blips distintos.
+        env = _flat_epoch()
+        for k in range(10):
+            _put_segment(env, start_s=2.0 + 3.0 * k, dur_s=0.01, amplitude_uv=30.0)
+        result = ar.classify_macro_epoch(env, THRESHOLD_UV)
+        assert not result["any_mini"].any()
+
+    def test_long_segment_above_floor_still_triggers_any_even_when_also_tonic(self):
+        # Segmento longo (16s, tambem dispara tonic) deve continuar
+        # contando para any -- o piso de duracao NAO deve, por engano,
+        # introduzir um teto ou exclusividade entre any e tonic/phasic
+        # (any continua superset; ver test_any_is_superset_of_tonic_epoch_after_rasterization).
+        env = _flat_epoch()
+        _put_segment(env, start_s=0.0, dur_s=16.0, amplitude_uv=30.0)
+        result = ar.classify_macro_epoch(env, THRESHOLD_UV)
+        assert result["tonic"] is True
+        assert result["any_mini"][:5].all()  # 16s cobre mini-epocas 0-4 (0-15s) e parte da 5
 
     def test_any_is_superset_of_tonic_epoch_after_rasterization(self):
         # No nivel de exame completo (apply_aasm_rule), qualquer epoca R
