@@ -255,6 +255,7 @@ def evaluate_joint(
     model.eval()
     stage_losses: list[float] = []
     rswa_losses: list[float] = []
+    rswa_head_losses: dict[str, list[float]] = {h: [] for h in _HEADS}
     stage_targets_all: list[torch.Tensor] = []
     stage_preds_all: list[torch.Tensor] = []
     targets_all: dict[str, list[torch.Tensor]] = {h: [] for h in _HEADS}
@@ -285,10 +286,12 @@ def evaluate_joint(
                 stage_preds_all.append(stage_preds[stage_valid].cpu())
 
             if rswa_valid.any():
-                rswa_loss, _ = rswa_criterion(
+                rswa_loss, per_head = rswa_criterion(
                     outputs, tonic_targets, phasic_targets, any_targets, rswa_valid
                 )
                 rswa_losses.append(float(rswa_loss.cpu()))
+                for h in _HEADS:
+                    rswa_head_losses[h].append(float(per_head[f"{h}_loss"].cpu()))
                 head_targets = {"tonic": tonic_targets, "phasic": phasic_targets, "any": any_targets}
                 for h in _HEADS:
                     preds = (torch.sigmoid(outputs[f"{h}_logits"]) >= thr[h]).long()
@@ -319,6 +322,7 @@ def evaluate_joint(
         metrics.update({f"rswa_{k}": float(v) for k, v in rswa.items()})
         metrics["rswa_loss"] = _safe_mean(rswa_losses)
         for h in _HEADS:
+            metrics[f"rswa_{h}_loss"] = _safe_mean(rswa_head_losses[h])
             metrics[f"{h}_target_distribution"] = _binary_distribution(targets_np[h])
             metrics[f"{h}_prediction_distribution"] = _binary_distribution(preds_np[h])
     return metrics

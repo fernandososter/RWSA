@@ -358,6 +358,7 @@ def main() -> None:
                 system.train()
                 stage_loss_sum = 0.0
                 rswa_loss_sum = 0.0
+                rswa_head_loss_sums = {"tonic": 0.0, "phasic": 0.0, "any": 0.0}
                 stage_batches = 0
                 rswa_batches = 0
                 tr_stage_targets: list[torch.Tensor] = []
@@ -401,10 +402,14 @@ def main() -> None:
                         stage_loss = None
 
                     if rswa_valid.any():
-                        rswa_loss, _ = rswa_loss_fn(
+                        rswa_loss, per_head = rswa_loss_fn(
                             outputs, tonic_targets, phasic_targets, any_targets, rswa_valid
                         )
                         rswa_loss_sum += float(rswa_loss.detach().cpu())
+                        for head in ("tonic", "phasic", "any"):
+                            rswa_head_loss_sums[head] += float(
+                                per_head[f"{head}_loss"].detach().cpu()
+                            )
                         rswa_batches += 1
                         move_targets = (
                             (tonic_targets > 0.5) | (phasic_targets > 0.5) | (any_targets > 0.5)
@@ -464,6 +469,9 @@ def main() -> None:
                     "rswa_learning_rate": rswa_optimizer.param_groups[0]["lr"],
                     "train_staging_loss": stage_loss_sum / max(stage_batches, 1),
                     "train_rswa_loss": rswa_loss_sum / max(rswa_batches, 1),
+                    "train_rswa_tonic_loss": rswa_head_loss_sums["tonic"] / max(rswa_batches, 1),
+                    "train_rswa_phasic_loss": rswa_head_loss_sums["phasic"] / max(rswa_batches, 1),
+                    "train_rswa_any_loss": rswa_head_loss_sums["any"] / max(rswa_batches, 1),
                     **{f"val_{key}": value for key, value in val_metrics.items()
                        if isinstance(value, (int, float))},
                 }
@@ -473,11 +481,19 @@ def main() -> None:
                     f"fold={fold} ep={epoch:03d} train={train_time:.1f}s val={val_time:.1f}s "
                     f"{GREEN}"
                     f"train_stg_loss={row['train_staging_loss']:.4f} "
-                    f"train_rswa_loss={row['train_rswa_loss']:.4f}"
+                    f"train_rswa_loss={row['train_rswa_loss']:.4f} "
+                    f"train_rswa_head_loss(t/p/a)="
+                    f"{row['train_rswa_tonic_loss']:.4f}/"
+                    f"{row['train_rswa_phasic_loss']:.4f}/"
+                    f"{row['train_rswa_any_loss']:.4f}"
                     f"{RESET} | "
                     f"{YELLOW}"
                     f"val_stg_f1={val_metrics.get('staging_f1_macro', float('nan')):.4f} "
                     f"val_stg_kappa={val_metrics.get('staging_kappa', float('nan')):.4f} "
+                    f"val_rswa_head_loss(t/p/a)="
+                    f"{val_metrics.get('rswa_tonic_loss', float('nan')):.4f}/"
+                    f"{val_metrics.get('rswa_phasic_loss', float('nan')):.4f}/"
+                    f"{val_metrics.get('rswa_any_loss', float('nan')):.4f} "
                     f"val_f1(t/p/a)={val_metrics.get('rswa_tonic_f1', float('nan')):.3f}/"
                     f"{val_metrics.get('rswa_phasic_f1', float('nan')):.3f}/"
                     f"{val_metrics.get('rswa_any_f1', float('nan')):.3f} "

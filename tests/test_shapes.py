@@ -62,12 +62,14 @@ def test_joint_system_default_enables_stage_conditioning():
 
 def test_build_movement_model_variants_match_multihead_contract():
     cfg=ModelConfig(rswa_stage_conditioning=True)
-    model=build_movement_model("cnn",config=cfg,stage_conditioning=True).eval()
-    out=model(
-        torch.randn(1,2,1,300),
-        torch.ones(1,2,dtype=torch.bool),
-        stage_probs=torch.softmax(torch.randn(1,2,5),dim=-1),
-    )
-    assert out["tonic_logits"].shape==(1,2)
-    assert out["phasic_logits"].shape==(1,2)
-    assert out["any_logits"].shape==(1,2)
+    for name in ("cnn","cnn_lstm","cnn_bilstm"):
+        model=build_movement_model(name,config=cfg,stage_conditioning=True).eval()
+        out=model(
+            torch.randn(1,2,1,300),
+            torch.ones(1,2,dtype=torch.bool),
+            stage_probs=torch.softmax(torch.randn(1,2,5),dim=-1),
+        )
+        assert out["tonic_logits"].shape==(1,2)
+        assert out["phasic_logits"].shape==(1,2)
+        assert out["any_logits"].shape==(1,2)
+        assert model.use_stage_conditioning is True

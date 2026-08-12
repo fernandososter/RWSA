@@ -8,7 +8,8 @@ import torch
 from torch.utils.data import DataLoader
 
 from sleep_rswa import (
-    RSWADetectionNet,
+    available_movement_models,
+    build_movement_model,
     SleepAnalysisDataset,
     SleepStagingNet,
     SleepStagingRSWASystem,
@@ -30,6 +31,12 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Avalia checkpoints de staging, RSWA ou ambos.")
     parser.add_argument("--data-dir", type=Path, required=True)
     parser.add_argument("--task", choices=("staging", "rswa", "joint"), required=True)
+    parser.add_argument(
+        "--rswa-model",
+        choices=available_movement_models(),
+        default="cnn_bimamba",
+        help="Arquitetura do ramo RSWA para task=rswa ou task=joint.",
+    )
     parser.add_argument("--checkpoint", type=Path, help="Checkpoint para staging ou RSWA.")
     parser.add_argument("--staging-checkpoint", type=Path)
     parser.add_argument("--rswa-checkpoint", type=Path)
@@ -80,7 +87,7 @@ def main() -> None:
     elif args.task == "rswa":
         if args.checkpoint is None:
             raise ValueError("Informe --checkpoint para task=rswa.")
-        model = RSWADetectionNet(stage_conditioning=False).to(device)
+        model = build_movement_model(args.rswa_model, stage_conditioning=False).to(device)
         load_checkpoint(args.checkpoint, model, device)
         metrics = run_rswa_epoch(
             model, loader, RSWALoss(), device,
@@ -90,7 +97,7 @@ def main() -> None:
         if args.staging_checkpoint is None or args.rswa_checkpoint is None:
             raise ValueError("Informe --staging-checkpoint e --rswa-checkpoint para task=joint.")
         staging_model = SleepStagingNet().to(device)
-        rswa_model = RSWADetectionNet(stage_conditioning=True).to(device)
+        rswa_model = build_movement_model(args.rswa_model, stage_conditioning=True).to(device)
         load_checkpoint(args.staging_checkpoint, staging_model, device)
         load_checkpoint(args.rswa_checkpoint, rswa_model, device)
         model = SleepStagingRSWASystem(staging_model, rswa_model).to(device)

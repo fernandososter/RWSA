@@ -71,7 +71,13 @@ PROJ = HERE.parent
 if str(PROJ) not in sys.path:
     sys.path.insert(0, str(PROJ))
 
-from sleep_rswa import ModelConfig, RSWADetectionNet, SleepAnalysisDataset, collate_sleep_analysis_exams  # noqa: E402
+from sleep_rswa import (  # noqa: E402
+    ModelConfig,
+    available_movement_models,
+    build_movement_model,
+    SleepAnalysisDataset,
+    collate_sleep_analysis_exams,
+)
 from sleep_rswa.data import load_subject_directory  # noqa: E402
 from sleep_rswa.training import load_checkpoint, resolve_device  # noqa: E402
 
@@ -83,6 +89,12 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--checkpoint", action="append", required=True, dest="checkpoints",
                      help="Caminho para um checkpoint (best.pt). Repita para ensemble por média de probabilidade.")
     ap.add_argument("--data-dir", type=Path, required=True, help="Diretório com os .pt dos sujeitos a avaliar.")
+    ap.add_argument(
+        "--model",
+        choices=available_movement_models(),
+        default="cnn_bimamba",
+        help="Arquitetura do ramo RSWA standalone usada no checkpoint.",
+    )
     ap.add_argument("--min-confidence", type=float, default=0.0)
     ap.add_argument("--all-stages", action="store_true", help="Avalia todas as fases (não só REM).")
     ap.add_argument("--threshold", type=float, default=0.5)
@@ -261,14 +273,18 @@ def main() -> None:
     print(f"Carregando {len(args.checkpoints)} checkpoint(s) em {device} (d_model={model_cfg.d_model})...")
     models = []
     for ckpt_path in args.checkpoints:
-        model = RSWADetectionNet(config=model_cfg, stage_conditioning=False).to(device)
+        model = build_movement_model(
+            args.model,
+            config=model_cfg,
+            stage_conditioning=False,
+        ).to(device)
         try:
             payload = load_checkpoint(ckpt_path, model, device)
         except RuntimeError as e:
             raise RuntimeError(
                 f"Falha ao carregar {ckpt_path}: mismatch de arquitetura. Se este checkpoint foi treinado "
                 f"com D_MODEL diferente do default (256), passe --d-model <valor> (confira em "
-                f"runs/.../run.json ou no log de treino). Se o checkpoint veio do "
+                f"runs/.../run.json ou no log de treino). Confirme tambem --model={args.model}. Se o checkpoint veio do "
                 f"train_joint (ramo RSWA condicionado por p_stage), use o fluxo joint "
                 f"em vez desta avaliacao standalone. Erro original: {e}"
             ) from e

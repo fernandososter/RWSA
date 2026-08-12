@@ -11,7 +11,12 @@ from sklearn.metrics import cohen_kappa_score, f1_score
 import torch
 from torch.utils.data import DataLoader
 
-from sleep_rswa import RSWADetectionNet, SleepAnalysisDataset, collate_sleep_analysis_exams
+from sleep_rswa import (
+    available_movement_models,
+    build_movement_model,
+    SleepAnalysisDataset,
+    collate_sleep_analysis_exams,
+)
 from sleep_rswa.data import load_subject_directory
 from sleep_rswa.utils import (
     format_stage_distribution,
@@ -46,6 +51,12 @@ RESET  = "\033[0m"
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Treina RSWA com StratifiedGroupKFold.")
     parser.add_argument("--data-dir", type=Path, required=True)
+    parser.add_argument(
+        "--model",
+        choices=available_movement_models(),
+        default="cnn_bimamba",
+        help="Arquitetura do ramo RSWA standalone.",
+    )
     parser.add_argument("--n-splits", type=int, default=5)
     parser.add_argument("--fold", type=int, default=None, help="Executa apenas este fold; padrão: todos.")
     parser.add_argument(
@@ -158,6 +169,7 @@ def main() -> None:
         logger.info(
             f"Sujeitos: total={len(all_subjects)} | CV={len(subjects)} | teste={len(test_subjects)}"
         )
+        logger.info(f"Modelo RSWA standalone: {args.model}")
         if test_subjects:
             logger.log_subject_split(subjects, test_subjects, filename="test_split.json")
             test_dataset = make_loader(test_subjects, args, False, device).dataset
@@ -227,7 +239,7 @@ def main() -> None:
                 loader=val_loader,
             )
 
-            model = RSWADetectionNet(stage_conditioning=False).to(device)
+            model = build_movement_model(args.model, stage_conditioning=False).to(device)
             tonic_weight = torch.tensor(args.tonic_pos_weight, device=device) if args.tonic_pos_weight else None
             phasic_weight = torch.tensor(args.phasic_pos_weight, device=device) if args.phasic_pos_weight else None
             any_weight = torch.tensor(args.any_pos_weight, device=device) if args.any_pos_weight else None
@@ -305,6 +317,7 @@ def main() -> None:
                             "fold": fold,
                             "monitor": args.monitor,
                             "monitor_value": current_metric,
+                            "model_name": args.model,
                         },
                     )
 
@@ -380,7 +393,8 @@ def main() -> None:
             test_loader = make_loader(test_subjects, args, False, device)
             test_summary = evaluate_movement_test_set(
                 test_loader=test_loader, fold_checkpoints=fold_checkpoints,
-                build_model=lambda: RSWADetectionNet(stage_conditioning=False), device=device, logger=logger,
+                build_model=lambda: build_movement_model(args.model, stage_conditioning=False),
+                device=device, logger=logger,
                 figures_dir=logger.run_dir / "test", amp=not args.no_amp, threshold=thresholds,
             )
 
