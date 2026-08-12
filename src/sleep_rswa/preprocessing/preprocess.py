@@ -72,6 +72,8 @@ from .config import (
     EPOCH_SEC,
     N_CHANNELS,
     NOTCH_FILTER,
+    ECG_GATE_DEFAULT,
+    ECG_GATE_WINDOW_S,
     PathConfig,
     PSGConfig,
 )
@@ -86,6 +88,7 @@ from .auto_rswa import DEFAULT_AUTO_LABEL_MODEL, auto_label_rswa_from_signals
 from .rswa_labels import rasterize_rswa_annotations
 from .rem_baseline import compute_rem_baseline
 from .aasm_rule import label_exam_with_aasm_rule, AASM_CALIBRATION_WARNING
+from .ecg_gating import apply_ecg_gating_to_raw
 
 
 def preprocess_exam(
@@ -108,6 +111,8 @@ def preprocess_exam(
     phasic_min_coverage: float = 0.0,
     any_min_coverage: float = 0.0,
     aasm_atonia_pct: float | None = None,
+    ecg_gate: bool = ECG_GATE_DEFAULT,
+    ecg_gate_window_s: float = ECG_GATE_WINDOW_S,
 ) -> Optional[Dict]:
     """
     Pre-processa um unico exame EDF. Retorna dict (ver formato no topo do modulo)
@@ -181,8 +186,18 @@ def preprocess_exam(
         return None
 
     # Forca a ordem dos canais presentes para corresponder a CHANNEL_DEFS.
+    # Se ecg_gate=True, inclui tambem o canal de ECG (se presente no EDF) no
+    # pick -- ele e usado apenas para deteccao de picos-R (etapa 3.5) e
+    # removido antes da matriz final de sinais, nunca chega ao .pt.
     present_chs_ordered = [ch for ch in matched_chs if ch is not None]
-    raw.pick(present_chs_ordered)
+    ecg_ch_raw_name = None
+    if ecg_gate:
+        from .channels import find_channel
+        ecg_ch_raw_name = find_channel(raw.ch_names, PSGConfig.ECG_CANDIDATES)
+    pick_list = present_chs_ordered + (
+        [ecg_ch_raw_name] if ecg_ch_raw_name is not None else []
+    )
+    raw.pick(pick_list)
     if verbose:
         print(f"  [DEBUG] Apos pick, ordem: {raw.ch_names}")
 
@@ -220,6 +235,37 @@ def preprocess_exam(
         int((onset - annot_start) // 30.0): stage
         for onset, stage in raw_stage_map.items()
     }
+
+    # ── 3.5. Gating de artefato cardiaco no EMG (opcional, via ECG) ───────
+    # Deve rodar ANTES do filtro passa-banda de EMG (etapa 4) para que o
+    # sinal gated (e nao o original com espiculas de QRS) seja o que entra
+    # no filtro/reamostragem/epocamento. Deteccao de picos-R usa o ECG
+    # ainda bruto (sem filtro), o que preserva melhor a morfologia do QRS.
+    # Ver ecg_gating.py e docs/relatorio_impacto_regra_aasm.md Secao 12.
+    emg_defn_idx = next(
+        (i for i, d in enumerate(PSGConfig.CHANNEL_DEFS) if d["name"] == "emg"), None
+    )
+    emg_ch_name = matched_chs[emg_defn_idx] if emg_defn_idx is not None else None
+    ecg_gate_diag = {
+        "ecg_gate_enabled": bool(ecg_gate),
+        "ecg_gate_applied": False,
+        "ecg_channel_found": None,
+        "n_r_peaks": 0,
+        "n_gated_samples": 0,
+        "frac_gated": 0.0,
+        "window_s": float(ecg_gate_window_s),
+        "reason_skipped": "ecg_gate_disabled" if not ecg_gate else None,
+    }
+    if ecg_gate:
+        ecg_gate_diag_result = apply_ecg_gating_to_raw(
+            raw,
+            emg_ch_name=emg_ch_name,
+            ecg_candidates=PSGConfig.ECG_CANDIDATES,
+            window_s=ecg_gate_window_s,
+            verbose=verbose,
+        )
+        ecg_gate_diag.update(ecg_gate_diag_result)
+        ecg_gate_diag["ecg_gate_enabled"] = True
 
     # ── 4. Filtra cada canal presente (in-place) ──────────────────────────
     for defn, ch_name, present in zip(PSGConfig.CHANNEL_DEFS, matched_chs, ch_mask):
@@ -376,6 +422,7 @@ def preprocess_exam(
             "phasic_min_coverage": float(phasic_min_coverage),
             "any_min_coverage": float(any_min_coverage),
         },
+        "ecg_gate": ecg_gate_diag,
     }
     if rswa_source == "csv":
         label_metadata["csv_annotations_path"] = str(rswa_csv_path) if rswa_csv_path is not None else None

@@ -86,6 +86,25 @@ PHASIC_MIN_MINI_FRACTION = 0.5   # >= 5 de 10 mini-epocas com burst fasico
 # limiar mais curtos do que a resolucao temporal minima de um burst real.
 ANY_MIN_SEG_S = PHASIC_LO_S      # 0.1s -- piso de plausibilidade para "any"
 
+# Tolerancia de gap para fusao de segmentos antes da classificacao tonic/
+# phasic/any. O corte de limiar SIMPLES (sem histerese) usado em
+# _segments_above_threshold fragmenta atividade continua real em muitos
+# segmentos curtos sempre que o envelope RMS cruza o limiar por uma unica
+# amostra de ruido (tipicamente 10-160ms) mesmo durante elevacao sustentada
+# real -- confirmado em dados reais (rbd9: 52 segmentos de 10ms-3s, gaps
+# todos <=160ms, somando 34.2s de 36s de janela). Isso faz atividade que
+# deveria disparar TONICO (segmento continuo >5s) nunca acumular duracao
+# suficiente, e em vez disso vazar como muitas mini-epocas FASICAS
+# consecutivas -- um artefato de fragmentacao do detector, nao o padrao
+# fisiologico real. RBDtector (Sarkar/Manoli 2022 -- ferramenta open-source
+# que implementa a pontuacao visual SINBAR/AASM) documenta a mesma correcao:
+# um intervalo de silencio de ate 250ms nao termina o evento. Fundimos aqui
+# segmentos separados por gap <= MERGE_GAP_S ANTES de calcular duracoes para
+# os 3 criterios -- isso nao e uma reinterpretacao do texto da AASM (que nao
+# fala de fusao), e sim uma correcao de artefato de discretizacao do
+# detector de segmentos, na mesma categoria do piso ANY_MIN_SEG_S acima.
+MERGE_GAP_S = 0.25                # 250ms -- convencao RBDtector/SINBAR
+
 
 def rms_envelope(x: np.ndarray, win_sec: float = 0.1, fs: int = FS) -> np.ndarray:
     """Envelope RMS de janela deslizante (mesmo comprimento da entrada).
@@ -183,6 +202,30 @@ def _segments_above_threshold(env_uv: np.ndarray, threshold_uv: float) -> list[t
     return segs
 
 
+def _merge_close_segments(
+    segs: list[tuple[int, int]], gap_samples: int
+) -> list[tuple[int, int]]:
+    """Funde segmentos consecutivos separados por um gap <= gap_samples
+    (amostras abaixo do limiar) em um unico segmento continuo. Ver
+    MERGE_GAP_S acima para a justificativa (correcao de fragmentacao do
+    detector de limiar simples, convencao RBDtector/SINBAR de 250ms).
+
+    `segs` deve estar ordenado por inicio (garantido por
+    `_segments_above_threshold`). gap_samples <= 0 desativa a fusao
+    (retorna `segs` inalterado).
+    """
+    if gap_samples <= 0 or len(segs) <= 1:
+        return list(segs)
+    merged = [segs[0]]
+    for s, e in segs[1:]:
+        last_s, last_e = merged[-1]
+        if s - last_e <= gap_samples:
+            merged[-1] = (last_s, max(last_e, e))
+        else:
+            merged.append((s, e))
+    return merged
+
+
 def _macro_epoch_bounds(macro_idx: int, fs: int = FS,
                          macro_epoch_sec: float = MACRO_EPOCH_SEC) -> tuple[int, int]:
     n_samples = int(round(macro_epoch_sec * fs))
@@ -202,10 +245,15 @@ def classify_macro_epoch(
     phasic_hi_s: float = PHASIC_HI_S,
     phasic_min_mini_fraction: float = PHASIC_MIN_MINI_FRACTION,
     any_min_seg_s: float = ANY_MIN_SEG_S,
+    merge_gap_s: float = MERGE_GAP_S,
 ) -> dict:
     """Aplica os 3 criterios da AASM a UMA epoca de 30s (estagio R) ja
     isolada. `env_uv` deve ter exatamente mini_per_macro*epoch_sec*fs
     amostras (30s * 100Hz = 3000, por padrao).
+
+    `merge_gap_s`: segmentos acima do limiar separados por um gap
+    <= merge_gap_s sao fundidos em um so ANTES de calcular duracoes para
+    os 3 criterios (ver MERGE_GAP_S). Passe 0 para desativar a fusao.
 
     Retorna dict:
       tonic          : bool -- criterio tonico da epoca (aplica-se a toda a epoca)
@@ -214,7 +262,9 @@ def classify_macro_epoch(
       n_phasic_mini  : int  -- quantas das mini_per_macro mini-epocas tem burst fasico
       tonic_coverage_s : float -- soma das duracoes dos segmentos >5s usados no criterio tonico
     """
-    segs = _segments_above_threshold(env_uv, threshold_uv)
+    raw_segs = _segments_above_threshold(env_uv, threshold_uv)
+    gap_samples = int(round(merge_gap_s * fs))
+    segs = _merge_close_segments(raw_segs, gap_samples)
     durations_s = [(e - s) / fs for s, e in segs]
 
     # --- tonico: soma dos segmentos > tonic_segment_min_s, cobertura >= 50% da epoca ---
@@ -275,10 +325,13 @@ def apply_aasm_rule(
     epoch_sec: float = EPOCH_SEC,
     mini_per_macro: int = MINI_PER_MACRO,
     volts_to_microvolts: float = 1e6,
+    merge_gap_s: float = MERGE_GAP_S,
 ) -> dict[str, np.ndarray | float | str]:
     """Aplica a regra AASM completa a um exame inteiro, produzindo rotulos
     por MINI-EPOCA de 3s no mesmo schema do .pt (tonic_labels/phasic_labels/
     any_labels), compativel com o consumido pelo restante do pipeline.
+
+    `merge_gap_s`: ver `classify_macro_epoch` -- passado por epoca.
 
     Pressupoe que T e multiplo de mini_per_macro e que sleep_stages e
     constante dentro de cada bloco de mini_per_macro mini-epocas (garantido
@@ -339,6 +392,7 @@ def apply_aasm_rule(
 
         result = classify_macro_epoch(
             env_uv, threshold_uv, fs=fs, mini_per_macro=mini_per_macro, epoch_sec=epoch_sec,
+            merge_gap_s=merge_gap_s,
         )
         any_block = result["any_mini"].copy()
         if result["tonic"]:
@@ -395,6 +449,7 @@ def label_exam_with_aasm_rule(
     epoch_sec: float = EPOCH_SEC,
     mini_per_macro: int = MINI_PER_MACRO,
     atonia_pct: float | None = None,
+    merge_gap_s: float = MERGE_GAP_S,
 ) -> dict[str, np.ndarray | float | int | str]:
     """Wrapper de `apply_aasm_rule` que devolve o MESMO schema de chaves
     produzido por `auto_label_rswa_from_signals` (auto_rswa.py) e por
@@ -440,7 +495,7 @@ def label_exam_with_aasm_rule(
         signals, sleep_stages, rem_baseline_uv, rem_baseline_n_epochs,
         emg_channel_index=emg_channel_index, rem_stage=rem_stage,
         min_amplitude_ratio=min_amplitude_ratio, fs=fs, epoch_sec=epoch_sec,
-        mini_per_macro=mini_per_macro,
+        mini_per_macro=mini_per_macro, merge_gap_s=merge_gap_s,
     )
 
     tonic_labels = result["tonic_labels"]

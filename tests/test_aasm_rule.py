@@ -263,3 +263,115 @@ class TestApplyAasmRuleIntegration:
                 signals, stages,
                 rem_baseline_uv=BASELINE_UV, rem_baseline_n_epochs=1,
             )
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# (iv) FUSAO DE GAP <= MERGE_GAP_S (250ms, convencao RBDtector/SINBAR):
+# segmentos separados por um gap curto abaixo do limiar devem ser fundidos
+# ANTES de calcular duracoes para tonic/phasic/any -- caso contrario,
+# atividade continua real fragmentada por ruido de amostra unica nunca
+# acumula duracao suficiente para disparar tonico. Ver MERGE_GAP_S e
+# _merge_close_segments em aasm_rule.py.
+# ─────────────────────────────────────────────────────────────────────────
+
+class TestGapMerge:
+    def test_merge_close_segments_unit_merges_short_gap(self):
+        # dois segmentos separados por um gap de 5 amostras (<=10) devem
+        # ser fundidos num unico segmento continuo.
+        segs = [(0, 100), (105, 200)]
+        merged = ar._merge_close_segments(segs, gap_samples=10)
+        assert merged == [(0, 200)]
+
+    def test_merge_close_segments_unit_keeps_far_segments_separate(self):
+        segs = [(0, 100), (150, 200)]  # gap=50 > 10
+        merged = ar._merge_close_segments(segs, gap_samples=10)
+        assert merged == [(0, 100), (150, 200)]
+
+    def test_merge_close_segments_unit_gap_zero_disables_merge(self):
+        segs = [(0, 100), (100, 200)]  # gap=0 (adjacentes)
+        # gap_samples=0 desativa a fusao completamente (retorna inalterado),
+        # mesmo para segmentos adjacentes.
+        merged = ar._merge_close_segments(segs, gap_samples=0)
+        assert merged == segs
+
+    def test_two_segments_separated_by_short_gap_merge_and_trigger_tonic(self):
+        # dois segmentos de 8s cada, separados por um gap de 0.2s (<=0.25s
+        # de MERGE_GAP_S), devem ser fundidos num unico segmento de
+        # 8+0.2+8=16.2s > 5s -- disparando tonico sozinho (sem a fusao,
+        # cada segmento isolado de 8s > 5s tambem somaria 16s>=15s, entao
+        # usamos segmentos de exatamente 5s cada para so disparar tonico
+        # SE fundidos).
+        env = _flat_epoch()
+        _put_segment(env, start_s=0.0, dur_s=5.0, amplitude_uv=30.0)   # segmento 1: 5.0s (nao conta isolado, precisa ser >5s)
+        _put_segment(env, start_s=5.2, dur_s=10.0, amplitude_uv=30.0)  # gap de 0.2s; segmento 2: 10.0s (>5s, conta isolado)
+        # Fundido: 0.0-15.2s = 15.2s continuo (>5s) -> tonic=True, coverage=15.2s
+        # Nao fundido: so o segmento 2 (10.0s) conta -> coverage=10.0s < 15s -> tonic=False
+        result_merged = ar.classify_macro_epoch(env, THRESHOLD_UV, merge_gap_s=0.25)
+        result_unmerged = ar.classify_macro_epoch(env, THRESHOLD_UV, merge_gap_s=0.0)
+        assert result_merged["tonic"] is True
+        assert result_merged["tonic_coverage_s"] == pytest.approx(15.2, abs=1e-6)
+        assert result_unmerged["tonic"] is False
+        assert result_unmerged["tonic_coverage_s"] == pytest.approx(10.0, abs=1e-6)
+
+    def test_gap_longer_than_merge_tolerance_is_not_merged(self):
+        # mesmo cenario, mas gap de 0.3s (>0.25s) -- nao deve fundir.
+        env = _flat_epoch()
+        _put_segment(env, start_s=0.0, dur_s=5.0, amplitude_uv=30.0)
+        _put_segment(env, start_s=5.3, dur_s=10.0, amplitude_uv=30.0)  # gap=0.3s > MERGE_GAP_S
+        result = ar.classify_macro_epoch(env, THRESHOLD_UV, merge_gap_s=0.25)
+        assert result["tonic"] is False
+        assert result["tonic_coverage_s"] == pytest.approx(10.0, abs=1e-6)
+
+    def test_fragmented_continuous_activity_merges_into_tonic_via_default(self):
+        # simula o padrao real observado (rbd9): um trecho continuamente
+        # elevado e fragmentado em muitos micro-segmentos por amostras
+        # isoladas de ruido caindo abaixo do limiar por <=250ms. Usa
+        # merge_gap_s=MERGE_GAP_S (default do modulo) explicitamente.
+        env = _flat_epoch()
+        # trecho de 20s (0-20s) com 20 blips de ruido de 50ms cada,
+        # espacados a cada 1s, caindo abaixo do limiar -- fragmenta o
+        # trecho em 20 segmentos curtos separados por gaps de 50ms (<250ms).
+        _put_segment(env, start_s=0.0, dur_s=20.0, amplitude_uv=30.0)
+        for k in range(1, 20):
+            _put_segment(env, start_s=float(k) - 0.05, dur_s=0.05, amplitude_uv=1.0)
+        raw_segs = ar._segments_above_threshold(env, THRESHOLD_UV)
+        assert len(raw_segs) > 5  # confirma que o trecho de fato fragmentou
+
+        result = ar.classify_macro_epoch(env, THRESHOLD_UV, merge_gap_s=ar.MERGE_GAP_S)
+        assert result["tonic"] is True
+        assert result["tonic_coverage_s"] == pytest.approx(20.0, abs=1e-3)
+
+        result_no_merge = ar.classify_macro_epoch(env, THRESHOLD_UV, merge_gap_s=0.0)
+        assert result_no_merge["tonic"] is False  # nenhum segmento fragmentado isolado passa de 5s
+
+    def test_merge_gap_propagates_through_apply_aasm_rule(self):
+        # confirma que o parametro merge_gap_s chega intacto de
+        # apply_aasm_rule/label_exam_with_aasm_rule at classify_macro_epoch
+        # (nao apenas na chamada direta usada nos testes acima).
+        n_mini = ar.MINI_PER_MACRO
+        signals = np.zeros((n_mini, 5, MINI_SAMPLES), dtype=np.float32)
+        stages = np.full(n_mini, ar.REM_STAGE, dtype=np.int64)
+
+        # 4.5s de atividade, gap de 0.2s, 10.5s de atividade -> so dispara
+        # tonico se merge_gap_s>=0.2 (default MERGE_GAP_S=0.25). Segmento 1
+        # fica deliberadamente abaixo de 5s (mesmo apos o alargamento de
+        # borda introduzido pela suavizacao de rms_envelope, ~0.01s aqui)
+        # para nao contar isoladamente pelo criterio tonico -- so a fusao
+        # com o segmento 2 produz um trecho continuo >5s cobrindo >=15s.
+        emg_flat = np.zeros(MACRO_SAMPLES, dtype=np.float64)
+        emg_flat[:] = 1e-6  # 1 uV baseline (abaixo do limiar em V)
+        _put_segment(emg_flat, start_s=0.0, dur_s=4.5, amplitude_uv=30e-6)
+        _put_segment(emg_flat, start_s=4.7, dur_s=10.5, amplitude_uv=30e-6)
+        for m in range(n_mini):
+            signals[m, 4, :] = emg_flat[m * MINI_SAMPLES:(m + 1) * MINI_SAMPLES]
+
+        result_merged = ar.apply_aasm_rule(
+            signals, stages, rem_baseline_uv=BASELINE_UV, rem_baseline_n_epochs=n_mini,
+            merge_gap_s=0.25,
+        )
+        result_unmerged = ar.apply_aasm_rule(
+            signals, stages, rem_baseline_uv=BASELINE_UV, rem_baseline_n_epochs=n_mini,
+            merge_gap_s=0.0,
+        )
+        assert result_merged["n_tonic_macro_epochs"] == 1
+        assert result_unmerged["n_tonic_macro_epochs"] == 0

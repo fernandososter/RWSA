@@ -16,6 +16,8 @@ dependencies = [
   "pyarrow>=16.0",
   "matplotlib>=3.8",
   "tqdm>=4.66",
+  "mne>=1.6",
+  "neurokit2>=0.2",
 ]
 
 [project.optional-dependencies]

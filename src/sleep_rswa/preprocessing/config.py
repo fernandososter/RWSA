@@ -102,5 +102,17 @@ class PSGConfig:
         },
     ]
 
+    # Canal de ECG (usado SOMENTE para gating de artefato cardiaco no EMG,
+    # nao entra na matriz de sinais salva no .pt -- ver ecg_gating.py e
+    # docs/relatorio_impacto_regra_aasm.md Secao 12).
+    ECG_CANDIDATES = [
+        "ECG1-ECG2", "ECG-ECG", "ECG1", "ECG2", "ECG", "EKG", "EKG1-EKG2",
+        "ECG I", "ECG II", "ECG-I", "ECG-II", "ECG L", "ECG R",
+    ]
+
 
 N_CHANNELS = len(PSGConfig.CHANNEL_DEFS)  # 5
+
+# Gating de artefato cardiaco (ECG) no EMG -- ver ecg_gating.py.
+ECG_GATE_WINDOW_S = 0.05        # semi-largura da janela de gating por pico-R (segundos)
+ECG_GATE_DEFAULT = True         # habilitado por default apos validacao quantitativa (Secao 12)

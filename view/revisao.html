@@ -595,9 +595,13 @@ function drawSignal(sig, ev, t0, t1) {
   const plotBottom = height - 28;
   const plotHeight = plotBottom - plotTop;
   const midY = plotTop + plotHeight / 2;
+  const remBaselineUv = Number(sig.rem_baseline_uv);
+  const remBaseline2xUv = Number(sig.rem_baseline_2x_uv);
   const maxAbs = Math.max(
     1e-9,
     ...columns.flatMap((col) => [Math.abs(Number(col.lo || 0)), Math.abs(Number(col.hi || 0)), Math.abs(Number(col.mean || 0))]),
+    Number.isFinite(remBaselineUv) ? Math.abs(remBaselineUv) : 0,
+    Number.isFinite(remBaseline2xUv) ? Math.abs(remBaseline2xUv) : 0,
   );
   const scaleY = (plotHeight / 2 - 10) / maxAbs;
 
@@ -606,6 +610,42 @@ function drawSignal(sig, ev, t0, t1) {
     nodes.push(svgEl("line", {x1: 0, y1: y, x2: width, y2: y, stroke: "#183041", "stroke-width": 1}));
   }
   nodes.push(svgEl("line", {x1: 0, y1: midY, x2: width, y2: midY, stroke: "#35566f", "stroke-width": 1}));
+
+  if (Number.isFinite(remBaseline2xUv) && remBaseline2xUv > 0) {
+    const yUp2x = midY - remBaseline2xUv * scaleY;
+    const yDown2x = midY + remBaseline2xUv * scaleY;
+    nodes.push(svgEl("line", {
+      x1: 0, y1: yUp2x, x2: width, y2: yUp2x,
+      stroke: "#ffd84d", "stroke-width": 1.4, "stroke-dasharray": "8 6", "stroke-opacity": 0.95,
+    }));
+    nodes.push(svgEl("line", {
+      x1: 0, y1: yDown2x, x2: width, y2: yDown2x,
+      stroke: "#ffd84d", "stroke-width": 1.4, "stroke-dasharray": "8 6", "stroke-opacity": 0.95,
+    }));
+    const upLabel = svgEl("text", {
+      x: width - 160, y: yUp2x - 6, fill: "#ffd84d", "font-size": 11, "font-family": "sans-serif",
+    });
+    upLabel.textContent = `+2x basal (${formatNumber(remBaseline2xUv, 2)} uV)`;
+    nodes.push(upLabel);
+    const downLabel = svgEl("text", {
+      x: width - 160, y: yDown2x + 16, fill: "#ffd84d", "font-size": 11, "font-family": "sans-serif",
+    });
+    downLabel.textContent = `-2x basal`;
+    nodes.push(downLabel);
+  }
+
+  if (Number.isFinite(remBaselineUv) && remBaselineUv > 0) {
+    const yBaseline = midY - remBaselineUv * scaleY;
+    nodes.push(svgEl("line", {
+      x1: 0, y1: yBaseline, x2: width, y2: yBaseline,
+      stroke: "#ff6b6b", "stroke-width": 1.3, "stroke-dasharray": "4 4", "stroke-opacity": 0.95,
+    }));
+    const baselineLabel = svgEl("text", {
+      x: width - 220, y: yBaseline - 6, fill: "#ff9d9d", "font-size": 11, "font-family": "sans-serif",
+    });
+    baselineLabel.textContent = `basal REM = ${formatNumber(remBaselineUv, 2)} uV`;
+    nodes.push(baselineLabel);
+  }
 
   const eventX = ((ev.onset_s - t0) / Math.max(1e-9, (t1 - t0))) * width;
   const eventW = (ev.duration_s / Math.max(1e-9, (t1 - t0))) * width;
@@ -664,7 +704,7 @@ function drawSignal(sig, ev, t0, t1) {
   rightText.textContent = `${formatNumber(t1, 1)}s`;
   nodes.push(rightText);
   const scaleText = svgEl("text", {x: width - 190, y: plotTop + 14, fill: "#8aa0b4", "font-size": 11, "font-family": "sans-serif"});
-  scaleText.textContent = "EMG normalizado por janela (backend)";
+  scaleText.textContent = "EMG em uV (centrado na mediana da janela)";
   nodes.push(scaleText);
   svg.replaceChildren(...nodes);
 }

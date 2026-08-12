@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Sequence
 
 from . import PathConfig, run_preprocessing, run_preprocessing_parallel
+from .config import ECG_GATE_DEFAULT, ECG_GATE_WINDOW_S
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -39,6 +40,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "de usar em producao)."
         ),
     )
+    parser.add_argument(
+        "--no-ecg-gate", dest="ecg_gate", action="store_false",
+        default=ECG_GATE_DEFAULT,
+        help=(
+            "Desativa o gating de artefato cardiaco no EMG via deteccao de "
+            "picos-R no canal de ECG (default: ativado -- ver ecg_gating.py "
+            "e docs/relatorio_impacto_regra_aasm.md Secao 12)."
+        ),
+    )
+    parser.add_argument(
+        "--ecg-gate-window-s", type=float, default=ECG_GATE_WINDOW_S,
+        help="Semi-largura (segundos) da janela de gating em torno de cada pico-R.",
+    )
     return parser
 
 
@@ -59,6 +73,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         "phasic_min_coverage": args.phasic_min_coverage,
         "any_min_coverage": args.any_min_coverage,
         "aasm_atonia_pct": args.aasm_atonia_pct,
+        "ecg_gate": args.ecg_gate,
+        "ecg_gate_window_s": args.ecg_gate_window_s,
     }
 
     if args.parallel:

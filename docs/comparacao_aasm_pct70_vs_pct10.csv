@@ -1,0 +1,16 @@
+exam,label,aasm_pct10_mini_pos,aasm_pct70_mini_pos,aasm_pct70_pct_macro_pos,kappa_aasm_pct70_vs_human
+rbd1,tonic,180,0,0.0,
+rbd1,phasic,1110,390,30.7,0.096
+rbd1,any,1270,543,83.5,
+rbd4,tonic,30,0,0.0,
+rbd4,phasic,2920,510,17.4,0.293
+rbd4,any,2930,905,75.1,
+rbd9,tonic,10,0,0.0,
+rbd9,phasic,2020,180,8.7,0.195
+rbd9,any,2031,382,54.4,
+ins2,tonic,0,0,0.0,
+ins2,phasic,2330,440,18.9,0.104
+ins2,any,2330,633,60.1,
+n1,tonic,40,0,0.0,
+n1,phasic,2020,560,23.4,0.21
+n1,any,2161,834,73.6,

@@ -298,27 +298,26 @@ def _quantile_1d(values, q):
     return float(np.quantile(arr, q))
 
 
-def _build_display_trace(samples, *, n_cols=320, clip=1.5):
-    """Normaliza um trecho 1D de EMG para exibicao e resume por colunas.
+def _build_display_trace(samples, *, n_cols=320, volts_to_microvolts=1e6):
+    """Resume um trecho 1D de EMG bruto em colunas para exibicao.
 
-    A normalizacao e apenas para visualizacao: centraliza na mediana da janela
-    e escala pelo percentil 98 do valor absoluto. O retorno fica em [-clip, clip]
-    com agregacao min/max/mean por coluna para renderizacao robusta.
+    O retorno fica em microvolts reais (sem normalizacao), preservando a
+    escala clinica para sobrepor linhas de referencia como rem_baseline_uv
+    e 2x rem_baseline_uv no frontend.
     """
     arr = np.asarray(samples, dtype=np.float64)
     if arr.size == 0:
-        return {"columns": [], "median": 0.0, "robust_scale": 1.0, "n_samples": 0}
+        return {"columns": [], "median_uv": 0.0, "n_samples": 0}
 
-    median = _quantile_1d(arr, 0.5)
-    centered = arr - median
-    robust_scale = max(1e-9, _quantile_1d(np.abs(centered), 0.98))
-    norm = np.clip(centered / robust_scale, -clip, clip)
+    arr_uv = arr * volts_to_microvolts
+    median_uv = _quantile_1d(arr_uv, 0.5)
+    centered_uv = arr_uv - median_uv
 
-    n_cols = int(max(32, min(int(n_cols), len(norm))))
-    bucket_size = int(np.ceil(len(norm) / n_cols))
+    n_cols = int(max(32, min(int(n_cols), len(centered_uv))))
+    bucket_size = int(np.ceil(len(centered_uv) / n_cols))
     columns = []
-    for start in range(0, len(norm), bucket_size):
-        chunk = norm[start:start + bucket_size]
+    for start in range(0, len(centered_uv), bucket_size):
+        chunk = centered_uv[start:start + bucket_size]
         columns.append({
             "lo": float(chunk.min()),
             "hi": float(chunk.max()),
@@ -326,8 +325,7 @@ def _build_display_trace(samples, *, n_cols=320, clip=1.5):
         })
     return {
         "columns": columns,
-        "median": median,
-        "robust_scale": robust_scale,
+        "median_uv": median_uv,
         "n_samples": int(arr.size),
     }
 
@@ -430,6 +428,11 @@ def _prepare_review(exam_name):
     phasic_cov = _np(obj.get("phasic_cov"))
     any_cov = _np(obj.get("any_cov"))
     label_source = obj.get("label_source", "desconhecido (CSV humano legado ou exame sem label_source)")
+    rem_baseline_uv = obj.get("rem_baseline_uv")
+    try:
+        rem_baseline_uv = float(rem_baseline_uv)
+    except (TypeError, ValueError):
+        rem_baseline_uv = float("nan")
     label_metadata = obj.get("label_metadata")
     if not isinstance(label_metadata, dict):
         label_metadata = {}
@@ -470,6 +473,7 @@ def _prepare_review(exam_name):
         "subject_id": exam_name,
         "label_source": label_source,
         "label_metadata": label_metadata,
+        "rem_baseline_uv": rem_baseline_uv,
     }
     _REVISAO_CACHE[exam_name] = st
     return st
@@ -732,7 +736,7 @@ class Handler(BaseHTTPRequestHandler):
                     seg = seg[::step]
                 else:
                     step = 1
-                display_trace = _build_display_trace(seg, n_cols=320, clip=1.5)
+                display_trace = _build_display_trace(seg, n_cols=320)
                 e0 = int(t0 // EPOCH_SEC); e1 = int(np.ceil(t1 / EPOCH_SEC))
                 stages = [STAGE_NAMES.get(int(s), "?") for s in st["stages"][e0:e1]]
 
@@ -752,6 +756,12 @@ class Handler(BaseHTTPRequestHandler):
                     "t0": t0, "t1": t1, "fs_eff": fs / step,
                     "samples": seg.round(3).tolist(),
                     "display_trace": display_trace,
+                    "rem_baseline_uv": st["rem_baseline_uv"],
+                    "rem_baseline_2x_uv": (
+                        float(st["rem_baseline_uv"]) * 2.0
+                        if np.isfinite(st["rem_baseline_uv"])
+                        else None
+                    ),
                     "epoch_start": e0,
                     "stages": stages,
                     "tonic_mask": _mask_of("tonic"),
