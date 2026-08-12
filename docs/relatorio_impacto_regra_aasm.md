@@ -657,6 +657,88 @@ classificacao (atual ou AASM) ser aplicada, entao beneficia ambas as regras
 igualmente; nao resolve a diferenca conceitual de definicao de `tonic`
 discutida nas Secoes 3-11.
 
+### 12.4 Correcao adicional: janela de gating simetrica (±50ms) era estreita demais
+
+Apos a implementacao da Secao 12.1-12.3, uma inspecao manual do modo de
+revisao (`ins8.pt`, mini-epocas REM) mostrou espiculas sincronizadas ao
+ECG ainda visiveis no EMG **apos** o gating. Investigacao confirmou que o
+gating estava sendo aplicado normalmente (`ecg_gate_applied=True`,
+picos-R detectados corretamente) — o problema era a **largura da janela**,
+nao uma falha de execucao.
+
+**Diagnostico:** o perfil medio de `|EMG|` em torno do pico-R (pooled sobre
+~1400 batimentos de amostras REM dos 5 exames de referencia) mostra que o
+artefato de bleed-through cardiaco no EMG **nao e simetrico**: comeca a
+subir por volta de -20 a -50ms antes do pico-R e só retorna a linha de
+base entre +60ms e +140ms depois dele, dependendo do exame. A janela
+simetrica de ±50ms usada na Secao 12.1 capturava apenas **~47% da energia
+do artefato** (acima do baseline) num exame de validacao detalhado
+(`ins8`, amostra de 295 batimentos REM), deixando passar artefato residual
+principalmente do lado direito do pico-R.
+
+| janela (simetrica) | % da energia do artefato capturada |
+|---|---|
+| ±50ms (original) | 46.6% |
+| ±60ms | 90.1% |
+| ±80ms | 98.3% |
+| ±100ms | 99.6% |
+
+**Correcao:** a janela de gating passou a ser **assimetrica**, com
+extensao independente antes/depois do pico-R:
+`ECG_GATE_WINDOW_PRE_S = 0.06s` (60ms antes) e
+`ECG_GATE_WINDOW_POST_S = 0.15s` (150ms depois) — cobrindo >=95% da
+energia do artefato nos 5 exames de referencia. A assinatura de
+`gate_emg_by_ecg` e `apply_ecg_gating_to_raw` mudou de `window_s` (unico,
+simetrico) para `window_pre_s`/`window_post_s` (independentes); o CLI
+(`__main__.py`) expoe `--ecg-gate-window-pre-s` / `--ecg-gate-window-post-s`.
+
+**Validacao:** repetindo a analise da Secao 12.3 (mesmas 198 mini-epocas
+amostradas, 5 exames) com a janela nova:
+
+| exame | acima do limiar (antes) | reducao janela antiga (±50ms) | reducao janela nova (-60/+150ms) |
+|---|---|---|---|
+| rbd1 | 1005 | 5.9% | 10.0% |
+| rbd4 | 172 | 11.6% | -3.5%* |
+| rbd9 | 2955 | 6.1% | 14.2% |
+| ins2 | 2730 | 1.2% | 13.4% |
+| n1 | 274 | 5.5% | 3.6% |
+| **Total** | **7136** | **4.3%** | **12.5%** |
+
+\* `rbd4` mostra um pequeno aumento no bruto "acima do limiar" com a janela
+nova porque essa metrica agregada mistura atividade EMG genuina com
+artefato cardiaco (a janela mais larga interpola —e portanto pode
+ocasionalmente reduzir— picos genuinos muito proximos de um pico-R); a
+metrica mais especifica de energia de artefato acima do baseline (abaixo)
+e mais informativa para julgar a correcao.
+
+Numa validacao mais rigorosa e especifica (perfil medio de `|EMG|` acima
+do baseline, no exame `ins8`, mesma amostra de 295 batimentos usada no
+diagnostico), a janela nova reduz a energia do artefato cardiaco residual
+de **202% do valor pre-gating para 0.2%** (a janela antiga na verdade
+piorava o pico observado porque a interpolacao linear entre bordas
+proximas ao pico real inflava o valor no meio da janela quando o pico
+verdadeiro ficava fora dela) — o pico de amplitude no perfil medio cai de
+5.75x o baseline (sem gating / com a janela antiga, que nao alcancava o
+pico) para 1.15x o baseline (janela nova, dentro do ruido de fundo).
+
+**Figura 4** (`ins8_residual_cardiac_artifact.png`) mostra o artefato
+residual identificado (picos-R sobrepostos ao EMG pos-gating antigo, mesma
+janela do modo de revisao) e o perfil medio de `|EMG|` demonstrando que o
+artefato se estende alem da janela de ±50ms. **Figura 5**
+(`ins8_gating_window_fix_confirmacao.png`) confirma a correcao: o mesmo
+perfil medio mostra o pico de artefato completamente absorvido pela janela
+nova, e o EMG pos-gating na janela do screenshot fica livre de espiculas
+sincronizadas ao ECG.
+
+**Limitacao residual:** a extensao exata do artefato varia por exame
+(ex.: `rbd4` mostrou extensao significativa mais estreita que `ins2`/`n1`
+na analise pooled), entao uma janela fixa e um compromisso — ela sub-gateia
+exames com artefato mais largo e sobre-gateia (interpola trechos maiores
+de sinal genuino) exames com artefato mais estreito. Um refinamento futuro
+seria calibrar `window_post_s` por exame a partir do proprio perfil medio
+de `|EMG|` detectado (ex.: onde a energia acima do baseline cai below 10%
+do pico), em vez de um valor fixo global.
+
 ## 13. Arquivos gerados nesta analise
 
 - `src/sleep_rswa/preprocessing/aasm_rule.py` — implementacao isolada dos 3
@@ -707,3 +789,18 @@ discutida nas Secoes 3-11.
 - `ecg_gating_exemplo_real.png` — EMG bruto vs. gateado e ECG com picos-R
   marcados, no exemplo real de maior contaminacao cardiaca encontrado
   (exame `rbd4`, mini-epoca REM #7122) (Secao 12.3, Figura 3).
+- `ins8_residual_cardiac_artifact.png` — diagnostico do artefato cardiaco
+  residual apos a janela simetrica original (±50ms): EMG pos-gating com
+  picos-R sobrepostos na janela do modo de revisao, e perfil medio de
+  `|EMG|` mostrando o artefato se estendendo alem da janela antiga
+  (Secao 12.4, Figura 4).
+- `ins8_gating_window_fix_confirmacao.png` — confirmacao da correcao: EMG
+  pos-gating com a janela assimetrica nova (-60/+150ms) na mesma janela do
+  modo de revisao, e perfil medio de `|EMG|` comparando bruto / janela
+  antiga / janela nova (Secao 12.4, Figura 5).
+- `gating_ecg_validacao_resumo_v2.csv` — reducao de amostras de EMG acima
+  do limiar apos gating, por exame, comparando janela antiga (±50ms) vs.
+  nova (-60/+150ms), na mesma amostra de mini-epocas da Secao 12.3
+  (Secao 12.4).
+- `gating_ecg_validacao_detalhe_v2.csv` — detalhe por mini-epoca da
+  validacao da janela nova (Secao 12.4).

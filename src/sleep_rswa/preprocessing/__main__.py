@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Sequence
 
 from . import PathConfig, run_preprocessing, run_preprocessing_parallel
-from .config import ECG_GATE_DEFAULT, ECG_GATE_WINDOW_S
+from .config import ECG_GATE_DEFAULT, ECG_GATE_WINDOW_PRE_S, ECG_GATE_WINDOW_POST_S
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -50,8 +50,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
-        "--ecg-gate-window-s", type=float, default=ECG_GATE_WINDOW_S,
-        help="Semi-largura (segundos) da janela de gating em torno de cada pico-R.",
+        "--ecg-gate-window-pre-s", type=float, default=ECG_GATE_WINDOW_PRE_S,
+        help="Extensao (segundos) da janela de gating ANTES de cada pico-R.",
+    )
+    parser.add_argument(
+        "--ecg-gate-window-post-s", type=float, default=ECG_GATE_WINDOW_POST_S,
+        help=(
+            "Extensao (segundos) da janela de gating DEPOIS de cada pico-R "
+            "(maior que a extensao pre por default -- o artefato de EMG "
+            "persiste mais tempo apos o pico-R; ver Secao 12.4 do relatorio)."
+        ),
     )
     return parser
 
@@ -74,7 +82,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         "any_min_coverage": args.any_min_coverage,
         "aasm_atonia_pct": args.aasm_atonia_pct,
         "ecg_gate": args.ecg_gate,
-        "ecg_gate_window_s": args.ecg_gate_window_s,
+        "ecg_gate_window_pre_s": args.ecg_gate_window_pre_s,
+        "ecg_gate_window_post_s": args.ecg_gate_window_post_s,
     }
 
     if args.parallel:

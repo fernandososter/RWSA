@@ -73,7 +73,8 @@ from .config import (
     N_CHANNELS,
     NOTCH_FILTER,
     ECG_GATE_DEFAULT,
-    ECG_GATE_WINDOW_S,
+    ECG_GATE_WINDOW_PRE_S,
+    ECG_GATE_WINDOW_POST_S,
     PathConfig,
     PSGConfig,
 )
@@ -112,7 +113,8 @@ def preprocess_exam(
     any_min_coverage: float = 0.0,
     aasm_atonia_pct: float | None = None,
     ecg_gate: bool = ECG_GATE_DEFAULT,
-    ecg_gate_window_s: float = ECG_GATE_WINDOW_S,
+    ecg_gate_window_pre_s: float = ECG_GATE_WINDOW_PRE_S,
+    ecg_gate_window_post_s: float = ECG_GATE_WINDOW_POST_S,
 ) -> Optional[Dict]:
     """
     Pre-processa um unico exame EDF. Retorna dict (ver formato no topo do modulo)
@@ -253,7 +255,8 @@ def preprocess_exam(
         "n_r_peaks": 0,
         "n_gated_samples": 0,
         "frac_gated": 0.0,
-        "window_s": float(ecg_gate_window_s),
+        "window_pre_s": float(ecg_gate_window_pre_s),
+        "window_post_s": float(ecg_gate_window_post_s),
         "reason_skipped": "ecg_gate_disabled" if not ecg_gate else None,
     }
     if ecg_gate:
@@ -261,7 +264,8 @@ def preprocess_exam(
             raw,
             emg_ch_name=emg_ch_name,
             ecg_candidates=PSGConfig.ECG_CANDIDATES,
-            window_s=ecg_gate_window_s,
+            window_pre_s=ecg_gate_window_pre_s,
+            window_post_s=ecg_gate_window_post_s,
             verbose=verbose,
         )
         ecg_gate_diag.update(ecg_gate_diag_result)

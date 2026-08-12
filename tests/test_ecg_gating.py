@@ -89,7 +89,9 @@ class TestGateEmgByEcg:
 
     def test_removes_known_spike_amplitude_at_each_r_peak(self):
         emg, r_peaks = self._make_spiky_emg()
-        emg_gated, n_gated = eg.gate_emg_by_ecg(emg, r_peaks, FS, window_s=0.05)
+        emg_gated, n_gated = eg.gate_emg_by_ecg(
+            emg, r_peaks, FS, window_pre_s=0.05, window_post_s=0.05,
+        )
         half_w = int(round(0.05 * FS))
         for p in r_peaks:
             window_before = emg[p - half_w:p + half_w + 1]
@@ -100,15 +102,43 @@ class TestGateEmgByEcg:
     def test_gated_sample_count_matches_union_of_windows(self):
         emg, r_peaks = self._make_spiky_emg()
         half_w = int(round(0.05 * FS))
-        emg_gated, n_gated = eg.gate_emg_by_ecg(emg, r_peaks, FS, window_s=0.05)
+        emg_gated, n_gated = eg.gate_emg_by_ecg(
+            emg, r_peaks, FS, window_pre_s=0.05, window_post_s=0.05,
+        )
         expected = len(r_peaks) * (2 * half_w + 1)  # picos isolados, sem sobreposicao
         assert n_gated == expected
+
+    def test_asymmetric_window_gates_more_samples_after_peak_than_before(self):
+        # window_post_s > window_pre_s (default do modulo): a janela de gating
+        # deve se estender mais para a direita do pico-R do que para a esquerda.
+        n = 1000
+        emg = np.zeros(n)
+        r_peaks = np.array([500])
+        window_pre_s, window_post_s = 0.05, 0.15
+        emg_gated, n_gated = eg.gate_emg_by_ecg(
+            emg, r_peaks, FS, window_pre_s=window_pre_s, window_post_s=window_post_s,
+        )
+        half_w_pre = int(round(window_pre_s * FS))   # 5 amostras
+        half_w_post = int(round(window_post_s * FS))  # 15 amostras
+        assert half_w_post > half_w_pre
+        expected = half_w_pre + half_w_post + 1  # [500-5, 500+15]
+        assert n_gated == expected
+        # amostra imediatamente apos +half_w_pre (ainda dentro da janela assimetrica
+        # do lado "post") deve ter sido alterada, confirmando a extensao maior
+        emg_spiky = emg.copy()
+        emg_spiky[500 + half_w_pre + 1] = 99.0
+        emg_gated2, _ = eg.gate_emg_by_ecg(
+            emg_spiky, r_peaks, FS, window_pre_s=window_pre_s, window_post_s=window_post_s,
+        )
+        assert emg_gated2[500 + half_w_pre + 1] != 99.0
 
     def test_overlapping_windows_are_merged_without_double_counting(self):
         n = 200
         emg = np.zeros(n)
         r_peaks = np.array([50, 55])  # janelas de 0.1s (10 amostras) se sobrepoem
-        emg_gated, n_gated = eg.gate_emg_by_ecg(emg, r_peaks, FS, window_s=0.05)
+        emg_gated, n_gated = eg.gate_emg_by_ecg(
+            emg, r_peaks, FS, window_pre_s=0.05, window_post_s=0.05,
+        )
         half_w = int(round(0.05 * FS))
         union_size = (min(n - 1, 55 + half_w) - max(0, 50 - half_w) + 1)
         assert n_gated == union_size
@@ -122,7 +152,7 @@ class TestGateEmgByEcg:
     def test_returns_copy_not_view_original_unchanged(self):
         emg, r_peaks = self._make_spiky_emg()
         emg_original = emg.copy()
-        eg.gate_emg_by_ecg(emg, r_peaks, FS, window_s=0.05)
+        eg.gate_emg_by_ecg(emg, r_peaks, FS, window_pre_s=0.05, window_post_s=0.05)
         np.testing.assert_array_equal(emg, emg_original)
 
     def test_interpolation_is_linear_between_window_edges(self):
@@ -134,7 +164,9 @@ class TestGateEmgByEcg:
         half_w = int(round(0.05 * FS))  # 5 amostras -> janela [15,25]
         emg[15] = 3.0
         emg[25] = 7.0
-        emg_gated, _ = eg.gate_emg_by_ecg(emg, r_peaks, FS, window_s=0.05)
+        emg_gated, _ = eg.gate_emg_by_ecg(
+            emg, r_peaks, FS, window_pre_s=0.05, window_post_s=0.05,
+        )
         expected = np.linspace(3.0, 7.0, 25 - 15 + 1)
         np.testing.assert_allclose(emg_gated[15:26], expected)
 
@@ -181,7 +213,7 @@ class TestApplyEcgGatingToRaw:
     def test_applies_gating_when_both_channels_present(self):
         raw = self._make_raw(include_ecg=True, include_emg=True)
         diag = eg.apply_ecg_gating_to_raw(
-            raw, "EMG1-EMG2", ["ECG1-ECG2"], window_s=0.05,
+            raw, "EMG1-EMG2", ["ECG1-ECG2"], window_pre_s=0.05, window_post_s=0.05,
         )
         assert diag["ecg_gate_applied"] is True
         assert diag["ecg_channel_found"] == "ECG1-ECG2"
@@ -191,7 +223,9 @@ class TestApplyEcgGatingToRaw:
 
     def test_removes_ecg_channel_from_raw_after_gating(self):
         raw = self._make_raw(include_ecg=True, include_emg=True)
-        eg.apply_ecg_gating_to_raw(raw, "EMG1-EMG2", ["ECG1-ECG2"], window_s=0.05)
+        eg.apply_ecg_gating_to_raw(
+            raw, "EMG1-EMG2", ["ECG1-ECG2"], window_pre_s=0.05, window_post_s=0.05,
+        )
         assert "ECG1-ECG2" not in raw.ch_names
         assert "EMG1-EMG2" in raw.ch_names
 
@@ -225,7 +259,9 @@ class TestApplyEcgGatingToRaw:
     def test_gated_emg_has_lower_peak_amplitude_than_original(self):
         raw = self._make_raw(include_ecg=True, include_emg=True)
         emg_before = raw.get_data(picks=["EMG1-EMG2"])[0].copy()
-        eg.apply_ecg_gating_to_raw(raw, "EMG1-EMG2", ["ECG1-ECG2"], window_s=0.05)
+        eg.apply_ecg_gating_to_raw(
+            raw, "EMG1-EMG2", ["ECG1-ECG2"], window_pre_s=0.05, window_post_s=0.05,
+        )
         emg_after = raw.get_data(picks=["EMG1-EMG2"])[0]
         assert np.abs(emg_after).max() < np.abs(emg_before).max()
 

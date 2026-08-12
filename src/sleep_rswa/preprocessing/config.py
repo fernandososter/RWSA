@@ -114,5 +114,17 @@ class PSGConfig:
 N_CHANNELS = len(PSGConfig.CHANNEL_DEFS)  # 5
 
 # Gating de artefato cardiaco (ECG) no EMG -- ver ecg_gating.py.
-ECG_GATE_WINDOW_S = 0.05        # semi-largura da janela de gating por pico-R (segundos)
-ECG_GATE_DEFAULT = True         # habilitado por default apos validacao quantitativa (Secao 12)
+#
+# Janela ASSIMETRICA em torno de cada pico-R (Secao 12.4 do relatorio):
+# perfil medio de |EMG| em torno do pico-R, pooled sobre 5 exames de
+# referencia (~1400 batimentos REM), mostrou que o artefato de QRS/T-wave
+# no EMG NAO e simetrico -- comeca a subir por volta de -20 a -50ms (antes
+# do pico-R, por causa da despolarizacao atrial/onda P e limiar de deteccao
+# do picos-R) e so retorna a linha de base entre +60ms e +140ms dependendo
+# do exame (mediana da extensao significativa: [-0.03s, +0.10s]). A janela
+# simetrica anterior de +-50ms capturava so ~47% da energia do artefato
+# (acima do baseline), deixando passar artefato residual visivel no lado
+# direito do pico-R -- ver Secao 12.4.
+ECG_GATE_WINDOW_PRE_S = 0.06     # extensao da janela ANTES do pico-R (segundos)
+ECG_GATE_WINDOW_POST_S = 0.15    # extensao da janela DEPOIS do pico-R (segundos)
+ECG_GATE_DEFAULT = True          # habilitado por default apos validacao quantitativa (Secao 12)
