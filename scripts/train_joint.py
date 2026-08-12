@@ -57,6 +57,9 @@ from sleep_rswa.training import (
 
 GREEN  = "\033[92m"
 YELLOW = "\033[93m"
+BLUE   = "\033[94m"
+PURPLE = "\033[95m"
+ORANGE = "\033[38;5;214m"
 RESET  = "\033[0m"
 
 
@@ -365,6 +368,8 @@ def main() -> None:
                 tr_stage_preds: list[torch.Tensor] = []
                 tr_move_targets: list[torch.Tensor] = []
                 tr_move_preds: list[torch.Tensor] = []
+                tr_head_targets: dict[str, list[torch.Tensor]] = {h: [] for h in ("tonic", "phasic", "any")}
+                tr_head_preds: dict[str, list[torch.Tensor]] = {h: [] for h in ("tonic", "phasic", "any")}
 
                 for batch in train_loader:
                     signals = batch["signals"].to(device, non_blocking=True)
@@ -421,6 +426,20 @@ def main() -> None:
                         ).long()
                         tr_move_targets.append(move_targets[rswa_valid].long().detach().cpu())
                         tr_move_preds.append(move_preds[rswa_valid].cpu())
+                        head_targets = {
+                            "tonic": tonic_targets,
+                            "phasic": phasic_targets,
+                            "any": any_targets,
+                        }
+                        for head in ("tonic", "phasic", "any"):
+                            head_preds = (
+                                torch.sigmoid(outputs[f"{head}_logits"].detach())
+                                >= thresholds[head]
+                            ).long()
+                            tr_head_targets[head].append(
+                                head_targets[head][rswa_valid].long().detach().cpu()
+                            )
+                            tr_head_preds[head].append(head_preds[rswa_valid].cpu())
                     else:
                         rswa_loss = None
 
@@ -451,6 +470,14 @@ def main() -> None:
                         torch.cat(tr_move_targets).numpy())
                     train_dist["movement_prediction_distribution"] = _binary_distribution(
                         torch.cat(tr_move_preds).numpy())
+                for head in ("tonic", "phasic", "any"):
+                    if tr_head_targets[head]:
+                        train_dist[f"{head}_target_distribution"] = _binary_distribution(
+                            torch.cat(tr_head_targets[head]).numpy()
+                        )
+                        train_dist[f"{head}_prediction_distribution"] = _binary_distribution(
+                            torch.cat(tr_head_preds[head]).numpy()
+                        )
 
                 val_start = perf_counter()
                 val_metrics = evaluate_joint(
@@ -513,6 +540,18 @@ def main() -> None:
                     _emit("val_stage_predictions", val_metrics, YELLOW, "staging_prediction_distribution")
                     _emit("val_move_targets", val_metrics, YELLOW, "movement_target_distribution")
                     _emit("val_move_predictions", val_metrics, YELLOW, "movement_prediction_distribution")
+                    _emit("train_tonic_targets", train_dist, BLUE, "tonic_target_distribution")
+                    _emit("train_tonic_predictions", train_dist, BLUE, "tonic_prediction_distribution")
+                    _emit("val_tonic_targets", val_metrics, BLUE, "tonic_target_distribution")
+                    _emit("val_tonic_predictions", val_metrics, BLUE, "tonic_prediction_distribution")
+                    _emit("train_phasic_targets", train_dist, PURPLE, "phasic_target_distribution")
+                    _emit("train_phasic_predictions", train_dist, PURPLE, "phasic_prediction_distribution")
+                    _emit("val_phasic_targets", val_metrics, PURPLE, "phasic_target_distribution")
+                    _emit("val_phasic_predictions", val_metrics, PURPLE, "phasic_prediction_distribution")
+                    _emit("train_any_targets", train_dist, ORANGE, "any_target_distribution")
+                    _emit("train_any_predictions", train_dist, ORANGE, "any_prediction_distribution")
+                    _emit("val_any_targets", val_metrics, ORANGE, "any_target_distribution")
+                    _emit("val_any_predictions", val_metrics, ORANGE, "any_prediction_distribution")
 
                 save_checkpoint(
                     checkpoint_dir / "staging_last.pt", model=staging_model,
