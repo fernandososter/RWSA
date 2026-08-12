@@ -6,6 +6,7 @@ from typing import Sequence
 
 from . import PathConfig, run_preprocessing, run_preprocessing_parallel
 from .config import ECG_GATE_DEFAULT, ECG_GATE_WINDOW_PRE_S, ECG_GATE_WINDOW_POST_S
+from .aasm_rule import MIN_AMPLITUDE_RATIO as AASM_MIN_AMPLITUDE_RATIO
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -38,6 +39,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "atonia p/ rswa_source=aasm (default: usa rem_baseline_uv, "
             "percentil 10 -- ver AVISO DE CALIBRACAO em aasm_rule.py antes "
             "de usar em producao)."
+        ),
+    )
+    parser.add_argument(
+        "--aasm-min-amplitude-ratio", type=float, default=AASM_MIN_AMPLITUDE_RATIO,
+        help=(
+            "Multiplicador do nivel de atonia REM usado como piso de "
+            "amplitude p/ rswa_source=aasm (default: 2.0x, 'MIN_AMPLITUDE_RATIO' "
+            "em aasm_rule.py). Um valor mais alto exige elevacao de EMG mais "
+            "pronunciada para contar como RSWA, reduzindo falsos positivos de "
+            "tonus sustentado perto do limiar -- ver varredura empirica em "
+            "docs/relatorio_impacto_regra_aasm.md."
         ),
     )
     parser.add_argument(
@@ -81,6 +93,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "phasic_min_coverage": args.phasic_min_coverage,
         "any_min_coverage": args.any_min_coverage,
         "aasm_atonia_pct": args.aasm_atonia_pct,
+        "aasm_min_amplitude_ratio": args.aasm_min_amplitude_ratio,
         "ecg_gate": args.ecg_gate,
         "ecg_gate_window_pre_s": args.ecg_gate_window_pre_s,
         "ecg_gate_window_post_s": args.ecg_gate_window_post_s,

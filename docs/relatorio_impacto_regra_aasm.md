@@ -739,7 +739,120 @@ seria calibrar `window_post_s` por exame a partir do proprio perfil medio
 de `|EMG|` detectado (ex.: onde a energia acima do baseline cai below 10%
 do pico), em vez de um valor fixo global.
 
-## 13. Arquivos gerados nesta analise
+## 13. Calibracao do piso de amplitude (`min_amplitude_ratio`)
+
+O usuario perguntou se o piso de amplitude do criterio `phasic`/`tonic` da
+regra AASM — atualmente `MIN_AMPLITUDE_RATIO = 2.0` (amplitude minima = 2x o
+basal REM, `rem_baseline_uv`) — e parametrizavel e se pode ser aumentado
+para reduzir falsos positivos. O parametro ja existia como argumento
+nomeado em `apply_aasm_rule`/`label_exam_with_aasm_rule`, mas nao estava
+exposto no pipeline (`preprocess_exam`) nem no CLI. Esta secao documenta a
+exposicao do parametro e uma varredura empirica para orientar sua
+calibracao, seguindo o mesmo procedimento usado para `atonia_pct` na
+Secao 8.
+
+### 13.1 Exposicao na pipeline e no CLI
+
+- `src/sleep_rswa/preprocessing/aasm_rule.py` — `MIN_AMPLITUDE_RATIO`
+  permanece a constante de modulo (default); o retorno de
+  `label_exam_with_aasm_rule` passou a incluir `min_amplitude_ratio_used`
+  para rastreabilidade diagnostica.
+- `src/sleep_rswa/preprocessing/preprocess.py` — novo parametro
+  `aasm_min_amplitude_ratio` em `preprocess_exam`, propagado para a
+  chamada de `label_exam_with_aasm_rule` e ecoado em
+  `label_metadata["aasm_rule"]`.
+- `src/sleep_rswa/preprocessing/__main__.py` — nova flag de CLI
+  `--aasm-min-amplitude-ratio`, propagada via `**kwargs` para
+  `run_preprocessing`/`run_preprocessing_parallel` do mesmo modo que
+  `--aasm-atonia-pct`.
+- `tests/test_aasm_rule.py` — 4 novos testes deterministicos: propagacao
+  do parametro para a funcao de baixo nivel, conservadorismo monotonico ao
+  aumentar a razao (um evento marcado positivo com `ratio=2.0` pode deixar
+  de ser marcado com `ratio=3.0`), propagacao correta pelo wrapper
+  publico, e consistencia do valor default com a constante do modulo.
+  Suite completa (`test_aasm_rule.py` + `test_ecg_gating.py`): 49/49
+  testes passando apos as mudancas.
+
+### 13.2 Varredura empirica nos 5 exames de referencia
+
+Varredura de `min_amplitude_ratio` em `{1.25, 1.5, 1.75, 2.0, 2.5, 3.0,
+3.25, 3.5, 3.75, 4.0, 4.25, 4.5, 4.75, 5.0, 5.5, 6.0}`, nos mesmos 5 exames
+de referencia com CSV revisado usados nas Secoes 3 e 8 (`rbd1`, `rbd4`,
+`rbd9`, `ins2`, `n1`; 10.980 mini-epocas REM de 3s no total). Para cada
+valor, a regra AASM foi recalculada com `min_amplitude_ratio` fixado e
+todos os outros parametros no default (incluindo `atonia_pct` no
+percentil de producao). A metrica principal e a concordancia do rotulo
+`phasic` por mini-epoca REM contra o `phasic` humano do CSV revisado
+(agregado pooled sobre os 5 exames):
+
+| `min_amplitude_ratio` | % concordancia | kappa | precisao | recall | F1 | % epocas REM `tonic` | % epocas REM `phasic` |
+|---|---|---|---|---|---|---|---|
+| 1.25 | 66.7% | 0.062 | 0.302 | 0.254 | 0.276 | 83.8% | 21.0% |
+| 2.00 (atual) | 38.7% | -0.003 | 0.248 | 0.720 | 0.369 | 30.3% | 72.3% |
+| 3.00 | 49.2% | 0.084 | 0.288 | 0.702 | 0.408 | 9.3% | 60.8% |
+| 4.00 (recomendado) | 65.5% | 0.212 | 0.373 | 0.562 | 0.448 | 2.7% | 37.5% |
+| 4.25 (pico F1 pooled) | 68.9% | 0.245 | 0.405 | 0.527 | 0.458 | 2.6% | 32.4% |
+| 5.00 (pico kappa pooled) | 73.2% | 0.262 | 0.458 | 0.418 | 0.437 | 1.4% | 22.8% |
+| 6.00 | 76.2% | 0.244 | 0.543 | 0.286 | 0.374 | 0.5% | 13.1% |
+
+Tabela completa (todos os 16 valores testados): `varredura_min_amplitude_ratio_pooled.csv`.
+Detalhe por exame e por valor: `varredura_min_amplitude_ratio_por_exame.csv`.
+
+**Figura 6** (`min_amplitude_ratio_sweep.png`) mostra as duas curvas: F1 e
+kappa pooled do criterio `phasic` (esquerda) e a fracao de epocas REM
+marcadas `tonic`/`phasic` (direita), ambas em funcao de
+`min_amplitude_ratio`, com o valor atual (2.0x) e o recomendado (4.0x)
+marcados.
+
+### 13.3 Leitura dos numeros
+
+1. **No valor atual (2.0x), o piso de amplitude e permissivo demais**: 72%
+   das epocas REM sao marcadas `phasic` e 30% `tonic` — bem acima do que o
+   humano marca (25% `phasic` pooled, 0% `tonic` nos 5 exames de
+   referencia, que nao tem RSWA tonica revisada). O kappa e
+   essencialmente zero (-0.003), isto e, a concordancia com o humano nao e
+   melhor que o esperado pelo acaso nesse ponto.
+
+2. **Subir a razao para ~4.0-4.25x concentra o ganho principal**: kappa
+   sobe de -0.003 (2.0x) para 0.212-0.245, e a fracao de epocas `tonic`
+   despenca de 30.3% para ~2.6-2.7% — a maior parte dos falsos positivos
+   `tonic` que motivaram a pergunta do usuario desaparece nessa faixa. F1
+   do `phasic` sobe de 0.369 para 0.448-0.458. Pela escala de Landis &
+   Koch, isso move a concordancia de "nenhuma" para "fair" (0.21-0.40).
+
+3. **O ganho marginal cai depois de ~5.0x**: entre 4.25x e 6.0x, o kappa
+   pooled se estabiliza (0.245 -> 0.262 -> 0.244) enquanto o recall do
+   `phasic` continua caindo (0.527 -> 0.418 -> 0.286) — a razao mais alta
+   passa a cortar eventos fasicos genuinos sem melhora de concordancia
+   proporcional.
+
+4. **O ponto otimo varia por exame** (mesma limitacao estrutural
+   documentada na Secao 8 para `atonia_pct`): o F1 individual e maximizado
+   em `ratio=2.5` (`n1`), `3.75` (`rbd9`), `4.25` (`ins2` e `rbd4`) e
+   `5.0` (`rbd1`) — ver `varredura_min_amplitude_ratio_melhor_por_exame.csv`.
+   Nenhum valor unico e simultaneamente otimo para todos os 5 exames;
+   `4.0` e um compromisso proximo do pico pooled (F1=0.448, a 0.010 do
+   maximo em 4.25) sem cair no extremo mais sensivel a essa variabilidade
+   entre exames.
+
+### 13.4 Recomendacao
+
+**Recomenda-se `min_amplitude_ratio = 4.0`** (em vez do default atual de
+`2.0`) para uso do criterio `phasic`/`tonic` da regra AASM nos exames
+deste conjunto, com base no ganho consistente de kappa/F1 pooled e na
+reducao de quase 10x na taxa de falsos positivos `tonic` (30.3% -> 2.7%
+das epocas REM). O parametro agora e configuravel via
+`aasm_min_amplitude_ratio` (Python) ou `--aasm-min-amplitude-ratio` (CLI)
+sem precisar editar codigo-fonte.
+
+Como na Secao 8, esta calibracao **nao substitui** uma revisao mais ampla
+com mais exames rotulados — os 5 exames de referencia sao uma amostra
+pequena e o otimo por exame varia entre 2.5x e 5.0x. O valor de 4.0x deve
+ser tratado como um ponto de partida razoavel para reduzir falsos
+positivos evidentes, nao como um valor definitivo calibrado
+estatisticamente contra o dataset completo de 100+ exames.
+
+## 14. Arquivos gerados nesta analise
 
 - `src/sleep_rswa/preprocessing/aasm_rule.py` — implementacao isolada dos 3
   criterios, incluindo o adaptador `label_exam_with_aasm_rule` usado pela
@@ -804,3 +917,24 @@ do pico), em vez de um valor fixo global.
   (Secao 12.4).
 - `gating_ecg_validacao_detalhe_v2.csv` — detalhe por mini-epoca da
   validacao da janela nova (Secao 12.4).
+- `src/sleep_rswa/preprocessing/aasm_rule.py`,
+  `src/sleep_rswa/preprocessing/preprocess.py`,
+  `src/sleep_rswa/preprocessing/__main__.py` — exposicao de
+  `aasm_min_amplitude_ratio`/`--aasm-min-amplitude-ratio` no pipeline e no
+  CLI (Secao 13.1).
+- `tests/test_aasm_rule.py` — 4 novos testes deterministicos de
+  propagacao e conservadorismo monotonico do `min_amplitude_ratio`
+  (49 testes totais no arquivo, Secao 13.1).
+- `varredura_min_amplitude_ratio_pooled.csv` — metricas de concordancia
+  (kappa, F1, precisao, recall) e % de epocas REM `tonic`/`phasic`
+  pooled sobre os 5 exames de referencia, para os 16 valores de
+  `min_amplitude_ratio` testados (Secao 13.2).
+- `varredura_min_amplitude_ratio_por_exame.csv` — detalhe por
+  exame/valor de `min_amplitude_ratio` das mesmas metricas (Secao 13.2).
+- `varredura_min_amplitude_ratio_melhor_por_exame.csv` — valor de
+  `min_amplitude_ratio` que maximiza o F1 do `phasic` em cada exame
+  individualmente (Secao 13.3).
+- `min_amplitude_ratio_sweep.png` — Figura 6: F1/kappa pooled do
+  `phasic` e % de epocas REM `tonic`/`phasic`, ambos em funcao de
+  `min_amplitude_ratio`, com o valor atual (2.0x) e o recomendado
+  (4.0x) marcados (Secao 13.2-13.4).

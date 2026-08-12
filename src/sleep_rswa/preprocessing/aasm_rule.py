@@ -62,6 +62,11 @@ REM_STAGE = 4
 NREM_STAGES = (1, 2, 3)          # N1, N2, N3 (W=0 e propositalmente excluido)
 
 MIN_AMPLITUDE_RATIO = 2.0        # amplitude minima = 2x o nivel de atonia REM
+                                  # (configuravel via min_amplitude_ratio em
+                                  # apply_aasm_rule/label_exam_with_aasm_rule e
+                                  # via aasm_min_amplitude_ratio em preprocess_exam/
+                                  # --aasm-min-amplitude-ratio no CLI; ver varredura
+                                  # empirica em docs/relatorio_impacto_regra_aasm.md)
 TONIC_SEGMENT_MIN_S = 5.0        # cada segmento tonico somado deve ter > 5s
 TONIC_EPOCH_COVERAGE = 0.5       # soma dos segmentos >5s deve cobrir >= 50% da epoca R
 PHASIC_LO_S = 0.1
@@ -520,4 +525,5 @@ def label_exam_with_aasm_rule(
         "n_rem_macro_epochs": result["n_rem_macro_epochs"],
         "n_tonic_macro_epochs": result["n_tonic_macro_epochs"],
         "n_phasic_macro_epochs": result["n_phasic_macro_epochs"],
+        "min_amplitude_ratio_used": float(min_amplitude_ratio),
     }

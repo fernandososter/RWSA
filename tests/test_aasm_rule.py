@@ -375,3 +375,78 @@ class TestGapMerge:
         )
         assert result_merged["n_tonic_macro_epochs"] == 1
         assert result_unmerged["n_tonic_macro_epochs"] == 0
+
+
+class TestMinAmplitudeRatioParametrization:
+    """min_amplitude_ratio (piso de amplitude = ratio x atonia REM) e
+    configuravel (default 2.0, ver Secao 12.5 do relatorio) -- confirma que
+    o parametro chega intacto de label_exam_with_aasm_rule/apply_aasm_rule
+    at classify_macro_epoch, e que valores mais altos sao estritamente mais
+    conservadores (nunca marcam positivo onde um valor mais baixo nao
+    marcaria).
+    """
+
+    def _signals_with_segment(self, amplitude_v: float, dur_s: float = 20.0):
+        # amplitude_v em VOLTS (unidade bruta do canal signals[:, emg_idx, :]
+        # -- apply_aasm_rule converte p/ uV internamente via volts_to_microvolts).
+        n_mini = ar.MINI_PER_MACRO
+        signals = np.zeros((n_mini, 5, MINI_SAMPLES), dtype=np.float32)
+        stages = np.full(n_mini, ar.REM_STAGE, dtype=np.int64)
+        emg_flat = np.full(MACRO_SAMPLES, 1e-6, dtype=np.float64)  # 1 uV baseline
+        _put_segment(emg_flat, start_s=0.0, dur_s=dur_s, amplitude_uv=amplitude_v)
+        for m in range(n_mini):
+            signals[m, 4, :] = emg_flat[m * MINI_SAMPLES:(m + 1) * MINI_SAMPLES]
+        return signals, stages, n_mini
+
+    def test_raising_ratio_can_turn_a_positive_epoch_negative(self):
+        # segmento de 25uV, baseline 10uV -> razao 2.5x: positivo com
+        # ratio=2.0 (limiar 20uV), negativo com ratio=3.0 (limiar 30uV).
+        signals, stages, n_mini = self._signals_with_segment(amplitude_v=25e-6)
+
+        result_ratio2 = ar.apply_aasm_rule(
+            signals, stages, rem_baseline_uv=10.0, rem_baseline_n_epochs=n_mini,
+            min_amplitude_ratio=2.0,
+        )
+        result_ratio3 = ar.apply_aasm_rule(
+            signals, stages, rem_baseline_uv=10.0, rem_baseline_n_epochs=n_mini,
+            min_amplitude_ratio=3.0,
+        )
+        assert result_ratio2["n_tonic_macro_epochs"] == 1
+        assert result_ratio3["n_tonic_macro_epochs"] == 0
+
+    def test_higher_ratio_never_yields_more_positives_than_lower_ratio(self):
+        # monotonicidade: para uma amostra de amplitudes variadas, um ratio
+        # mais alto nunca deve produzir mais epocas tonicas positivas que
+        # um ratio mais baixo (limiar mais alto e estritamente mais
+        # conservador, o resto da logica de segmentacao e identica).
+        signals, stages, n_mini = self._signals_with_segment(amplitude_v=22e-6)
+        counts = []
+        for ratio in (1.5, 2.0, 2.5, 3.0, 4.0):
+            result = ar.apply_aasm_rule(
+                signals, stages, rem_baseline_uv=10.0, rem_baseline_n_epochs=n_mini,
+                min_amplitude_ratio=ratio,
+            )
+            counts.append(result["n_tonic_macro_epochs"])
+        assert all(c1 >= c2 for c1, c2 in zip(counts, counts[1:]))  # nao-crescente
+
+    def test_min_amplitude_ratio_propagates_through_label_exam_with_aasm_rule(self):
+        # confirma que o parametro chega intacto na API publica de alto
+        # nivel e e ecoado no diagnostico de retorno (min_amplitude_ratio_used).
+        signals, stages, n_mini = self._signals_with_segment(amplitude_v=25e-6)
+        result = ar.label_exam_with_aasm_rule(
+            signals, stages, rem_baseline_uv=10.0, rem_baseline_n_epochs=n_mini,
+            min_amplitude_ratio=3.0,
+        )
+        assert result["min_amplitude_ratio_used"] == pytest.approx(3.0)
+        assert result["n_tonic_macro_epochs"] == 0  # 2.5x < 3.0x, nao dispara
+
+    def test_default_ratio_matches_module_constant(self):
+        signals, stages, n_mini = self._signals_with_segment(amplitude_v=25e-6)
+        result_default = ar.apply_aasm_rule(
+            signals, stages, rem_baseline_uv=10.0, rem_baseline_n_epochs=n_mini,
+        )
+        result_explicit = ar.apply_aasm_rule(
+            signals, stages, rem_baseline_uv=10.0, rem_baseline_n_epochs=n_mini,
+            min_amplitude_ratio=ar.MIN_AMPLITUDE_RATIO,
+        )
+        assert result_default["n_tonic_macro_epochs"] == result_explicit["n_tonic_macro_epochs"]

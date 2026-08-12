@@ -88,7 +88,11 @@ from .annotations import (
 from .auto_rswa import DEFAULT_AUTO_LABEL_MODEL, auto_label_rswa_from_signals
 from .rswa_labels import rasterize_rswa_annotations
 from .rem_baseline import compute_rem_baseline
-from .aasm_rule import label_exam_with_aasm_rule, AASM_CALIBRATION_WARNING
+from .aasm_rule import (
+    label_exam_with_aasm_rule,
+    AASM_CALIBRATION_WARNING,
+    MIN_AMPLITUDE_RATIO as AASM_MIN_AMPLITUDE_RATIO,
+)
 from .ecg_gating import apply_ecg_gating_to_raw
 
 
@@ -112,6 +116,7 @@ def preprocess_exam(
     phasic_min_coverage: float = 0.0,
     any_min_coverage: float = 0.0,
     aasm_atonia_pct: float | None = None,
+    aasm_min_amplitude_ratio: float = AASM_MIN_AMPLITUDE_RATIO,
     ecg_gate: bool = ECG_GATE_DEFAULT,
     ecg_gate_window_pre_s: float = ECG_GATE_WINDOW_PRE_S,
     ecg_gate_window_post_s: float = ECG_GATE_WINDOW_POST_S,
@@ -373,6 +378,7 @@ def preprocess_exam(
             rem_baseline["rem_baseline_uv"],
             rem_baseline["rem_baseline_n_epochs"],
             atonia_pct=aasm_atonia_pct,
+            min_amplitude_ratio=aasm_min_amplitude_ratio,
         )
     else:
         rswa = auto_label_rswa_from_signals(
@@ -438,6 +444,7 @@ def preprocess_exam(
             "n_rem_macro_epochs": int(rswa["n_rem_macro_epochs"]),
             "n_tonic_macro_epochs": int(rswa["n_tonic_macro_epochs"]),
             "n_phasic_macro_epochs": int(rswa["n_phasic_macro_epochs"]),
+            "min_amplitude_ratio_used": float(rswa["min_amplitude_ratio_used"]),
             "calibration_warning": AASM_CALIBRATION_WARNING,
         }
     else:
