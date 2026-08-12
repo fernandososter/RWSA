@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from contextlib import nullcontext
+import inspect
 from typing import Any
 from tqdm import tqdm
 import numpy as np
@@ -350,6 +351,7 @@ def collect_rswa_predictions(
     probability: dict[str, list[np.ndarray]] = {h: [] for h in _HEADS}
     subject_ids: list[str] = []
     mini_indices: list[np.ndarray] = []
+    expects_signals = "signals" in inspect.signature(model.forward).parameters
 
     with torch.no_grad():
         for batch in loader:
@@ -359,7 +361,11 @@ def collect_rswa_predictions(
             if not valid_mask.any():
                 continue
             with _autocast_context(device, amp):
-                outputs = model(emg, mask=padding_mask)
+                if expects_signals:
+                    signals = batch["signals"].to(device, non_blocking=True)
+                    outputs = model(signals, emg, mask=padding_mask)
+                else:
+                    outputs = model(emg, mask=padding_mask)
 
             valid_cpu = valid_mask.detach().cpu()
             probs_cpu = {h: torch.sigmoid(outputs[f"{h}_logits"].float()).detach().cpu() for h in _HEADS}
@@ -479,4 +485,3 @@ def collect_staging_predictions(
         "subject_id": np.asarray(subject_ids, dtype=object),
         "mini_epoch_index": np.concatenate(mini_indices),
     }
-

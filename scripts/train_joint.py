@@ -202,6 +202,19 @@ def plot_joint_curves(history: list[dict[str, float]], output_path: Path, *, tit
     return output_path
 
 
+def _print_model_summary(name: str, model: torch.nn.Module, logger: Any) -> None:
+    n_params = (
+        model.n_params()
+        if hasattr(model, "n_params")
+        else sum(p.numel() for p in model.parameters() if p.requires_grad)
+    )
+    header = f"[MODEL] {name} | trainable_params={n_params:,}"
+    print(header)
+    print(model)
+    logger.info(header)
+    logger.info(str(model))
+
+
 def main() -> None:
     args = parse_args()
     if args.experiment_name is None:
@@ -314,6 +327,9 @@ def main() -> None:
             staging_model = build_staging_model(args.model).to(device)
             rswa_model = build_movement_model(args.model).to(device)
             system = SleepStagingRSWASystem(staging_model, rswa_model).to(device)
+            _print_model_summary("staging_model", staging_model, logger)
+            _print_model_summary("rswa_model", rswa_model, logger)
+            _print_model_summary("joint_system", system, logger)
             staging_loss_fn = StagingLoss()
             tonic_weight = torch.tensor(args.tonic_pos_weight, device=device) if args.tonic_pos_weight else None
             phasic_weight = torch.tensor(args.phasic_pos_weight, device=device) if args.phasic_pos_weight else None
@@ -360,47 +376,61 @@ def main() -> None:
                     stage_valid = batch["staging_valid"].to(device, non_blocking=True) & padding_mask
                     rswa_valid = batch["rswa_valid"].to(device, non_blocking=True) & padding_mask
 
+                    if not stage_valid.any() and not rswa_valid.any():
+                        continue
+
+                    staging_optimizer.zero_grad(set_to_none=True)
+                    rswa_optimizer.zero_grad(set_to_none=True)
+                    with torch.autocast(
+                        device_type="cuda", dtype=torch.bfloat16,
+                        enabled=(not args.no_amp and device.type == "cuda"),
+                    ):
+                        outputs = system(signals, emg, mask=padding_mask)
+
                     if stage_valid.any():
-                        staging_optimizer.zero_grad(set_to_none=True)
-                        with torch.autocast(
-                            device_type="cuda", dtype=torch.bfloat16,
-                            enabled=(not args.no_amp and device.type == "cuda"),
-                        ):
-                            stage_logits = staging_model(signals, mask=padding_mask)
-                            stage_loss = staging_loss_fn(stage_logits, stage_targets, stage_valid)
-                        stage_loss.backward()
-                        clip_grad_norm_(staging_model.parameters(), args.grad_clip)
-                        staging_optimizer.step()
+                        stage_loss = staging_loss_fn(
+                            outputs["staging_logits"], stage_targets, stage_valid
+                        )
                         stage_loss_sum += float(stage_loss.detach().cpu())
                         stage_batches += 1
                         tr_stage_targets.append(stage_targets[stage_valid].detach().cpu())
-                        tr_stage_preds.append(stage_logits.detach().argmax(dim=-1)[stage_valid].cpu())
+                        tr_stage_preds.append(
+                            outputs["staging_logits"].detach().argmax(dim=-1)[stage_valid].cpu()
+                        )
+                    else:
+                        stage_loss = None
 
                     if rswa_valid.any():
-                        rswa_optimizer.zero_grad(set_to_none=True)
-                        with torch.autocast(
-                            device_type="cuda", dtype=torch.bfloat16,
-                            enabled=(not args.no_amp and device.type == "cuda"),
-                        ):
-                            rswa_outputs = rswa_model(emg, mask=padding_mask)
-                            rswa_loss, _ = rswa_loss_fn(
-                                rswa_outputs, tonic_targets, phasic_targets, any_targets, rswa_valid
-                            )
-                        rswa_loss.backward()
-                        clip_grad_norm_(rswa_model.parameters(), args.grad_clip)
-                        rswa_optimizer.step()
+                        rswa_loss, _ = rswa_loss_fn(
+                            outputs, tonic_targets, phasic_targets, any_targets, rswa_valid
+                        )
                         rswa_loss_sum += float(rswa_loss.detach().cpu())
                         rswa_batches += 1
                         move_targets = (
                             (tonic_targets > 0.5) | (phasic_targets > 0.5) | (any_targets > 0.5)
                         ).float()
                         move_preds = (
-                            (torch.sigmoid(rswa_outputs["tonic_logits"].detach()) >= thresholds["tonic"])
-                            | (torch.sigmoid(rswa_outputs["phasic_logits"].detach()) >= thresholds["phasic"])
-                            | (torch.sigmoid(rswa_outputs["any_logits"].detach()) >= thresholds["any"])
+                            (torch.sigmoid(outputs["tonic_logits"].detach()) >= thresholds["tonic"])
+                            | (torch.sigmoid(outputs["phasic_logits"].detach()) >= thresholds["phasic"])
+                            | (torch.sigmoid(outputs["any_logits"].detach()) >= thresholds["any"])
                         ).long()
                         tr_move_targets.append(move_targets[rswa_valid].long().detach().cpu())
                         tr_move_preds.append(move_preds[rswa_valid].cpu())
+                    else:
+                        rswa_loss = None
+
+                    total_loss = None
+                    if stage_loss is not None:
+                        total_loss = stage_loss
+                    if rswa_loss is not None:
+                        total_loss = rswa_loss if total_loss is None else (total_loss + rswa_loss)
+                    if total_loss is None:
+                        continue
+                    total_loss.backward()
+                    clip_grad_norm_(staging_model.parameters(), args.grad_clip)
+                    clip_grad_norm_(rswa_model.parameters(), args.grad_clip)
+                    staging_optimizer.step()
+                    rswa_optimizer.step()
 
                 train_time = perf_counter() - train_start
 
@@ -514,7 +544,7 @@ def main() -> None:
             load_checkpoint(checkpoint_dir / "staging_best.pt", staging_model, device)
             load_checkpoint(checkpoint_dir / "rswa_best.pt", rswa_model, device)
             stage_pred = collect_staging_predictions(staging_model, val_loader, device, amp=not args.no_amp)
-            move_pred = collect_rswa_predictions(rswa_model, val_loader, device, amp=not args.no_amp, threshold=thresholds)
+            move_pred = collect_rswa_predictions(system, val_loader, device, amp=not args.no_amp, threshold=thresholds)
             plot_confusion_matrix(
                 stage_pred["expected"], stage_pred["prediction"],
                 figures_dir / "confusion_matrix_staging.png",
@@ -540,7 +570,13 @@ def main() -> None:
                 )
 
             staging_checkpoints.append({"fold": fold, "best_checkpoint": checkpoint_dir / "staging_best.pt"})
-            rswa_checkpoints.append({"fold": fold, "best_checkpoint": checkpoint_dir / "rswa_best.pt"})
+            rswa_checkpoints.append(
+                {
+                    "fold": fold,
+                    "staging_checkpoint": checkpoint_dir / "staging_best.pt",
+                    "rswa_checkpoint": checkpoint_dir / "rswa_best.pt",
+                }
+            )
             fold_summaries.append(
                 {
                     "fold": fold,
@@ -569,7 +605,11 @@ def main() -> None:
             )
             movement_test_summary = evaluate_movement_test_set(
                 test_loader=test_loader, fold_checkpoints=rswa_checkpoints,
-                build_model=lambda: build_movement_model(args.model), device=device, logger=logger,
+                build_model=lambda: SleepStagingRSWASystem(
+                    build_staging_model(args.model),
+                    build_movement_model(args.model),
+                ),
+                device=device, logger=logger,
                 figures_dir=logger.run_dir / "test", amp=not args.no_amp, threshold=thresholds,
             )
 

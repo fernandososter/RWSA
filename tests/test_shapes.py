@@ -1,6 +1,7 @@
 import torch
 from sleep_rswa import SleepStagingRSWASystem
 from sleep_rswa.models import RSWADetectionNet
+from sleep_rswa.training.engine import collect_rswa_predictions
 
 
 def test_output_shapes():
@@ -23,3 +24,23 @@ def test_rswa_head_accepts_optional_stage_probabilities():
         assert out["tonic_logits"].shape==(b,t)
         assert out["phasic_logits"].shape==(b,t)
         assert out["any_logits"].shape==(b,t)
+
+
+def test_collect_rswa_predictions_accepts_joint_system():
+    model=SleepStagingRSWASystem().eval(); b,t=1,4
+    batch={
+        "signals": torch.randn(b,t,4,900),
+        "emg_center": torch.randn(b,t,1,300),
+        "padding_mask": torch.ones(b,t,dtype=torch.bool),
+        "rswa_valid": torch.tensor([[True,True,False,True]]),
+        "tonic_labels": torch.zeros(b,t),
+        "phasic_labels": torch.zeros(b,t),
+        "any_labels": torch.zeros(b,t),
+        "subject_ids": ["synthetic"],
+    }
+    result=collect_rswa_predictions(model,[batch],torch.device("cpu"),amp=False,threshold=0.5)
+    assert result["subject_id"].shape==(3,)
+    assert result["mini_epoch_index"].tolist()==[0,1,3]
+    assert result["tonic_probability"].shape==(3,)
+    assert result["phasic_probability"].shape==(3,)
+    assert result["any_probability"].shape==(3,)

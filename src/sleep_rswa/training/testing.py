@@ -110,13 +110,32 @@ def evaluate_movement_test_set(
 
     for entry in fold_checkpoints:
         fold = entry["fold"]
-        checkpoint_path = Path(entry["best_checkpoint"])
-        if not checkpoint_path.exists():
-            logger.info(f"Fold {fold}: best.pt ausente ({checkpoint_path}); pulando no teste.")
-            continue
 
         model = build_model().to(device)
-        load_checkpoint(checkpoint_path, model, device)
+        if "best_checkpoint" in entry:
+            checkpoint_path = Path(entry["best_checkpoint"])
+            if not checkpoint_path.exists():
+                logger.info(f"Fold {fold}: best.pt ausente ({checkpoint_path}); pulando no teste.")
+                continue
+            load_checkpoint(checkpoint_path, model, device)
+        else:
+            staging_checkpoint = Path(entry["staging_checkpoint"])
+            rswa_checkpoint = Path(entry["rswa_checkpoint"])
+            if not staging_checkpoint.exists() or not rswa_checkpoint.exists():
+                logger.info(
+                    f"Fold {fold}: checkpoints conjuntos ausentes "
+                    f"(staging={staging_checkpoint}, rswa={rswa_checkpoint}); "
+                    "pulando no teste."
+                )
+                continue
+            if not hasattr(model, "staging_model") or not hasattr(model, "rswa_model"):
+                raise ValueError(
+                    "evaluate_movement_test_set recebeu checkpoints conjuntos, "
+                    "mas build_model() nao retornou um sistema com "
+                    "'staging_model' e 'rswa_model'."
+                )
+            load_checkpoint(staging_checkpoint, model.staging_model, device)
+            load_checkpoint(rswa_checkpoint, model.rswa_model, device)
         result = collect_rswa_predictions(model, test_loader, device, amp=amp, threshold=thr)
 
         keys = np.array(
