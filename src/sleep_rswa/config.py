@@ -15,6 +15,7 @@ class ModelConfig:
     d_model: int = int(os.getenv("D_MODEL", "256"))
     d_state: int = 16
     dropout: float = float(os.getenv("DROPOUT", "0.35"))
+    staging_num_classes: int = 5
     cnn_layers: int = 4
     staging_mamba_layers: int = 1
     rswa_mamba_layers: int = 1
@@ -26,6 +27,8 @@ class ModelConfig:
     emg_kernels: tuple[int, ...] = (10, 30, 70)
     rswa_emg_in_channels: int = 1
     rswa_emg_filters: int = 64
+    rswa_stage_conditioning: bool = True
+    rswa_stage_conditioning_detach: bool = True
 
 @dataclass(frozen=True)
 class RSWAConfig:

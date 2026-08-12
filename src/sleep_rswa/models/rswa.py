@@ -15,8 +15,34 @@ class RSWAFeatureEncoder(nn.Module):
         b,t,c,n=x.shape; z=x.reshape(b*t,c,n); z=self.pool(self.spatial(self.proj(self.se(self.branch(z))))).squeeze(-1); return z.reshape(b,t,-1)
 
 class RSWADetectionNet(nn.Module):
-    def __init__(self,config=None,use_se=True):
-        super().__init__(); cfg=config or ModelConfig(); self.encoder=RSWAFeatureEncoder(cfg,use_se); self.temporal=MambaStack(cfg.d_model,cfg.rswa_mamba_layers,cfg.d_state,cfg.dropout); h=cfg.d_model//2
+    def __init__(self, config=None, use_se=True):
+        super().__init__()
+        cfg = config or ModelConfig()
+        self.cfg = cfg
+        self.encoder = RSWAFeatureEncoder(cfg, use_se)
+        self.use_stage_conditioning = bool(cfg.rswa_stage_conditioning)
+        self.stage_context_dim = int(cfg.staging_num_classes)
+        self.stage_fusion = (
+            nn.Sequential(
+                nn.Linear(
+                    cfg.d_model + self.stage_context_dim,
+                    cfg.d_model,
+                    bias=False,
+                ),
+                nn.LayerNorm(cfg.d_model),
+                nn.ReLU(inplace=True),
+                nn.Dropout(cfg.dropout),
+            )
+            if self.use_stage_conditioning
+            else None
+        )
+        self.temporal = MambaStack(
+            cfg.d_model,
+            cfg.rswa_mamba_layers,
+            cfg.d_state,
+            cfg.dropout,
+        )
+        h = cfg.d_model // 2
         # Tres cabecas independentes por mini-epoca (multi-rotulo, BCE cada):
         #   tonic_head  : evento tonico confirmado (duracao >= 15s, score >= 2.0)
         #   phasic_head : evento fasico confirmado (0.1s <= duracao <= 5s, score >= 2.0)
@@ -28,8 +54,25 @@ class RSWADetectionNet(nn.Module):
         self.tonic_head=nn.Sequential(nn.Linear(cfg.d_model,h),nn.ReLU(inplace=True),nn.Dropout(cfg.dropout),nn.Linear(h,1))
         self.phasic_head=nn.Sequential(nn.Linear(cfg.d_model,h),nn.ReLU(inplace=True),nn.Dropout(cfg.dropout),nn.Linear(h,1))
         self.any_head=nn.Sequential(nn.Linear(cfg.d_model,h),nn.ReLU(inplace=True),nn.Dropout(cfg.dropout),nn.Linear(h,1))
-    def forward(self,emg_center,mask=None):
-        z=self.temporal(self.encoder(emg_center),mask)
+    def forward(self, emg_center, mask=None, stage_probs=None):
+        z = self.encoder(emg_center)
+        if self.stage_fusion is not None and stage_probs is not None:
+            if stage_probs.shape[:2] != z.shape[:2]:
+                raise ValueError(
+                    "stage_probs deve alinhar com (B,T) das features RSWA; "
+                    f"recebeu {tuple(stage_probs.shape)} para features "
+                    f"{tuple(z.shape)}."
+                )
+            if stage_probs.shape[-1] != self.stage_context_dim:
+                raise ValueError(
+                    "stage_probs deve ter "
+                    f"{self.stage_context_dim} classes de estagio; recebeu "
+                    f"{stage_probs.shape[-1]}."
+                )
+            z = self.stage_fusion(
+                torch.cat([z, stage_probs.to(z.dtype)], dim=-1)
+            )
+        z = self.temporal(z, mask)
         return {
             "tonic_logits":self.tonic_head(z).squeeze(-1),
             "phasic_logits":self.phasic_head(z).squeeze(-1),
