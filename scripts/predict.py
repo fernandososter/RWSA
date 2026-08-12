@@ -53,7 +53,7 @@ def main() -> None:
     )
 
     staging_model = SleepStagingNet().to(device)
-    rswa_model = RSWADetectionNet().to(device)
+    rswa_model = RSWADetectionNet(stage_conditioning=True).to(device)
     load_checkpoint(args.staging_checkpoint, staging_model, device)
     load_checkpoint(args.rswa_checkpoint, rswa_model, device)
     model = SleepStagingRSWASystem(staging_model, rswa_model).eval().to(device)

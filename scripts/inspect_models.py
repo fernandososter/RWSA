@@ -1,7 +1,7 @@
 from sleep_rswa import SleepStagingNet, RSWADetectionNet, SleepStagingRSWASystem
 
-staging=SleepStagingNet(); rswa=RSWADetectionNet(); system=SleepStagingRSWASystem(staging,rswa)
-print(f"Staging: {staging.n_params():,} parâmetros")
-print(f"RSWA:    {rswa.n_params():,} parâmetros")
-print(f"Total:   {system.n_params():,} parâmetros")
+staging=SleepStagingNet(); rswa=RSWADetectionNet(stage_conditioning=False); system=SleepStagingRSWASystem()
+print(f"Staging:          {staging.n_params():,} parâmetros")
+print(f"RSWA standalone:  {rswa.n_params():,} parâmetros")
+print(f"Joint system:     {system.n_params():,} parâmetros")
 print(system)

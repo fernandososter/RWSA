@@ -174,14 +174,16 @@ def main() -> None:
     print(f"Carregando {len(args.checkpoints)} checkpoint(s) em {device} (d_model={model_cfg.d_model})...")
     models = []
     for ckpt_path in args.checkpoints:
-        model = RSWADetectionNet(config=model_cfg).to(device)
+        model = RSWADetectionNet(config=model_cfg, stage_conditioning=False).to(device)
         try:
             load_checkpoint(ckpt_path, model, device)
         except RuntimeError as e:
             raise RuntimeError(
                 f"Falha ao carregar {ckpt_path}: mismatch de arquitetura. Se este checkpoint foi treinado "
                 f"com D_MODEL diferente do default (256), passe --d-model <valor> (confira em "
-                f"runs/.../run.json ou no log de treino). Erro original: {e}"
+                f"runs/.../run.json ou no log de treino). Se o checkpoint veio do "
+                f"train_joint (ramo RSWA condicionado por p_stage), use o fluxo joint "
+                f"em vez deste script standalone. Erro original: {e}"
             ) from e
         models.append(model)
 

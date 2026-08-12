@@ -110,10 +110,11 @@ def build_movement_model(
     config: ModelConfig | None = None,
     **model_kwargs: Any,
 ) -> nn.Module:
-    """Constrói o ramo de detecção de movimento (RSWA) por nome.
+    """Constrói o ramo RSWA multi-head por nome.
 
     Mesmas famílias de arquitetura do staging: cnn, cnn_lstm, cnn_bilstm,
-    cnn_bimamba. Encoder CNN compartilhado + cabeça temporal + movement_head.
+    cnn_bimamba. Encoder CNN compartilhado + cabeça temporal + heads
+    independentes tonic/phasic/any.
     """
     normalized_name = name.strip().lower()
 

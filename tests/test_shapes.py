@@ -1,5 +1,7 @@
 import torch
 from sleep_rswa import SleepStagingRSWASystem
+from sleep_rswa.config import ModelConfig
+from sleep_rswa.models import MovementCNN, build_movement_model
 from sleep_rswa.models import RSWADetectionNet
 from sleep_rswa.training.engine import collect_rswa_predictions
 
@@ -44,3 +46,28 @@ def test_collect_rswa_predictions_accepts_joint_system():
     assert result["tonic_probability"].shape==(3,)
     assert result["phasic_probability"].shape==(3,)
     assert result["any_probability"].shape==(3,)
+
+
+def test_rswa_standalone_defaults_to_no_stage_conditioning():
+    model=RSWADetectionNet().eval()
+    assert model.use_stage_conditioning is False
+    assert model.stage_fusion is None
+
+
+def test_joint_system_default_enables_stage_conditioning():
+    model=SleepStagingRSWASystem().eval()
+    assert model.use_stage_conditioning is True
+    assert model.rswa_model.use_stage_conditioning is True
+
+
+def test_build_movement_model_variants_match_multihead_contract():
+    cfg=ModelConfig(rswa_stage_conditioning=True)
+    model=build_movement_model("cnn",config=cfg,stage_conditioning=True).eval()
+    out=model(
+        torch.randn(1,2,1,300),
+        torch.ones(1,2,dtype=torch.bool),
+        stage_probs=torch.softmax(torch.randn(1,2,5),dim=-1),
+    )
+    assert out["tonic_logits"].shape==(1,2)
+    assert out["phasic_logits"].shape==(1,2)
+    assert out["any_logits"].shape==(1,2)

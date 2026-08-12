@@ -5,8 +5,8 @@ Projeto Python extraído do notebook `Editing_Staging_RSWA_BiMamba_v1.ipynb`.
 ## Arquitetura
 
 - `SleepStagingNet`: EEG/EOG → CNN multikernel → SE → BiMamba → W/N1/N2/N3/REM.
-- `RSWADetectionNet`: EMG → CNN multikernel → SE → BiMamba → saídas tônica e fásica.
-- `SleepStagingRSWASystem`: executa os dois modelos sem compartilhar pesos.
+- `RSWADetectionNet` standalone: EMG → CNN multikernel → SE → BiMamba → saídas `tonic`, `phasic` e `any`.
+- `SleepStagingRSWASystem`: executa os dois modelos e, no modo joint, condiciona o ramo RSWA com `p_stage = softmax(staging_logits)`.
 - A resolução temporal dos outputs é uma miniépoca de 3 segundos.
 
 ## Abrir no VSCode
@@ -83,7 +83,7 @@ python scripts/train_rswa.py \
   --device cuda
 ```
 
-Treinar os dois ramos no mesmo DataLoader, mas com losses e otimizadores independentes:
+Treinar os dois ramos no mesmo DataLoader, com forward conjunto e o ramo RSWA condicionado por `p_stage`:
 
 ```bash
 python scripts/train_joint.py --data-dir /caminho/tensors --device cuda

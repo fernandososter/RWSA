@@ -325,7 +325,7 @@ def main() -> None:
             )
 
             staging_model = build_staging_model(args.model).to(device)
-            rswa_model = build_movement_model(args.model).to(device)
+            rswa_model = build_movement_model(args.model, stage_conditioning=True).to(device)
             system = SleepStagingRSWASystem(staging_model, rswa_model).to(device)
             _print_model_summary("staging_model", staging_model, logger)
             _print_model_summary("rswa_model", rswa_model, logger)
@@ -607,7 +607,7 @@ def main() -> None:
                 test_loader=test_loader, fold_checkpoints=rswa_checkpoints,
                 build_model=lambda: SleepStagingRSWASystem(
                     build_staging_model(args.model),
-                    build_movement_model(args.model),
+                    build_movement_model(args.model, stage_conditioning=True),
                 ),
                 device=device, logger=logger,
                 figures_dir=logger.run_dir / "test", amp=not args.no_amp, threshold=thresholds,

@@ -4,6 +4,16 @@ from ..config import ModelConfig
 from .common import MultiKernelCNNBranch,SEBlock,make_group_norm
 from .mamba import MambaStack
 
+
+def _rswa_head(d_in: int, dropout: float) -> nn.Sequential:
+    h = d_in // 2
+    return nn.Sequential(
+        nn.Linear(d_in, h),
+        nn.ReLU(inplace=True),
+        nn.Dropout(dropout),
+        nn.Linear(h, 1),
+    )
+
 class RSWAFeatureEncoder(nn.Module):
     def __init__(self,config=None,use_se=True):
         super().__init__(); cfg=config or ModelConfig(); self.cfg=cfg
@@ -15,12 +25,14 @@ class RSWAFeatureEncoder(nn.Module):
         b,t,c,n=x.shape; z=x.reshape(b*t,c,n); z=self.pool(self.spatial(self.proj(self.se(self.branch(z))))).squeeze(-1); return z.reshape(b,t,-1)
 
 class RSWADetectionNet(nn.Module):
-    def __init__(self, config=None, use_se=True):
+    def __init__(self, config=None, use_se=True, *, stage_conditioning: bool | None = None):
         super().__init__()
         cfg = config or ModelConfig()
         self.cfg = cfg
         self.encoder = RSWAFeatureEncoder(cfg, use_se)
-        self.use_stage_conditioning = bool(cfg.rswa_stage_conditioning)
+        self.use_stage_conditioning = bool(
+            cfg.rswa_stage_conditioning if stage_conditioning is None else stage_conditioning
+        )
         self.stage_context_dim = int(cfg.staging_num_classes)
         self.stage_fusion = (
             nn.Sequential(
@@ -51,9 +63,9 @@ class RSWADetectionNet(nn.Module):
         #                 NAO e um "qualquer movimento" (isso seria a uniao das 3
         #                 cabecas em pos-processamento, nao uma cabeca propria).
         # Substitui a antiga cabeca unica movement_head (commit ec5d505, revertido).
-        self.tonic_head=nn.Sequential(nn.Linear(cfg.d_model,h),nn.ReLU(inplace=True),nn.Dropout(cfg.dropout),nn.Linear(h,1))
-        self.phasic_head=nn.Sequential(nn.Linear(cfg.d_model,h),nn.ReLU(inplace=True),nn.Dropout(cfg.dropout),nn.Linear(h,1))
-        self.any_head=nn.Sequential(nn.Linear(cfg.d_model,h),nn.ReLU(inplace=True),nn.Dropout(cfg.dropout),nn.Linear(h,1))
+        self.tonic_head = _rswa_head(cfg.d_model, cfg.dropout)
+        self.phasic_head = _rswa_head(cfg.d_model, cfg.dropout)
+        self.any_head = _rswa_head(cfg.d_model, cfg.dropout)
     def forward(self, emg_center, mask=None, stage_probs=None):
         z = self.encoder(emg_center)
         if self.stage_fusion is not None and stage_probs is not None:

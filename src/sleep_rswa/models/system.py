@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+from dataclasses import replace
 
 import torch
 import torch.nn as nn
@@ -14,14 +15,19 @@ class SleepStagingRSWASystem(nn.Module):
     def __init__(self, staging_model=None, rswa_model=None):
         super().__init__()
         self.staging_model = staging_model or SleepStagingNet()
-        self.rswa_model = rswa_model or RSWADetectionNet()
+        if rswa_model is None:
+            base_cfg = getattr(self.staging_model, "cfg", ModelConfig())
+            rswa_cfg = replace(base_cfg, rswa_stage_conditioning=True)
+            self.rswa_model = RSWADetectionNet(config=rswa_cfg, stage_conditioning=True)
+        else:
+            self.rswa_model = rswa_model
         self.cfg = getattr(
             self.staging_model,
             "cfg",
             getattr(self.rswa_model, "cfg", ModelConfig()),
         )
         self.use_stage_conditioning = bool(
-            getattr(self.cfg, "rswa_stage_conditioning", True)
+            getattr(self.rswa_model, "use_stage_conditioning", False)
         )
         self.detach_stage_probs = bool(
             getattr(self.cfg, "rswa_stage_conditioning_detach", True)

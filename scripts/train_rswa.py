@@ -227,7 +227,7 @@ def main() -> None:
                 loader=val_loader,
             )
 
-            model = RSWADetectionNet().to(device)
+            model = RSWADetectionNet(stage_conditioning=False).to(device)
             tonic_weight = torch.tensor(args.tonic_pos_weight, device=device) if args.tonic_pos_weight else None
             phasic_weight = torch.tensor(args.phasic_pos_weight, device=device) if args.phasic_pos_weight else None
             any_weight = torch.tensor(args.any_pos_weight, device=device) if args.any_pos_weight else None
@@ -380,7 +380,7 @@ def main() -> None:
             test_loader = make_loader(test_subjects, args, False, device)
             test_summary = evaluate_movement_test_set(
                 test_loader=test_loader, fold_checkpoints=fold_checkpoints,
-                build_model=lambda: RSWADetectionNet(), device=device, logger=logger,
+                build_model=lambda: RSWADetectionNet(stage_conditioning=False), device=device, logger=logger,
                 figures_dir=logger.run_dir / "test", amp=not args.no_amp, threshold=thresholds,
             )
 
