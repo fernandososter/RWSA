@@ -2,8 +2,25 @@ import torch
 import torch.nn as nn
 try:
     from mamba_ssm import Mamba as MambaOfficial
-except ImportError:
+    MAMBA_IMPORT_ERROR=None
+except ImportError as exc:
     MambaOfficial=None
+    MAMBA_IMPORT_ERROR=exc
+
+
+def mamba_backend_name() -> str:
+    return "mamba_ssm" if MambaOfficial is not None else "gru_fallback"
+
+
+def mamba_backend_detail() -> str:
+    if MambaOfficial is not None:
+        return "mamba_ssm importado com sucesso."
+    if MAMBA_IMPORT_ERROR is None:
+        return "mamba_ssm indisponivel; usando fallback GRU."
+    return (
+        "mamba_ssm indisponivel; usando fallback GRU. "
+        f"Motivo do import: {type(MAMBA_IMPORT_ERROR).__name__}: {MAMBA_IMPORT_ERROR}"
+    )
 
 class _FallbackDirectionalBlock(nn.Module):
     """Fallback unidirecional portátil quando mamba-ssm não está instalado."""
@@ -31,6 +48,9 @@ class BidirMambaBlock(nn.Module):
             self.sequence_impl="gru_fallback"; self.fwd=_FallbackDirectionalBlock(d_model); self.bwd=_FallbackDirectionalBlock(d_model)
         else:
             self.sequence_impl="mamba"; self.fwd=MambaOfficial(d_model=d_model,d_state=d_state); self.bwd=MambaOfficial(d_model=d_model,d_state=d_state)
+
+    def extra_repr(self):
+        return f"sequence_impl={self.sequence_impl}"
 
     @staticmethod
     def _flip_time(x):

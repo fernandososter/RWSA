@@ -55,6 +55,7 @@ from sleep_rswa.training import (
     stratified_group_folds,
     stratified_group_holdout,
 )
+from sleep_rswa.models.mamba import mamba_backend_detail, mamba_backend_name
 
 GREEN  = "\033[92m"
 YELLOW = "\033[93m"
@@ -332,6 +333,10 @@ def main() -> None:
     ) as logger:
         logger.info(f"Dispositivo: {device}")
         logger.info(f"Modelo (staging + movimento): {args.model}")
+        logger.info(
+            f"Backend temporal BiMamba: {mamba_backend_name()} | "
+            f"{mamba_backend_detail()}"
+        )
         logger.info(
             f"RSWA experimental: target_mode={args.rswa_target_mode} "
             f"postprocess_mode={args.rswa_postprocess_mode} "
