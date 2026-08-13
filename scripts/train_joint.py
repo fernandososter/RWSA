@@ -14,7 +14,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from torch.nn.utils import clip_grad_norm_
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, WeightedRandomSampler
 
 from sleep_rswa import (
     available_staging_models,
@@ -126,6 +126,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tonic-pos-weight", type=float)
     parser.add_argument("--phasic-pos-weight", type=float)
     parser.add_argument("--any-pos-weight", type=float)
+    parser.add_argument(
+        "--oversample-tonic-subjects",
+        action="store_true",
+        help="Aumenta a frequência de sujeitos que contêm ao menos um evento tônico no train_loader.",
+    )
+    parser.add_argument(
+        "--tonic-subject-weight",
+        type=float,
+        default=5.0,
+        help="Peso aplicado a sujeitos com tonic>0 quando --oversample-tonic-subjects está ativo.",
+    )
     parser.add_argument("--patience", type=int, default=15)
     parser.add_argument(
         "--log-movement-distribution", action="store_true",
@@ -162,9 +173,40 @@ def _resolve_thresholds(args) -> dict[str, float]:
 
 def make_loader(subjects, args, shuffle, device):
     ds = SleepAnalysisDataset(subjects, min_confidence=args.min_confidence, rem_mask_only=not args.all_stages)
-    return DataLoader(ds, batch_size=args.batch_size, shuffle=shuffle, num_workers=args.num_workers,
-                      collate_fn=collate_sleep_analysis_exams, pin_memory=device.type == "cuda",
-                      persistent_workers=args.num_workers > 0)
+    sampler = None
+    if shuffle and args.oversample_tonic_subjects:
+        weights = torch.as_tensor(
+            [
+                args.tonic_subject_weight if _subject_has_tonic(subject) else 1.0
+                for subject in ds.subjects
+            ],
+            dtype=torch.double,
+        )
+        sampler = WeightedRandomSampler(
+            weights=weights,
+            num_samples=len(weights),
+            replacement=True,
+        )
+    return DataLoader(
+        ds,
+        batch_size=args.batch_size,
+        shuffle=(shuffle and sampler is None),
+        sampler=sampler,
+        num_workers=args.num_workers,
+        collate_fn=collate_sleep_analysis_exams,
+        pin_memory=device.type == "cuda",
+        persistent_workers=args.num_workers > 0,
+    )
+
+
+def _subject_has_tonic(subject) -> bool:
+    if subject.tonic_labels is not None:
+        return bool((subject.tonic_labels > 0.5).any().item())
+    return bool((subject.rswa_labels == 2).any().item())
+
+
+def _count_tonic_subjects(subjects) -> int:
+    return sum(1 for subject in subjects if _subject_has_tonic(subject))
 
 
 def joint_monitor_value(monitor: str, val_metrics: dict[str, float]) -> float:
@@ -295,6 +337,14 @@ def main() -> None:
             logger.write_json(f"fold_{fold}/data_description.json", fold_data)
             logger.info(format_split_description(f"Fold {fold} TREINO", train_desc))
             logger.info(format_split_description(f"Fold {fold} VALIDAÇÃO", val_desc))
+            train_tonic_subjects = _count_tonic_subjects(train_subjects)
+            val_tonic_subjects = _count_tonic_subjects(val_subjects)
+            logger.info(
+                f"Fold {fold}: sujeitos com tonic -> treino={train_tonic_subjects}/{len(train_subjects)} "
+                f"validação={val_tonic_subjects}/{len(val_subjects)} | "
+                f"oversample_tonic_subjects={args.oversample_tonic_subjects} "
+                f"tonic_subject_weight={args.tonic_subject_weight:.2f}"
+            )
 
             print()
             print("=" * 80)
