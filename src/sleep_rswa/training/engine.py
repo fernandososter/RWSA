@@ -271,7 +271,7 @@ def run_rswa_epoch(
             preds = (probs >= thr[h]).long()
             targets_all[h].append(head_targets[h][valid_mask].long().detach().cpu())
             preds_all[h].append(preds[valid_mask].detach().cpu())
-            probs_all[h].append(probs[valid_mask].detach().cpu())
+            probs_all[h].append(probs[valid_mask].float().detach().cpu())
         for b, subject_id in enumerate(batch["subject_ids"]):
             idx = torch.nonzero(valid_cpu[b], as_tuple=False).flatten()
             if idx.numel() == 0:
@@ -379,7 +379,7 @@ def evaluate_joint(
                     preds = (probs >= thr[h]).long()
                     targets_all[h].append(head_targets[h][rswa_valid].long().cpu())
                     preds_all[h].append(preds[rswa_valid].cpu())
-                    probs_all[h].append(probs[rswa_valid].cpu())
+                    probs_all[h].append(probs[rswa_valid].float().cpu())
                 for b, subject_id in enumerate(batch["subject_ids"]):
                     idx = torch.nonzero(valid_cpu[b], as_tuple=False).flatten()
                     if idx.numel() == 0:
