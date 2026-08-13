@@ -596,12 +596,20 @@ function drawSignal(sig, ev, t0, t1) {
   const plotHeight = plotBottom - plotTop;
   const midY = plotTop + plotHeight / 2;
   const remBaselineUv = Number(sig.rem_baseline_uv);
-  const remBaseline2xUv = Number(sig.rem_baseline_2x_uv);
+  // amplitude_threshold_uv = limiar REAL usado pela regra (atonia_baseline_uv *
+  // min_amplitude_ratio_used); rem_baseline_2x_uv fica so como fallback para
+  // respostas antigas de cache/servidor.
+  const amplitudeThresholdUv = Number(
+    sig.amplitude_threshold_uv !== undefined ? sig.amplitude_threshold_uv : sig.rem_baseline_2x_uv
+  );
+  const amplitudeRatioUsed = Number.isFinite(Number(sig.amplitude_ratio_used))
+    ? Number(sig.amplitude_ratio_used)
+    : 2.0;
   const maxAbs = Math.max(
     1e-9,
     ...columns.flatMap((col) => [Math.abs(Number(col.lo || 0)), Math.abs(Number(col.hi || 0)), Math.abs(Number(col.mean || 0))]),
     Number.isFinite(remBaselineUv) ? Math.abs(remBaselineUv) : 0,
-    Number.isFinite(remBaseline2xUv) ? Math.abs(remBaseline2xUv) : 0,
+    Number.isFinite(amplitudeThresholdUv) ? Math.abs(amplitudeThresholdUv) : 0,
   );
   const scaleY = (plotHeight / 2 - 10) / maxAbs;
 
@@ -611,26 +619,27 @@ function drawSignal(sig, ev, t0, t1) {
   }
   nodes.push(svgEl("line", {x1: 0, y1: midY, x2: width, y2: midY, stroke: "#35566f", "stroke-width": 1}));
 
-  if (Number.isFinite(remBaseline2xUv) && remBaseline2xUv > 0) {
-    const yUp2x = midY - remBaseline2xUv * scaleY;
-    const yDown2x = midY + remBaseline2xUv * scaleY;
+  if (Number.isFinite(amplitudeThresholdUv) && amplitudeThresholdUv > 0) {
+    const yUpThr = midY - amplitudeThresholdUv * scaleY;
+    const yDownThr = midY + amplitudeThresholdUv * scaleY;
+    const ratioLabel = `${formatNumber(amplitudeRatioUsed, amplitudeRatioUsed % 1 === 0 ? 0 : 1)}x`;
     nodes.push(svgEl("line", {
-      x1: 0, y1: yUp2x, x2: width, y2: yUp2x,
+      x1: 0, y1: yUpThr, x2: width, y2: yUpThr,
       stroke: "#ffd84d", "stroke-width": 1.4, "stroke-dasharray": "8 6", "stroke-opacity": 0.95,
     }));
     nodes.push(svgEl("line", {
-      x1: 0, y1: yDown2x, x2: width, y2: yDown2x,
+      x1: 0, y1: yDownThr, x2: width, y2: yDownThr,
       stroke: "#ffd84d", "stroke-width": 1.4, "stroke-dasharray": "8 6", "stroke-opacity": 0.95,
     }));
     const upLabel = svgEl("text", {
-      x: width - 160, y: yUp2x - 6, fill: "#ffd84d", "font-size": 11, "font-family": "sans-serif",
+      x: width - 160, y: yUpThr - 6, fill: "#ffd84d", "font-size": 11, "font-family": "sans-serif",
     });
-    upLabel.textContent = `+2x basal (${formatNumber(remBaseline2xUv, 2)} uV)`;
+    upLabel.textContent = `+${ratioLabel} basal atonia (${formatNumber(amplitudeThresholdUv, 2)} uV)`;
     nodes.push(upLabel);
     const downLabel = svgEl("text", {
-      x: width - 160, y: yDown2x + 16, fill: "#ffd84d", "font-size": 11, "font-family": "sans-serif",
+      x: width - 160, y: yDownThr + 16, fill: "#ffd84d", "font-size": 11, "font-family": "sans-serif",
     });
-    downLabel.textContent = `-2x basal`;
+    downLabel.textContent = `-${ratioLabel} basal atonia`;
     nodes.push(downLabel);
   }
 
@@ -643,7 +652,7 @@ function drawSignal(sig, ev, t0, t1) {
     const baselineLabel = svgEl("text", {
       x: width - 220, y: yBaseline - 6, fill: "#ff9d9d", "font-size": 11, "font-family": "sans-serif",
     });
-    baselineLabel.textContent = `basal REM = ${formatNumber(remBaselineUv, 2)} uV`;
+    baselineLabel.textContent = `basal REM (p10) = ${formatNumber(remBaselineUv, 2)} uV`;
     nodes.push(baselineLabel);
   }
 

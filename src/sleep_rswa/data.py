@@ -29,6 +29,9 @@ class SubjectData:
     # multi-rotulo). Ausente -> zeros (nenhum "any" conhecido) ate a rotulagem
     # automatica (CNN+limiar-duplo) escrever este campo.
     any_labels: torch.Tensor | None = None
+    # Alvo auxiliar opcional: cobertura tonica da macro-epoca REM (0..1),
+    # repetida em cada mini-epoca de 3s da mesma janela de 30s.
+    tonic_support: torch.Tensor | None = None
     n_epochs: int = field(init=False)
 
     def __post_init__(self) -> None:
@@ -37,6 +40,8 @@ class SubjectData:
             raise ValueError(f"{self.subject_id}: signals e sleep_stages possuem comprimentos diferentes.")
         if self.emg_signals is not None and self.emg_signals.shape[0] != self.n_epochs:
             raise ValueError(f"{self.subject_id}: emg_signals possui comprimento incompatível.")
+        if self.tonic_support is not None and self.tonic_support.shape[0] != self.n_epochs:
+            raise ValueError(f"{self.subject_id}: tonic_support possui comprimento incompatível.")
 
 
 def load_subject_file(path: str | Path) -> SubjectData:
@@ -64,6 +69,7 @@ def load_subject_file(path: str | Path) -> SubjectData:
     tonic = obj.get("tonic_labels")
     phasic = obj.get("phasic_labels")
     any_lab = obj.get("any_labels")
+    tonic_support = obj.get("tonic_support")
     return SubjectData(
         subject_id=str(obj.get("subject_id", path.stem)),
         signals=signals,
@@ -74,6 +80,7 @@ def load_subject_file(path: str | Path) -> SubjectData:
         tonic_labels=tonic,
         phasic_labels=phasic,
         any_labels=any_lab,
+        tonic_support=tonic_support,
     )
 
 
@@ -266,10 +273,18 @@ class SleepAnalysisDataset(Dataset):
         else:
             any_labels = torch.zeros_like(labels, dtype=torch.float32)
 
+        if subject.tonic_support is not None:
+            tonic_support = subject.tonic_support.float().clone()
+            tonic_support_valid = valid_rswa.clone()
+        else:
+            tonic_support = torch.zeros_like(labels, dtype=torch.float32)
+            tonic_support_valid = torch.zeros_like(valid_rswa)
+
         # Zera rotulos fora da mascara de validade (cada cabeca independente).
         tonic_labels[~valid_rswa] = 0.0
         phasic_labels[~valid_rswa] = 0.0
         any_labels[~valid_rswa] = 0.0
+        tonic_support[~tonic_support_valid] = 0.0
         rswa_labels[~valid_rswa] = self.rswa_config.none_label
 
         # Alias historico "movement" = uniao das 3 cabecas (qualquer movimento
@@ -288,6 +303,8 @@ class SleepAnalysisDataset(Dataset):
             "phasic_labels": phasic_labels,
             "tonic_labels": tonic_labels,
             "any_labels": any_labels,
+            "tonic_support": tonic_support,
+            "tonic_support_valid": tonic_support_valid,
             "movement_labels": movement_labels,
             "rswa_valid": valid_rswa,
             "rswa_conf": confidence,
@@ -311,6 +328,8 @@ def collate_sleep_analysis_exams(batch):
         "phasic_labels": torch.zeros(b, tmax),
         "tonic_labels": torch.zeros(b, tmax),
         "any_labels": torch.zeros(b, tmax),
+        "tonic_support": torch.zeros(b, tmax),
+        "tonic_support_valid": torch.zeros(b, tmax, dtype=torch.bool),
         "movement_labels": torch.zeros(b, tmax),
         "rswa_valid": torch.zeros(b, tmax, dtype=torch.bool),
         "rswa_conf": torch.zeros(b, tmax),
@@ -327,6 +346,8 @@ def collate_sleep_analysis_exams(batch):
             "phasic_labels",
             "tonic_labels",
             "any_labels",
+            "tonic_support",
+            "tonic_support_valid",
             "movement_labels",
             "rswa_valid",
             "rswa_conf",

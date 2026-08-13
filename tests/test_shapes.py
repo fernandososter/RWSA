@@ -73,3 +73,14 @@ def test_build_movement_model_variants_match_multihead_contract():
         assert out["phasic_logits"].shape==(1,2)
         assert out["any_logits"].shape==(1,2)
         assert model.use_stage_conditioning is True
+
+
+def test_rswa_models_optionally_expose_tonic_support_head():
+    cfg=ModelConfig(rswa_stage_conditioning=True,rswa_tonic_support_aux=True)
+    model=build_movement_model("cnn_bimamba",config=cfg,stage_conditioning=True).eval()
+    out=model(
+        torch.randn(1,3,1,300),
+        torch.ones(1,3,dtype=torch.bool),
+        stage_probs=torch.softmax(torch.randn(1,3,5),dim=-1),
+    )
+    assert out["tonic_support_logits"].shape==(1,3)

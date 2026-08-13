@@ -445,6 +445,7 @@ def preprocess_exam(
             "n_tonic_macro_epochs": int(rswa["n_tonic_macro_epochs"]),
             "n_phasic_macro_epochs": int(rswa["n_phasic_macro_epochs"]),
             "min_amplitude_ratio_used": float(rswa["min_amplitude_ratio_used"]),
+            "tonic_support_schema": "tonic_coverage_s / 30.0 repetido nas 10 mini-epocas REM da macro-epoca",
             "calibration_warning": AASM_CALIBRATION_WARNING,
         }
     else:
@@ -470,6 +471,7 @@ def preprocess_exam(
         "tonic_labels":  rswa["tonic_labels"],
         "phasic_labels": rswa["phasic_labels"],
         "any_labels":    rswa["any_labels"],
+        "tonic_support": rswa.get("tonic_support"),
         "rswa_labels":   rswa["rswa_labels"],
         "rswa_conf":     rswa["rswa_conf"],
         "tonic_cov":     rswa["tonic_cov"],
@@ -487,7 +489,7 @@ def _save_result(result: Dict, out_path: Path) -> None:
     """Grava o dict de preprocess_exam como .pt (inclui rotulos de RSWA)."""
     import torch
 
-    torch.save({
+    payload = {
         "signals":       torch.from_numpy(result["signals"]),
         "sleep_stages":  torch.from_numpy(result["sleep_stages"]),
         "channel_mask":  torch.from_numpy(result["channel_mask"]),
@@ -508,7 +510,10 @@ def _save_result(result: Dict, out_path: Path) -> None:
         # o exame nao tem nenhuma mini-epoca REM (n_rem_epochs == 0).
         "rem_baseline_uv":       result["rem_baseline_uv"],
         "rem_baseline_n_epochs": result["rem_baseline_n_epochs"],
-    }, out_path)
+    }
+    if result.get("tonic_support") is not None:
+        payload["tonic_support"] = torch.from_numpy(result["tonic_support"])
+    torch.save(payload, out_path)
 
 
 def run_preprocessing(

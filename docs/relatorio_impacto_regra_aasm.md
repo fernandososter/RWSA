@@ -852,6 +852,65 @@ ser tratado como um ponto de partida razoavel para reduzir falsos
 positivos evidentes, nao como um valor definitivo calibrado
 estatisticamente contra o dataset completo de 100+ exames.
 
+### 13.5 Bug encontrado na revisao manual: linha de limiar exibida na UI nao refletia o `min_amplitude_ratio` efetivo
+
+Apos configurar `min_amplitude_ratio=4.0` e `atonia_pct=90.0` e regerar os
+tensores de `view/validacao/`, o usuario reportou, via captura de tela da
+UI de revisao, uma epoca no exame `n1` marcada como `tonic` mesmo com o
+piso de amplitude elevado — aparentemente contradizendo a Secao 13.4.
+
+**Diagnostico:** a decisao `tonic`/`phasic` estava correta; o problema era
+exclusivamente de exibicao. `view/app.py` calculava a linha de referencia
+`+2x basal` da UI como `2.0 * rem_baseline_uv` (o percentil-10 do envelope
+REM, guardado no topo do `.pt` para normalizacao), **hardcoded e
+independente** do `min_amplitude_ratio` e `atonia_pct` realmente usados
+pela regra AASM ao gerar aquele exame. O limiar de fato usado pela regra
+e `atonia_baseline_uv * min_amplitude_ratio_used`, ambos gravados em
+`label_metadata["aasm_rule"]`. No exame `n1` inspecionado (`atonia_pct=90`,
+`min_amplitude_ratio=4.0`), isso produzia:
+
+| Grandeza | Valor |
+|---|---|
+| `rem_baseline_uv` (p10 REM, topo do `.pt`) | 0.0617 uV |
+| Linha desenhada na UI (`2.0 * rem_baseline_uv`) | 0.1233 uV |
+| `atonia_baseline_uv` (p90 REM, usado pela regra) | 0.6191 uV |
+| `min_amplitude_ratio_used` (usado pela regra) | 4.0 |
+| **Limiar real da regra** (`atonia_baseline_uv * ratio`) | **2.4763 uV** |
+
+A linha exibida ficava **~20x abaixo** do limiar real, entao qualquer
+atividade tonica visivelmente acima da linha desenhada (mas ainda abaixo
+do limiar real de 2.48 uV) gerava a falsa impressao de que a regra estava
+marcando `tonic` com um piso mais baixo do que o configurado — quando na
+verdade a marcacao (quando presente) refletia o limiar de 4x corretamente
+aplicado; o revisor apenas nao tinha como confirmar isso visualmente.
+
+**Correcao:** `view/app.py` (`_prepare_review`) agora le
+`label_metadata["aasm_rule"]["atonia_baseline_uv"]` e
+`["min_amplitude_ratio_used"]` e calcula
+`amplitude_threshold_uv = atonia_baseline_uv * min_amplitude_ratio_used`,
+com fallback para o comportamento antigo (`2.0 * rem_baseline_uv`) em
+exames legados sem essa metadata (CSV humano ou `label_source` antigo). O
+endpoint `/api/revisao/...` passou a expor `amplitude_threshold_uv` e
+`amplitude_ratio_used`; `revisao.html` desenha a linha com o rotulo
+dinamico `+{ratio}x basal atonia` em vez do texto fixo `+2x basal`, e a
+linha do percentil-10 bruto foi rotulada explicitamente `basal REM (p10)`
+para nao ser confundida com o limiar de decisao. Validado numericamente
+contra `n1.pt`: o novo `amplitude_threshold_uv` calculado (2.4763 uV)
+bate exatamente com o limiar independente `atonia_baseline_uv *
+min_amplitude_ratio_used`; testado tambem o caminho de fallback para
+exames sem `label_metadata["aasm_rule"]`, reproduzindo o valor antigo
+(`2x rem_baseline_uv`). Suite de 49 testes (`test_aasm_rule.py` +
+`test_ecg_gating.py`) permanece passando -- a mudanca e isolada ao
+servidor/frontend de revisao, sem tocar `aasm_rule.py`.
+
+**Licao para calibracoes futuras:** qualquer parametro da regra AASM que
+afete o limiar de decisao (`min_amplitude_ratio`, `atonia_pct`) deve ter
+sua contraparte visual na UI de revisao atualizada junto -- do contrario,
+o revisor manual perde a capacidade de auditar visualmente se a regra
+esta se comportando como configurada, o que pode levar a diagnosticos
+incorretos de "a regra nao funcionou" quando na verdade so a exibicao
+estava desatualizada.
+
 ## 14. Arquivos gerados nesta analise
 
 - `src/sleep_rswa/preprocessing/aasm_rule.py` — implementacao isolada dos 3
@@ -938,3 +997,15 @@ estatisticamente contra o dataset completo de 100+ exames.
   `phasic` e % de epocas REM `tonic`/`phasic`, ambos em funcao de
   `min_amplitude_ratio`, com o valor atual (2.0x) e o recomendado
   (4.0x) marcados (Secao 13.2-13.4).
+- `view/app.py` — `_prepare_review` passa a calcular
+  `amplitude_threshold_uv` a partir de
+  `label_metadata["aasm_rule"]["atonia_baseline_uv"]` e
+  `["min_amplitude_ratio_used"]` (com fallback para `2.0 *
+  rem_baseline_uv` em exames legados); o endpoint de janela do modo de
+  revisao expõe `amplitude_threshold_uv`/`amplitude_ratio_used`
+  (Secao 13.5).
+- `view/revisao.html` — a linha de referencia do grafico de EMG usa o
+  novo `amplitude_threshold_uv` em vez do `2x rem_baseline_uv`
+  hardcoded, com rotulo dinamico `+{ratio}x basal atonia`; a linha do
+  percentil-10 bruto foi rotulada `basal REM (p10)` para nao ser
+  confundida com o limiar de decisao (Secao 13.5).

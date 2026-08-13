@@ -440,6 +440,35 @@ def _prepare_review(exam_name):
         label_metadata = dict(label_metadata)
     label_metadata.setdefault("label_source", label_source)
 
+    # Limiar de amplitude REALMENTE usado pela regra para decidir tonic/phasic.
+    # NAO confundir com rem_baseline_uv (percentil-10 do envelope REM, guardado
+    # no topo do .pt so para referencia/normalizacao) -- quando a regra AASM
+    # roda com atonia_pct != None e/ou min_amplitude_ratio != 2.0, o basal e o
+    # multiplicador efetivos ficam em label_metadata["aasm_rule"] e podem ser
+    # muito diferentes do par (rem_baseline_uv, 2.0) que a UI antes assumia
+    # cegamente. Ver docs/relatorio_impacto_regra_aasm.md secao de calibracao.
+    aasm_meta = label_metadata.get("aasm_rule")
+    atonia_effective_uv = float("nan")
+    amplitude_ratio_used = 2.0
+    if isinstance(aasm_meta, dict):
+        try:
+            atonia_effective_uv = float(aasm_meta.get("atonia_baseline_uv"))
+        except (TypeError, ValueError):
+            atonia_effective_uv = float("nan")
+        try:
+            amplitude_ratio_used = float(aasm_meta.get("min_amplitude_ratio_used", 2.0))
+        except (TypeError, ValueError):
+            amplitude_ratio_used = 2.0
+    if not np.isfinite(atonia_effective_uv):
+        # Exame legado sem label_metadata.aasm_rule (CSV humano ou label_source
+        # antigo) -- cai de volta no unico basal disponivel, como antes.
+        atonia_effective_uv = rem_baseline_uv
+    amplitude_threshold_uv = (
+        atonia_effective_uv * amplitude_ratio_used
+        if np.isfinite(atonia_effective_uv)
+        else float("nan")
+    )
+
     emg_raw = signals[:, 4, :].astype(np.float32)  # EMG mento (indice 4), sem z-score
     events = _events_from_pt_labels(
         tonic,
@@ -474,6 +503,9 @@ def _prepare_review(exam_name):
         "label_source": label_source,
         "label_metadata": label_metadata,
         "rem_baseline_uv": rem_baseline_uv,
+        "atonia_effective_uv": atonia_effective_uv,
+        "amplitude_ratio_used": amplitude_ratio_used,
+        "amplitude_threshold_uv": amplitude_threshold_uv,
     }
     _REVISAO_CACHE[exam_name] = st
     return st
@@ -757,9 +789,23 @@ class Handler(BaseHTTPRequestHandler):
                     "samples": seg.round(3).tolist(),
                     "display_trace": display_trace,
                     "rem_baseline_uv": st["rem_baseline_uv"],
+                    # Limiar REAL de amplitude usado pela regra (atonia_baseline_uv *
+                    # min_amplitude_ratio_used, lido de label_metadata.aasm_rule) --
+                    # substitui o antigo "rem_baseline_2x_uv" hardcoded, que sempre
+                    # assumia basal=percentil-10-REM e razao=2.0 mesmo quando a regra
+                    # rodou com atonia_pct/min_amplitude_ratio diferentes (fazia a
+                    # linha desenhada na tela ficar ate ~20x abaixo do limiar real).
+                    "amplitude_threshold_uv": (
+                        float(st["amplitude_threshold_uv"])
+                        if np.isfinite(st["amplitude_threshold_uv"])
+                        else None
+                    ),
+                    "amplitude_ratio_used": st["amplitude_ratio_used"],
+                    # Mantido por compatibilidade com clientes antigos; agora
+                    # espelha amplitude_threshold_uv em vez do calculo hardcoded.
                     "rem_baseline_2x_uv": (
-                        float(st["rem_baseline_uv"]) * 2.0
-                        if np.isfinite(st["rem_baseline_uv"])
+                        float(st["amplitude_threshold_uv"])
+                        if np.isfinite(st["amplitude_threshold_uv"])
                         else None
                     ),
                     "epoch_start": e0,

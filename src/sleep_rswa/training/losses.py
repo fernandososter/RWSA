@@ -14,14 +14,27 @@ class RSWALoss(nn.Module):
     (cada uma media so sobre as posicoes validas) e cada termo individual,
     para logging/monitoramento por cabeca.
     """
-    def __init__(self,tonic_pos_weight=None,phasic_pos_weight=None,any_pos_weight=None):
+    def __init__(self,tonic_pos_weight=None,phasic_pos_weight=None,any_pos_weight=None,tonic_support_weight: float = 0.0):
         super().__init__()
         self.tonic=nn.BCEWithLogitsLoss(pos_weight=tonic_pos_weight,reduction="none")
         self.phasic=nn.BCEWithLogitsLoss(pos_weight=phasic_pos_weight,reduction="none")
         self.any=nn.BCEWithLogitsLoss(pos_weight=any_pos_weight,reduction="none")
-    def forward(self,outputs,tonic_targets,phasic_targets,any_targets,mask):
+        self.tonic_support = nn.SmoothL1Loss(reduction="none")
+        self.tonic_support_weight = float(tonic_support_weight)
+    def forward(self,outputs,tonic_targets,phasic_targets,any_targets,mask,tonic_support_targets=None,tonic_support_mask=None):
         tl=self.tonic(outputs["tonic_logits"],tonic_targets)[mask].mean()
         pl=self.phasic(outputs["phasic_logits"],phasic_targets)[mask].mean()
         al=self.any(outputs["any_logits"],any_targets)[mask].mean()
         total=tl+pl+al
-        return total,{"tonic_loss":tl.detach(),"phasic_loss":pl.detach(),"any_loss":al.detach()}
+        tsl=outputs["tonic_logits"].new_zeros(())
+        if (
+            self.tonic_support_weight > 0.0
+            and "tonic_support_logits" in outputs
+            and tonic_support_targets is not None
+        ):
+            support_mask = mask if tonic_support_mask is None else (mask & tonic_support_mask.bool())
+            if support_mask.any():
+                support_pred = torch.sigmoid(outputs["tonic_support_logits"])
+                tsl = self.tonic_support(support_pred, tonic_support_targets)[support_mask].mean()
+                total = total + (self.tonic_support_weight * tsl)
+        return total,{"tonic_loss":tl.detach(),"phasic_loss":pl.detach(),"any_loss":al.detach(),"tonic_support_loss":tsl.detach()}

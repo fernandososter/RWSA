@@ -174,6 +174,7 @@ def run_rswa_epoch(
     model.train(training)
     losses: list[float] = []
     head_losses: dict[str, list[float]] = {h: [] for h in _HEADS}
+    tonic_support_losses: list[float] = []
     targets_all: dict[str, list[torch.Tensor]] = {h: [] for h in _HEADS}
     preds_all: dict[str, list[torch.Tensor]] = {h: [] for h in _HEADS}
 
@@ -182,6 +183,8 @@ def run_rswa_epoch(
         tonic_targets = batch["tonic_labels"].to(device, non_blocking=True)
         phasic_targets = batch["phasic_labels"].to(device, non_blocking=True)
         any_targets = batch["any_labels"].to(device, non_blocking=True)
+        tonic_support_targets = batch["tonic_support"].to(device, non_blocking=True)
+        tonic_support_valid = batch["tonic_support_valid"].to(device, non_blocking=True)
         padding_mask = batch["padding_mask"].to(device, non_blocking=True)
         valid_mask = batch["rswa_valid"].to(device, non_blocking=True) & padding_mask
 
@@ -195,7 +198,9 @@ def run_rswa_epoch(
             with _autocast_context(device, amp):
                 outputs = model(emg, mask=padding_mask)
                 loss, per_head = criterion(
-                    outputs, tonic_targets, phasic_targets, any_targets, valid_mask
+                    outputs, tonic_targets, phasic_targets, any_targets, valid_mask,
+                    tonic_support_targets=tonic_support_targets,
+                    tonic_support_mask=tonic_support_valid,
                 )
 
             if training:
@@ -207,6 +212,7 @@ def run_rswa_epoch(
         losses.append(float(loss.detach().cpu()))
         for h in _HEADS:
             head_losses[h].append(float(per_head[f"{h}_loss"].cpu()))
+        tonic_support_losses.append(float(per_head["tonic_support_loss"].cpu()))
 
         head_targets = {"tonic": tonic_targets, "phasic": phasic_targets, "any": any_targets}
         for h in _HEADS:
@@ -235,6 +241,7 @@ def run_rswa_epoch(
         metrics[f"{h}_loss"] = _safe_mean(head_losses[h])
         metrics[f"{h}_target_distribution"] = _binary_distribution(targets_np[h])
         metrics[f"{h}_prediction_distribution"] = _binary_distribution(preds_np[h])
+    metrics["tonic_support_loss"] = _safe_mean(tonic_support_losses)
     return metrics
 
 
@@ -256,6 +263,7 @@ def evaluate_joint(
     stage_losses: list[float] = []
     rswa_losses: list[float] = []
     rswa_head_losses: dict[str, list[float]] = {h: [] for h in _HEADS}
+    tonic_support_losses: list[float] = []
     stage_targets_all: list[torch.Tensor] = []
     stage_preds_all: list[torch.Tensor] = []
     targets_all: dict[str, list[torch.Tensor]] = {h: [] for h in _HEADS}
@@ -270,6 +278,8 @@ def evaluate_joint(
             tonic_targets = batch["tonic_labels"].to(device, non_blocking=True)
             phasic_targets = batch["phasic_labels"].to(device, non_blocking=True)
             any_targets = batch["any_labels"].to(device, non_blocking=True)
+            tonic_support_targets = batch["tonic_support"].to(device, non_blocking=True)
+            tonic_support_valid = batch["tonic_support_valid"].to(device, non_blocking=True)
             stage_valid = batch["staging_valid"].to(device, non_blocking=True) & padding_mask
             rswa_valid = batch["rswa_valid"].to(device, non_blocking=True) & padding_mask
 
@@ -287,11 +297,14 @@ def evaluate_joint(
 
             if rswa_valid.any():
                 rswa_loss, per_head = rswa_criterion(
-                    outputs, tonic_targets, phasic_targets, any_targets, rswa_valid
+                    outputs, tonic_targets, phasic_targets, any_targets, rswa_valid,
+                    tonic_support_targets=tonic_support_targets,
+                    tonic_support_mask=tonic_support_valid,
                 )
                 rswa_losses.append(float(rswa_loss.cpu()))
                 for h in _HEADS:
                     rswa_head_losses[h].append(float(per_head[f"{h}_loss"].cpu()))
+                tonic_support_losses.append(float(per_head["tonic_support_loss"].cpu()))
                 head_targets = {"tonic": tonic_targets, "phasic": phasic_targets, "any": any_targets}
                 for h in _HEADS:
                     preds = (torch.sigmoid(outputs[f"{h}_logits"]) >= thr[h]).long()
@@ -325,6 +338,7 @@ def evaluate_joint(
             metrics[f"rswa_{h}_loss"] = _safe_mean(rswa_head_losses[h])
             metrics[f"{h}_target_distribution"] = _binary_distribution(targets_np[h])
             metrics[f"{h}_prediction_distribution"] = _binary_distribution(preds_np[h])
+        metrics["rswa_tonic_support_loss"] = _safe_mean(tonic_support_losses)
     return metrics
 
 

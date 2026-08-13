@@ -16,6 +16,7 @@ import torch
 from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import DataLoader, WeightedRandomSampler
 
+from sleep_rswa.config import ModelConfig
 from sleep_rswa import (
     available_staging_models,
     build_movement_model,
@@ -126,6 +127,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tonic-pos-weight", type=float)
     parser.add_argument("--phasic-pos-weight", type=float)
     parser.add_argument("--any-pos-weight", type=float)
+    parser.add_argument(
+        "--tonic-support-loss-weight",
+        type=float,
+        default=0.0,
+        help="Peso da loss auxiliar que regressa a cobertura tonica (0..1) da macro-epoca REM.",
+    )
     parser.add_argument(
         "--oversample-tonic-subjects",
         action="store_true",
@@ -377,8 +384,16 @@ def main() -> None:
                 dataset=val_loader.dataset, loader=val_loader,
             )
 
-            staging_model = build_staging_model(args.model).to(device)
-            rswa_model = build_movement_model(args.model, stage_conditioning=True).to(device)
+            model_cfg = ModelConfig(
+                rswa_stage_conditioning=True,
+                rswa_tonic_support_aux=(args.tonic_support_loss_weight > 0.0),
+            )
+            staging_model = build_staging_model(args.model, config=model_cfg).to(device)
+            rswa_model = build_movement_model(
+                args.model,
+                config=model_cfg,
+                stage_conditioning=True,
+            ).to(device)
             system = SleepStagingRSWASystem(staging_model, rswa_model).to(device)
             _print_model_summary("staging_model", staging_model, logger)
             _print_model_summary("rswa_model", rswa_model, logger)
@@ -387,7 +402,12 @@ def main() -> None:
             tonic_weight = torch.tensor(args.tonic_pos_weight, device=device) if args.tonic_pos_weight else None
             phasic_weight = torch.tensor(args.phasic_pos_weight, device=device) if args.phasic_pos_weight else None
             any_weight = torch.tensor(args.any_pos_weight, device=device) if args.any_pos_weight else None
-            rswa_loss_fn = RSWALoss(tonic_pos_weight=tonic_weight, phasic_pos_weight=phasic_weight, any_pos_weight=any_weight)
+            rswa_loss_fn = RSWALoss(
+                tonic_pos_weight=tonic_weight,
+                phasic_pos_weight=phasic_weight,
+                any_pos_weight=any_weight,
+                tonic_support_weight=args.tonic_support_loss_weight,
+            )
             thresholds = _resolve_thresholds(args)
             staging_optimizer = torch.optim.AdamW(
                 staging_model.parameters(), lr=args.lr_staging, weight_decay=args.weight_decay
@@ -412,6 +432,7 @@ def main() -> None:
                 stage_loss_sum = 0.0
                 rswa_loss_sum = 0.0
                 rswa_head_loss_sums = {"tonic": 0.0, "phasic": 0.0, "any": 0.0}
+                rswa_tonic_support_loss_sum = 0.0
                 stage_batches = 0
                 rswa_batches = 0
                 tr_stage_targets: list[torch.Tensor] = []
@@ -429,6 +450,8 @@ def main() -> None:
                     tonic_targets = batch["tonic_labels"].to(device, non_blocking=True)
                     phasic_targets = batch["phasic_labels"].to(device, non_blocking=True)
                     any_targets = batch["any_labels"].to(device, non_blocking=True)
+                    tonic_support_targets = batch["tonic_support"].to(device, non_blocking=True)
+                    tonic_support_valid = batch["tonic_support_valid"].to(device, non_blocking=True)
                     stage_valid = batch["staging_valid"].to(device, non_blocking=True) & padding_mask
                     rswa_valid = batch["rswa_valid"].to(device, non_blocking=True) & padding_mask
 
@@ -458,13 +481,18 @@ def main() -> None:
 
                     if rswa_valid.any():
                         rswa_loss, per_head = rswa_loss_fn(
-                            outputs, tonic_targets, phasic_targets, any_targets, rswa_valid
+                            outputs, tonic_targets, phasic_targets, any_targets, rswa_valid,
+                            tonic_support_targets=tonic_support_targets,
+                            tonic_support_mask=tonic_support_valid,
                         )
                         rswa_loss_sum += float(rswa_loss.detach().cpu())
                         for head in ("tonic", "phasic", "any"):
                             rswa_head_loss_sums[head] += float(
                                 per_head[f"{head}_loss"].detach().cpu()
                             )
+                        rswa_tonic_support_loss_sum += float(
+                            per_head["tonic_support_loss"].detach().cpu()
+                        )
                         rswa_batches += 1
                         move_targets = (
                             (tonic_targets > 0.5) | (phasic_targets > 0.5) | (any_targets > 0.5)
@@ -549,11 +577,21 @@ def main() -> None:
                     "train_rswa_tonic_loss": rswa_head_loss_sums["tonic"] / max(rswa_batches, 1),
                     "train_rswa_phasic_loss": rswa_head_loss_sums["phasic"] / max(rswa_batches, 1),
                     "train_rswa_any_loss": rswa_head_loss_sums["any"] / max(rswa_batches, 1),
+                    "train_rswa_tonic_support_loss": rswa_tonic_support_loss_sum / max(rswa_batches, 1),
                     **{f"val_{key}": value for key, value in val_metrics.items()
                        if isinstance(value, (int, float))},
                 }
                 history.append(row)
                 logger.log_epoch(row)
+                train_support_msg = ""
+                val_support_msg = ""
+                if args.tonic_support_loss_weight > 0.0:
+                    train_support_msg = (
+                        f" train_rswa_tonic_support_loss={row['train_rswa_tonic_support_loss']:.4f}"
+                    )
+                    val_support_msg = (
+                        f" val_tonic_support_loss={val_metrics.get('rswa_tonic_support_loss', float('nan')):.4f}"
+                    )
                 logger.info(
                     f"fold={fold} ep={epoch:03d} train={train_time:.1f}s val={val_time:.1f}s "
                     f"{GREEN}"
@@ -563,6 +601,7 @@ def main() -> None:
                     f"{row['train_rswa_tonic_loss']:.4f}/"
                     f"{row['train_rswa_phasic_loss']:.4f}/"
                     f"{row['train_rswa_any_loss']:.4f}"
+                    f"{train_support_msg}"
                     f"{RESET} | "
                     f"{YELLOW}"
                     f"val_stg_f1={val_metrics.get('staging_f1_macro', float('nan')):.4f} "
@@ -575,6 +614,7 @@ def main() -> None:
                     f"{val_metrics.get('rswa_phasic_f1', float('nan')):.3f}/"
                     f"{val_metrics.get('rswa_any_f1', float('nan')):.3f} "
                     f"val_f1_macro={val_metrics.get('rswa_rswa_f1_macro', float('nan')):.4f}"
+                    f"{val_support_msg}"
                     f"{RESET}"
                 )
 
