@@ -61,26 +61,17 @@ def _apply_stage_conditioning(
 
 
 class _RSWAHeadMixin:
-    def _build_heads(self, d_in: int, dropout: float, *, use_tonic_support_aux: bool = False) -> None:
+    def _build_heads(self, d_in: int, dropout: float) -> None:
         self.tonic_head = _rswa_head(d_in, dropout)
         self.phasic_head = _rswa_head(d_in, dropout)
         self.any_head = _rswa_head(d_in, dropout)
-        self.use_tonic_support_aux = bool(use_tonic_support_aux)
-        self.tonic_support_head = (
-            _rswa_head(d_in, dropout)
-            if self.use_tonic_support_aux
-            else None
-        )
 
     def _pack_outputs(self, z: torch.Tensor) -> dict[str, torch.Tensor]:
-        out = {
+        return {
             "tonic_logits": self.tonic_head(z).squeeze(-1),
             "phasic_logits": self.phasic_head(z).squeeze(-1),
             "any_logits": self.any_head(z).squeeze(-1),
         }
-        if self.tonic_support_head is not None:
-            out["tonic_support_logits"] = self.tonic_support_head(z).squeeze(-1)
-        return out
 
     def n_params(self) -> int:
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
@@ -111,11 +102,7 @@ class MovementCNN(nn.Module, _RSWAHeadMixin):
             self.cfg,
             use_stage_conditioning=self.use_stage_conditioning,
         )
-        self._build_heads(
-            self.cfg.d_model,
-            self.cfg.dropout,
-            use_tonic_support_aux=self.cfg.rswa_tonic_support_aux,
-        )
+        self._build_heads(self.cfg.d_model, self.cfg.dropout)
 
     def forward(
         self,
@@ -173,11 +160,7 @@ class MovementLSTM(nn.Module, _RSWAHeadMixin):
             dropout=self.cfg.dropout if num_layers > 1 else 0.0,
         )
         temporal_output_dim = self.hidden_size * (2 if bidirectional else 1)
-        self._build_heads(
-            temporal_output_dim,
-            self.cfg.dropout,
-            use_tonic_support_aux=self.cfg.rswa_tonic_support_aux,
-        )
+        self._build_heads(temporal_output_dim, self.cfg.dropout)
 
     def forward(
         self,

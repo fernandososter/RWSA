@@ -66,12 +66,6 @@ class RSWADetectionNet(nn.Module):
         self.tonic_head = _rswa_head(cfg.d_model, cfg.dropout)
         self.phasic_head = _rswa_head(cfg.d_model, cfg.dropout)
         self.any_head = _rswa_head(cfg.d_model, cfg.dropout)
-        self.use_tonic_support_aux = bool(getattr(cfg, "rswa_tonic_support_aux", False))
-        self.tonic_support_head = (
-            _rswa_head(cfg.d_model, cfg.dropout)
-            if self.use_tonic_support_aux
-            else None
-        )
     def forward(self, emg_center, mask=None, stage_probs=None):
         z = self.encoder(emg_center)
         if self.stage_fusion is not None and stage_probs is not None:
@@ -91,12 +85,9 @@ class RSWADetectionNet(nn.Module):
                 torch.cat([z, stage_probs.to(z.dtype)], dim=-1)
             )
         z = self.temporal(z, mask)
-        out = {
+        return {
             "tonic_logits":self.tonic_head(z).squeeze(-1),
             "phasic_logits":self.phasic_head(z).squeeze(-1),
             "any_logits":self.any_head(z).squeeze(-1),
         }
-        if self.tonic_support_head is not None:
-            out["tonic_support_logits"] = self.tonic_support_head(z).squeeze(-1)
-        return out
     def n_params(self): return sum(p.numel() for p in self.parameters() if p.requires_grad)

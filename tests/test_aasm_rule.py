@@ -264,24 +264,6 @@ class TestApplyAasmRuleIntegration:
                 rem_baseline_uv=BASELINE_UV, rem_baseline_n_epochs=1,
             )
 
-    def test_tonic_support_repeats_macro_epoch_coverage_ratio(self):
-        n_mini = ar.MINI_PER_MACRO
-        signals = np.zeros((n_mini, 5, MINI_SAMPLES), dtype=np.float32)
-        stages = np.full(n_mini, ar.REM_STAGE, dtype=np.int64)
-        emg_flat = np.full(n_mini * MINI_SAMPLES, 1e-6, dtype=np.float64)
-        _put_segment(emg_flat, start_s=0.0, dur_s=8.0, amplitude_uv=30e-6)
-        _put_segment(emg_flat, start_s=15.0, dur_s=8.0, amplitude_uv=30e-6)
-        signals[:, 4, :] = emg_flat.reshape(n_mini, MINI_SAMPLES)
-
-        result = ar.apply_aasm_rule(
-            signals, stages,
-            rem_baseline_uv=BASELINE_UV, rem_baseline_n_epochs=n_mini,
-        )
-        expected = 16.0 / 30.0
-        assert "tonic_support" in result
-        assert np.allclose(result["tonic_support"], result["tonic_support"][0], atol=1e-6)
-        assert result["tonic_support"][0] == pytest.approx(expected, abs=0.01)
-
 
 # ─────────────────────────────────────────────────────────────────────────
 # (iv) FUSAO DE GAP <= MERGE_GAP_S (250ms, convencao RBDtector/SINBAR):

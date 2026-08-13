@@ -368,7 +368,6 @@ def apply_aasm_rule(
     tonic_labels = np.zeros(T, dtype=np.float32)
     phasic_labels = np.zeros(T, dtype=np.float32)
     any_labels = np.zeros(T, dtype=np.float32)
-    tonic_support = np.zeros(T, dtype=np.float32)
 
     n_rem_macro = 0
     n_tonic_macro = 0
@@ -377,7 +376,6 @@ def apply_aasm_rule(
     if atonia_source == "unavailable":
         return {
             "tonic_labels": tonic_labels, "phasic_labels": phasic_labels, "any_labels": any_labels,
-            "tonic_support": tonic_support,
             "atonia_baseline_uv": float("nan"), "atonia_source": atonia_source,
             "n_rem_macro_epochs": 0, "n_tonic_macro_epochs": 0, "n_phasic_macro_epochs": 0,
         }
@@ -401,13 +399,6 @@ def apply_aasm_rule(
             env_uv, threshold_uv, fs=fs, mini_per_macro=mini_per_macro, epoch_sec=epoch_sec,
             merge_gap_s=merge_gap_s,
         )
-        tonic_support[m0:m1] = np.float32(
-            np.clip(
-                result["tonic_coverage_s"] / (mini_per_macro * epoch_sec),
-                0.0,
-                1.0,
-            )
-        )
         any_block = result["any_mini"].copy()
         if result["tonic"]:
             tonic_labels[m0:m1] = 1.0
@@ -423,7 +414,6 @@ def apply_aasm_rule(
         "tonic_labels": tonic_labels,
         "phasic_labels": phasic_labels,
         "any_labels": any_labels,
-        "tonic_support": tonic_support,
         "atonia_baseline_uv": baseline_uv,
         "atonia_source": atonia_source,
         "n_rem_macro_epochs": n_rem_macro,
@@ -523,7 +513,6 @@ def label_exam_with_aasm_rule(
         "tonic_labels": tonic_labels,
         "phasic_labels": phasic_labels,
         "any_labels": any_labels,
-        "tonic_support": result["tonic_support"],
         "rswa_labels": rswa_labels_int,
         "rswa_conf": rswa_conf,
         "tonic_cov": tonic_labels.copy(),
