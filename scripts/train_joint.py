@@ -16,6 +16,7 @@ import torch
 from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import DataLoader, WeightedRandomSampler
 
+from sleep_rswa.config import ModelConfig
 from sleep_rswa import (
     available_staging_models,
     build_movement_model,
@@ -127,6 +128,23 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--phasic-pos-weight", type=float)
     parser.add_argument("--any-pos-weight", type=float)
     parser.add_argument(
+        "--rswa-target-mode",
+        choices=["final", "aasm_proto"],
+        default="final",
+        help="Usa labels finais ou alvos intermediarios AASM para tonic/phasic.",
+    )
+    parser.add_argument(
+        "--rswa-postprocess-mode",
+        choices=["none", "aasm_simple"],
+        default="none",
+        help="Pos-processamento aplicado nas predições RSWA na validacao/inferencia.",
+    )
+    parser.add_argument(
+        "--rswa-use-baseline-relative-channel",
+        action="store_true",
+        help="Adiciona ao ramo RSWA um segundo canal |EMG| / rem_baseline_uv.",
+    )
+    parser.add_argument(
         "--oversample-tonic-subjects",
         action="store_true",
         help="Aumenta a frequência de sujeitos que contêm ao menos um evento tônico no train_loader.",
@@ -172,7 +190,23 @@ def _resolve_thresholds(args) -> dict[str, float]:
 
 
 def make_loader(subjects, args, shuffle, device):
-    ds = SleepAnalysisDataset(subjects, min_confidence=args.min_confidence, rem_mask_only=not args.all_stages)
+    if args.rswa_target_mode == "aasm_proto":
+        missing = [
+            subject.subject_id for subject in subjects
+            if subject.tonic_proto_labels is None or subject.phasic_proto_labels is None
+        ]
+        if missing:
+            raise ValueError(
+                "rswa_target_mode='aasm_proto' exige .pt com tonic_proto_labels/phasic_proto_labels. "
+                f"Exemplos ausentes: {', '.join(missing[:5])}"
+            )
+    ds = SleepAnalysisDataset(
+        subjects,
+        min_confidence=args.min_confidence,
+        rem_mask_only=not args.all_stages,
+        rswa_target_mode=args.rswa_target_mode,
+        use_baseline_relative_channel=args.rswa_use_baseline_relative_channel,
+    )
     sampler = None
     if shuffle and args.oversample_tonic_subjects:
         weights = torch.as_tensor(
@@ -267,6 +301,11 @@ def main() -> None:
     seed_everything(args.seed)
     device = resolve_device(args.device)
     all_subjects = load_subject_directory(args.data_dir)
+    rswa_model_cfg = ModelConfig(
+        rswa_stage_conditioning=True,
+        rswa_emg_in_channels=(2 if args.rswa_use_baseline_relative_channel else 1),
+        rswa_use_baseline_relative_channel=args.rswa_use_baseline_relative_channel,
+    )
 
     # ── Conjunto de TESTE fixo (held-out), separado ANTES da CV ────────────
     test_subjects: list = []
@@ -293,6 +332,11 @@ def main() -> None:
     ) as logger:
         logger.info(f"Dispositivo: {device}")
         logger.info(f"Modelo (staging + movimento): {args.model}")
+        logger.info(
+            f"RSWA experimental: target_mode={args.rswa_target_mode} "
+            f"postprocess_mode={args.rswa_postprocess_mode} "
+            f"use_baseline_relative_channel={args.rswa_use_baseline_relative_channel}"
+        )
         logger.info(
             f"Sujeitos: total={len(all_subjects)} | CV={len(subjects)} | teste={len(test_subjects)} | "
             f"n_splits={args.n_splits} | estratificação CV={args.stratify_by} | teste={args.test_stratify_by}"
@@ -377,8 +421,10 @@ def main() -> None:
                 dataset=val_loader.dataset, loader=val_loader,
             )
 
-            staging_model = build_staging_model(args.model).to(device)
-            rswa_model = build_movement_model(args.model, stage_conditioning=True).to(device)
+            staging_model = build_staging_model(args.model, config=rswa_model_cfg).to(device)
+            rswa_model = build_movement_model(
+                args.model, config=rswa_model_cfg, stage_conditioning=True
+            ).to(device)
             system = SleepStagingRSWASystem(staging_model, rswa_model).to(device)
             _print_model_summary("staging_model", staging_model, logger)
             _print_model_summary("rswa_model", rswa_model, logger)
@@ -426,9 +472,12 @@ def main() -> None:
                     emg = batch["emg_center"].to(device, non_blocking=True)
                     padding_mask = batch["padding_mask"].to(device, non_blocking=True)
                     stage_targets = batch["sleep_stages"].to(device, non_blocking=True)
-                    tonic_targets = batch["tonic_labels"].to(device, non_blocking=True)
-                    phasic_targets = batch["phasic_labels"].to(device, non_blocking=True)
-                    any_targets = batch["any_labels"].to(device, non_blocking=True)
+                    tonic_targets = batch["tonic_targets"].to(device, non_blocking=True)
+                    phasic_targets = batch["phasic_targets"].to(device, non_blocking=True)
+                    any_targets = batch["any_targets"].to(device, non_blocking=True)
+                    tonic_labels = batch["tonic_labels"].to(device, non_blocking=True)
+                    phasic_labels = batch["phasic_labels"].to(device, non_blocking=True)
+                    any_labels = batch["any_labels"].to(device, non_blocking=True)
                     stage_valid = batch["staging_valid"].to(device, non_blocking=True) & padding_mask
                     rswa_valid = batch["rswa_valid"].to(device, non_blocking=True) & padding_mask
 
@@ -467,7 +516,7 @@ def main() -> None:
                             )
                         rswa_batches += 1
                         move_targets = (
-                            (tonic_targets > 0.5) | (phasic_targets > 0.5) | (any_targets > 0.5)
+                            (tonic_labels > 0.5) | (phasic_labels > 0.5) | (any_labels > 0.5)
                         ).float()
                         move_preds = (
                             (torch.sigmoid(outputs["tonic_logits"].detach()) >= thresholds["tonic"])
@@ -477,9 +526,9 @@ def main() -> None:
                         tr_move_targets.append(move_targets[rswa_valid].long().detach().cpu())
                         tr_move_preds.append(move_preds[rswa_valid].cpu())
                         head_targets = {
-                            "tonic": tonic_targets,
-                            "phasic": phasic_targets,
-                            "any": any_targets,
+                            "tonic": tonic_labels,
+                            "phasic": phasic_labels,
+                            "any": any_labels,
                         }
                         for head in ("tonic", "phasic", "any"):
                             head_preds = (
@@ -533,6 +582,10 @@ def main() -> None:
                 val_metrics = evaluate_joint(
                     system, val_loader, staging_loss_fn, rswa_loss_fn, device,
                     amp=not args.no_amp, threshold=thresholds,
+                    postprocess_mode=(
+                        None if args.rswa_postprocess_mode == "none"
+                        else args.rswa_postprocess_mode
+                    ),
                 )
                 val_time = perf_counter() - val_start
 
@@ -649,7 +702,13 @@ def main() -> None:
             load_checkpoint(checkpoint_dir / "staging_best.pt", staging_model, device)
             load_checkpoint(checkpoint_dir / "rswa_best.pt", rswa_model, device)
             stage_pred = collect_staging_predictions(staging_model, val_loader, device, amp=not args.no_amp)
-            move_pred = collect_rswa_predictions(system, val_loader, device, amp=not args.no_amp, threshold=thresholds)
+            move_pred = collect_rswa_predictions(
+                system, val_loader, device, amp=not args.no_amp, threshold=thresholds,
+                postprocess_mode=(
+                    None if args.rswa_postprocess_mode == "none"
+                    else args.rswa_postprocess_mode
+                ),
+            )
             plot_confusion_matrix(
                 stage_pred["expected"], stage_pred["prediction"],
                 figures_dir / "confusion_matrix_staging.png",
@@ -705,17 +764,21 @@ def main() -> None:
             test_loader = make_loader(test_subjects, args, False, device)
             staging_test_summary = evaluate_staging_test_set(
                 test_loader=test_loader, fold_checkpoints=staging_checkpoints,
-                build_model=lambda: build_staging_model(args.model), device=device, logger=logger,
+                build_model=lambda: build_staging_model(args.model, config=rswa_model_cfg), device=device, logger=logger,
                 figures_dir=logger.run_dir / "test", amp=not args.no_amp,
             )
             movement_test_summary = evaluate_movement_test_set(
                 test_loader=test_loader, fold_checkpoints=rswa_checkpoints,
                 build_model=lambda: SleepStagingRSWASystem(
-                    build_staging_model(args.model),
-                    build_movement_model(args.model, stage_conditioning=True),
+                    build_staging_model(args.model, config=rswa_model_cfg),
+                    build_movement_model(args.model, config=rswa_model_cfg, stage_conditioning=True),
                 ),
                 device=device, logger=logger,
                 figures_dir=logger.run_dir / "test", amp=not args.no_amp, threshold=thresholds,
+                postprocess_mode=(
+                    None if args.rswa_postprocess_mode == "none"
+                    else args.rswa_postprocess_mode
+                ),
             )
 
         logger.write_json("data_description.json", data_report)

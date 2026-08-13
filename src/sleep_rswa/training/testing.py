@@ -78,6 +78,7 @@ def evaluate_movement_test_set(
     figures_dir: Path,
     amp: bool = True,
     threshold: float | dict[str, float] = 0.5,
+    postprocess_mode: str | None = None,
 ) -> dict[str, Any]:
     """Avalia as 3 cabecas (tonic/phasic/any) no teste held-out, por fold + ensemble.
 
@@ -136,7 +137,10 @@ def evaluate_movement_test_set(
                 )
             load_checkpoint(staging_checkpoint, model.staging_model, device)
             load_checkpoint(rswa_checkpoint, model.rswa_model, device)
-        result = collect_rswa_predictions(model, test_loader, device, amp=amp, threshold=thr)
+        result = collect_rswa_predictions(
+            model, test_loader, device, amp=amp, threshold=thr,
+            postprocess_mode=postprocess_mode,
+        )
 
         keys = np.array(
             [f"{s}#{i}" for s, i in zip(result["subject_id"], result["mini_epoch_index"])],

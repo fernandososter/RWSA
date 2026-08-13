@@ -148,6 +148,56 @@ def run_staging_epoch(
 _HEADS = ("tonic", "phasic", "any")
 
 
+def _resolve_thresholds(threshold: float | dict[str, float]) -> dict[str, float]:
+    if isinstance(threshold, dict):
+        return {h: float(threshold[h]) for h in _HEADS}
+    return {h: float(threshold) for h in _HEADS}
+
+
+def _batch_rswa_targets(batch: dict[str, Any], device: torch.device) -> dict[str, torch.Tensor]:
+    return {
+        "tonic": batch.get("tonic_targets", batch["tonic_labels"]).to(device, non_blocking=True),
+        "phasic": batch.get("phasic_targets", batch["phasic_labels"]).to(device, non_blocking=True),
+        "any": batch.get("any_targets", batch["any_labels"]).to(device, non_blocking=True),
+    }
+
+
+def _aasm_simple_postprocess_predictions(
+    subject_ids: np.ndarray,
+    mini_epoch_index: np.ndarray,
+    probabilities: dict[str, np.ndarray],
+    threshold: float | dict[str, float],
+) -> dict[str, np.ndarray]:
+    thr = _resolve_thresholds(threshold)
+    local = {
+        h: (probabilities[h] >= thr[h]).astype(np.int64, copy=False)
+        for h in _HEADS
+    }
+    post = {h: local[h].copy() for h in _HEADS}
+    for subject_id in np.unique(subject_ids):
+        subj_mask = subject_ids == subject_id
+        subj_global_idx = np.flatnonzero(subj_mask)
+        subj_mini = mini_epoch_index[subj_mask]
+        subj_macro = subj_mini // 10
+        for macro_id in np.unique(subj_macro):
+            macro_local_idx = np.flatnonzero(subj_macro == macro_id)
+            if macro_local_idx.size != 10:
+                continue
+            macro_global_idx = subj_global_idx[macro_local_idx]
+            macro_mini = subj_mini[macro_local_idx]
+            if not np.array_equal(np.sort(macro_mini % 10), np.arange(10, dtype=np.int64)):
+                continue
+            tonic_macro = int(local["tonic"][macro_global_idx].sum() >= 5)
+            phasic_macro = int(local["phasic"][macro_global_idx].sum() >= 5)
+            post["tonic"][macro_global_idx] = tonic_macro
+            post["phasic"][macro_global_idx] = phasic_macro
+            post["any"][macro_global_idx] = np.maximum(
+                local["any"][macro_global_idx],
+                np.int64(tonic_macro or phasic_macro),
+            )
+    return post
+
+
 def run_rswa_epoch(
     model: torch.nn.Module,
     loader: Iterable[dict[str, Any]],
@@ -157,6 +207,7 @@ def run_rswa_epoch(
     amp: bool = True,
     grad_clip: float | None = 1.0,
     threshold: float | dict[str, float] = 0.5,
+    postprocess_mode: str | None = None,
 ) -> dict[str, float]:
     """Roda uma epoca de treino/validacao das 3 cabecas (tonic/phasic/any).
 
@@ -165,10 +216,7 @@ def run_rswa_epoch(
     ``{"tonic": t, "phasic": t, "any": t}`` com limiares por cabeca
     (usado na avaliacao final, apos a selecao de limiar por cabeca).
     """
-    if isinstance(threshold, dict):
-        thr = {h: float(threshold[h]) for h in _HEADS}
-    else:
-        thr = {h: float(threshold) for h in _HEADS}
+    thr = _resolve_thresholds(threshold)
 
     training = optimizer is not None
     model.train(training)
@@ -176,12 +224,16 @@ def run_rswa_epoch(
     head_losses: dict[str, list[float]] = {h: [] for h in _HEADS}
     targets_all: dict[str, list[torch.Tensor]] = {h: [] for h in _HEADS}
     preds_all: dict[str, list[torch.Tensor]] = {h: [] for h in _HEADS}
+    probs_all: dict[str, list[torch.Tensor]] = {h: [] for h in _HEADS}
+    subject_ids_all: list[str] = []
+    mini_indices_all: list[np.ndarray] = []
 
     for batch in tqdm(loader, desc="Running RSWA epoch", unit="batch"):
         emg = batch["emg_center"].to(device, non_blocking=True)
-        tonic_targets = batch["tonic_labels"].to(device, non_blocking=True)
-        phasic_targets = batch["phasic_labels"].to(device, non_blocking=True)
-        any_targets = batch["any_labels"].to(device, non_blocking=True)
+        loss_targets = _batch_rswa_targets(batch, device)
+        tonic_targets = loss_targets["tonic"]
+        phasic_targets = loss_targets["phasic"]
+        any_targets = loss_targets["any"]
         padding_mask = batch["padding_mask"].to(device, non_blocking=True)
         valid_mask = batch["rswa_valid"].to(device, non_blocking=True) & padding_mask
 
@@ -208,11 +260,24 @@ def run_rswa_epoch(
         for h in _HEADS:
             head_losses[h].append(float(per_head[f"{h}_loss"].cpu()))
 
-        head_targets = {"tonic": tonic_targets, "phasic": phasic_targets, "any": any_targets}
+        head_targets = {
+            "tonic": batch["tonic_labels"].to(device, non_blocking=True),
+            "phasic": batch["phasic_labels"].to(device, non_blocking=True),
+            "any": batch["any_labels"].to(device, non_blocking=True),
+        }
+        valid_cpu = valid_mask.detach().cpu()
         for h in _HEADS:
-            preds = (torch.sigmoid(outputs[f"{h}_logits"]) >= thr[h]).long()
+            probs = torch.sigmoid(outputs[f"{h}_logits"])
+            preds = (probs >= thr[h]).long()
             targets_all[h].append(head_targets[h][valid_mask].long().detach().cpu())
             preds_all[h].append(preds[valid_mask].detach().cpu())
+            probs_all[h].append(probs[valid_mask].detach().cpu())
+        for b, subject_id in enumerate(batch["subject_ids"]):
+            idx = torch.nonzero(valid_cpu[b], as_tuple=False).flatten()
+            if idx.numel() == 0:
+                continue
+            subject_ids_all.extend([str(subject_id)] * int(idx.numel()))
+            mini_indices_all.append(idx.numpy().astype(np.int64, copy=False))
 
     if not targets_all["tonic"]:
         raise RuntimeError(
@@ -221,7 +286,16 @@ def run_rswa_epoch(
         )
 
     targets_np = {h: torch.cat(targets_all[h]).numpy() for h in _HEADS}
-    preds_np = {h: torch.cat(preds_all[h]).numpy() for h in _HEADS}
+    if postprocess_mode == "aasm_simple":
+        probs_np = {h: torch.cat(probs_all[h]).numpy() for h in _HEADS}
+        preds_np = _aasm_simple_postprocess_predictions(
+            np.asarray(subject_ids_all, dtype=object),
+            np.concatenate(mini_indices_all),
+            probs_np,
+            thr,
+        )
+    else:
+        preds_np = {h: torch.cat(preds_all[h]).numpy() for h in _HEADS}
     result = rswa_metrics(
         targets_np["tonic"], preds_np["tonic"],
         targets_np["phasic"], preds_np["phasic"],
@@ -246,11 +320,9 @@ def evaluate_joint(
     device: torch.device,
     amp: bool = True,
     threshold: float | dict[str, float] = 0.5,
+    postprocess_mode: str | None = None,
 ) -> dict[str, float]:
-    if isinstance(threshold, dict):
-        thr = {h: float(threshold[h]) for h in _HEADS}
-    else:
-        thr = {h: float(threshold) for h in _HEADS}
+    thr = _resolve_thresholds(threshold)
 
     model.eval()
     stage_losses: list[float] = []
@@ -260,6 +332,9 @@ def evaluate_joint(
     stage_preds_all: list[torch.Tensor] = []
     targets_all: dict[str, list[torch.Tensor]] = {h: [] for h in _HEADS}
     preds_all: dict[str, list[torch.Tensor]] = {h: [] for h in _HEADS}
+    probs_all: dict[str, list[torch.Tensor]] = {h: [] for h in _HEADS}
+    subject_ids_all: list[str] = []
+    mini_indices_all: list[np.ndarray] = []
 
     with torch.no_grad():
         for batch in tqdm(loader, desc="Evaluating joint", unit="batch"):
@@ -267,9 +342,10 @@ def evaluate_joint(
             emg = batch["emg_center"].to(device, non_blocking=True)
             padding_mask = batch["padding_mask"].to(device, non_blocking=True)
             stage_targets = batch["sleep_stages"].to(device, non_blocking=True)
-            tonic_targets = batch["tonic_labels"].to(device, non_blocking=True)
-            phasic_targets = batch["phasic_labels"].to(device, non_blocking=True)
-            any_targets = batch["any_labels"].to(device, non_blocking=True)
+            loss_targets = _batch_rswa_targets(batch, device)
+            tonic_targets = loss_targets["tonic"]
+            phasic_targets = loss_targets["phasic"]
+            any_targets = loss_targets["any"]
             stage_valid = batch["staging_valid"].to(device, non_blocking=True) & padding_mask
             rswa_valid = batch["rswa_valid"].to(device, non_blocking=True) & padding_mask
 
@@ -292,11 +368,24 @@ def evaluate_joint(
                 rswa_losses.append(float(rswa_loss.cpu()))
                 for h in _HEADS:
                     rswa_head_losses[h].append(float(per_head[f"{h}_loss"].cpu()))
-                head_targets = {"tonic": tonic_targets, "phasic": phasic_targets, "any": any_targets}
+                head_targets = {
+                    "tonic": batch["tonic_labels"].to(device, non_blocking=True),
+                    "phasic": batch["phasic_labels"].to(device, non_blocking=True),
+                    "any": batch["any_labels"].to(device, non_blocking=True),
+                }
+                valid_cpu = rswa_valid.detach().cpu()
                 for h in _HEADS:
-                    preds = (torch.sigmoid(outputs[f"{h}_logits"]) >= thr[h]).long()
+                    probs = torch.sigmoid(outputs[f"{h}_logits"])
+                    preds = (probs >= thr[h]).long()
                     targets_all[h].append(head_targets[h][rswa_valid].long().cpu())
                     preds_all[h].append(preds[rswa_valid].cpu())
+                    probs_all[h].append(probs[rswa_valid].cpu())
+                for b, subject_id in enumerate(batch["subject_ids"]):
+                    idx = torch.nonzero(valid_cpu[b], as_tuple=False).flatten()
+                    if idx.numel() == 0:
+                        continue
+                    subject_ids_all.extend([str(subject_id)] * int(idx.numel()))
+                    mini_indices_all.append(idx.numpy().astype(np.int64, copy=False))
 
     metrics: dict[str, Any] = {}
     if stage_targets_all:
@@ -313,7 +402,16 @@ def evaluate_joint(
         metrics["staging_prediction_distribution"] = st_pred.as_dict()
     if targets_all["tonic"]:
         targets_np = {h: torch.cat(targets_all[h]).numpy() for h in _HEADS}
-        preds_np = {h: torch.cat(preds_all[h]).numpy() for h in _HEADS}
+        if postprocess_mode == "aasm_simple":
+            probs_np = {h: torch.cat(probs_all[h]).numpy() for h in _HEADS}
+            preds_np = _aasm_simple_postprocess_predictions(
+                np.asarray(subject_ids_all, dtype=object),
+                np.concatenate(mini_indices_all),
+                probs_np,
+                thr,
+            )
+        else:
+            preds_np = {h: torch.cat(preds_all[h]).numpy() for h in _HEADS}
         rswa = rswa_metrics(
             targets_np["tonic"], preds_np["tonic"],
             targets_np["phasic"], preds_np["phasic"],
@@ -335,6 +433,7 @@ def collect_rswa_predictions(
     *,
     amp: bool = True,
     threshold: float | dict[str, float] = 0.5,
+    postprocess_mode: str | None = None,
 ) -> dict[str, np.ndarray]:
     """Coleta predicoes das 3 cabecas (tonic/phasic/any), por mini-epoca valida.
 
@@ -345,10 +444,7 @@ def collect_rswa_predictions(
     aliases historicos ``movement_expected``/``movement_probability``/
     ``movement_prediction`` (uniao das 3 cabecas) para compat.
     """
-    if isinstance(threshold, dict):
-        thr = {h: float(threshold[h]) for h in _HEADS}
-    else:
-        thr = {h: float(threshold) for h in _HEADS}
+    thr = _resolve_thresholds(threshold)
 
     model.eval()
     expected: dict[str, list[np.ndarray]] = {h: [] for h in _HEADS}
@@ -406,7 +502,18 @@ def collect_rswa_predictions(
         prob_by_head[h] = prob_arr
         result[f"{h}_expected"] = exp_arr
         result[f"{h}_probability"] = prob_arr
-        result[f"{h}_prediction"] = (prob_arr >= thr[h]).astype(np.int64, copy=False)
+    if postprocess_mode == "aasm_simple":
+        post = _aasm_simple_postprocess_predictions(
+            result["subject_id"],
+            result["mini_epoch_index"],
+            prob_by_head,
+            thr,
+        )
+        for h in _HEADS:
+            result[f"{h}_prediction"] = post[h]
+    else:
+        for h in _HEADS:
+            result[f"{h}_prediction"] = (prob_by_head[h] >= thr[h]).astype(np.int64, copy=False)
 
     # Aliases historicos "movement" = uniao das 3 cabecas.
     movement_expected = (

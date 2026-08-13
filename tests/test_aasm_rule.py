@@ -83,6 +83,13 @@ class TestTonic:
         assert result["tonic"] is False
         assert result["tonic_coverage_s"] == pytest.approx(0.0, abs=1e-6)
 
+    def test_proto_labels_capture_sustained_activity_mini_epochs(self):
+        env = _flat_epoch()
+        _put_segment(env, start_s=0.0, dur_s=8.0, amplitude_uv=30.0)
+        result = ar.classify_macro_epoch(env, THRESHOLD_UV)
+        assert result["tonic_proto_mini"][:3].all()
+        assert not result["tonic_proto_mini"][3:].any()
+
 
 # ─────────────────────────────────────────────────────────────────────────
 # (ii) FASICO: >=5 das 10 mini-epocas de 3s com burst 0.1-5.0s
@@ -122,6 +129,15 @@ class TestPhasic:
         result = ar.classify_macro_epoch(env, THRESHOLD_UV)
         assert result["n_phasic_mini"] == 0
         assert result["phasic"] is False
+
+    def test_proto_labels_capture_burst_mini_epochs(self):
+        env = _flat_epoch()
+        for mini_idx in range(5):
+            start_s = mini_idx * ar.EPOCH_SEC + 0.5
+            _put_segment(env, start_s=start_s, dur_s=1.0, amplitude_uv=30.0)
+        result = ar.classify_macro_epoch(env, THRESHOLD_UV)
+        assert result["phasic_proto_mini"][:5].all()
+        assert not result["phasic_proto_mini"][5:].any()
 
 
 # ─────────────────────────────────────────────────────────────────────────

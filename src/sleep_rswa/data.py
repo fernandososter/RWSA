@@ -19,6 +19,7 @@ class SubjectData:
     sleep_stages: torch.Tensor
     rswa_labels: torch.Tensor
     rswa_conf: torch.Tensor
+    rem_baseline_uv: float | None = None
     emg_signals: torch.Tensor | None = None
     # Rotulos multi-rotulo por cabeca (opcionais). Se ausentes, sao derivados
     # de rswa_labels no load (retrocompatibilidade com .pt mono-rotulo antigos).
@@ -29,6 +30,8 @@ class SubjectData:
     # multi-rotulo). Ausente -> zeros (nenhum "any" conhecido) ate a rotulagem
     # automatica (CNN+limiar-duplo) escrever este campo.
     any_labels: torch.Tensor | None = None
+    tonic_proto_labels: torch.Tensor | None = None
+    phasic_proto_labels: torch.Tensor | None = None
     n_epochs: int = field(init=False)
 
     def __post_init__(self) -> None:
@@ -37,6 +40,10 @@ class SubjectData:
             raise ValueError(f"{self.subject_id}: signals e sleep_stages possuem comprimentos diferentes.")
         if self.emg_signals is not None and self.emg_signals.shape[0] != self.n_epochs:
             raise ValueError(f"{self.subject_id}: emg_signals possui comprimento incompatível.")
+        if self.tonic_proto_labels is not None and self.tonic_proto_labels.shape[0] != self.n_epochs:
+            raise ValueError(f"{self.subject_id}: tonic_proto_labels possui comprimento incompatível.")
+        if self.phasic_proto_labels is not None and self.phasic_proto_labels.shape[0] != self.n_epochs:
+            raise ValueError(f"{self.subject_id}: phasic_proto_labels possui comprimento incompatível.")
 
 
 def load_subject_file(path: str | Path) -> SubjectData:
@@ -64,16 +71,25 @@ def load_subject_file(path: str | Path) -> SubjectData:
     tonic = obj.get("tonic_labels")
     phasic = obj.get("phasic_labels")
     any_lab = obj.get("any_labels")
+    tonic_proto = obj.get("tonic_proto_labels")
+    phasic_proto = obj.get("phasic_proto_labels")
     return SubjectData(
         subject_id=str(obj.get("subject_id", path.stem)),
         signals=signals,
         sleep_stages=stages,
         rswa_labels=rswa,
         rswa_conf=conf,
+        rem_baseline_uv=(
+            float(obj["rem_baseline_uv"])
+            if obj.get("rem_baseline_uv") is not None
+            else None
+        ),
         emg_signals=emg,
         tonic_labels=tonic,
         phasic_labels=phasic,
         any_labels=any_lab,
+        tonic_proto_labels=tonic_proto,
+        phasic_proto_labels=phasic_proto,
     )
 
 
@@ -110,10 +126,17 @@ class SleepAnalysisDataset(Dataset):
         subjects: Sequence[SubjectData],
         min_confidence: float = 0.0,
         rem_mask_only: bool = True,
+        *,
+        rswa_target_mode: str = "final",
+        use_baseline_relative_channel: bool = False,
     ):
         self.subjects = list(subjects)
         self.min_confidence = min_confidence
         self.rem_mask_only = rem_mask_only
+        self.rswa_target_mode = rswa_target_mode.strip().lower()
+        if self.rswa_target_mode not in {"final", "aasm_proto"}:
+            raise ValueError(f"rswa_target_mode invalido: {rswa_target_mode!r}")
+        self.use_baseline_relative_channel = bool(use_baseline_relative_channel)
         self.signal_config = SignalConfig()
         self.rswa_config = RSWAConfig()
 
@@ -153,7 +176,16 @@ class SleepAnalysisDataset(Dataset):
                     "Salve a chave 'emg_signals'/'emg' ou ajuste RSWAConfig.emg_channel_index."
                 )
             emg = signals[:, index:index + 1, :].clone()
-        return _zscore_per_channel(emg)[:, :, : self.signal_config.samples_per_epoch]
+        primary = _zscore_per_channel(emg)[:, :, : self.signal_config.samples_per_epoch]
+        if not self.use_baseline_relative_channel:
+            return primary
+        baseline_uv = subject.rem_baseline_uv
+        if baseline_uv is None or baseline_uv <= 0:
+            relative = torch.zeros_like(primary)
+        else:
+            baseline_v = float(baseline_uv) / 1e6
+            relative = (emg[:, :, : self.signal_config.samples_per_epoch].abs() / baseline_v).clamp(0.0, 20.0)
+        return torch.cat([primary, relative], dim=1)
 
 
     def stage_distribution(self) -> StageDistribution:
@@ -266,10 +298,27 @@ class SleepAnalysisDataset(Dataset):
         else:
             any_labels = torch.zeros_like(labels, dtype=torch.float32)
 
+        if self.rswa_target_mode == "aasm_proto":
+            tonic_targets = (
+                subject.tonic_proto_labels.float().clone()
+                if subject.tonic_proto_labels is not None else tonic_labels.clone()
+            )
+            phasic_targets = (
+                subject.phasic_proto_labels.float().clone()
+                if subject.phasic_proto_labels is not None else phasic_labels.clone()
+            )
+        else:
+            tonic_targets = tonic_labels.clone()
+            phasic_targets = phasic_labels.clone()
+        any_targets = any_labels.clone()
+
         # Zera rotulos fora da mascara de validade (cada cabeca independente).
         tonic_labels[~valid_rswa] = 0.0
         phasic_labels[~valid_rswa] = 0.0
         any_labels[~valid_rswa] = 0.0
+        tonic_targets[~valid_rswa] = 0.0
+        phasic_targets[~valid_rswa] = 0.0
+        any_targets[~valid_rswa] = 0.0
         rswa_labels[~valid_rswa] = self.rswa_config.none_label
 
         # Alias historico "movement" = uniao das 3 cabecas (qualquer movimento
@@ -288,6 +337,9 @@ class SleepAnalysisDataset(Dataset):
             "phasic_labels": phasic_labels,
             "tonic_labels": tonic_labels,
             "any_labels": any_labels,
+            "phasic_targets": phasic_targets,
+            "tonic_targets": tonic_targets,
+            "any_targets": any_targets,
             "movement_labels": movement_labels,
             "rswa_valid": valid_rswa,
             "rswa_conf": confidence,
@@ -311,6 +363,9 @@ def collate_sleep_analysis_exams(batch):
         "phasic_labels": torch.zeros(b, tmax),
         "tonic_labels": torch.zeros(b, tmax),
         "any_labels": torch.zeros(b, tmax),
+        "phasic_targets": torch.zeros(b, tmax),
+        "tonic_targets": torch.zeros(b, tmax),
+        "any_targets": torch.zeros(b, tmax),
         "movement_labels": torch.zeros(b, tmax),
         "rswa_valid": torch.zeros(b, tmax, dtype=torch.bool),
         "rswa_conf": torch.zeros(b, tmax),
@@ -327,6 +382,9 @@ def collate_sleep_analysis_exams(batch):
             "phasic_labels",
             "tonic_labels",
             "any_labels",
+            "phasic_targets",
+            "tonic_targets",
+            "any_targets",
             "movement_labels",
             "rswa_valid",
             "rswa_conf",

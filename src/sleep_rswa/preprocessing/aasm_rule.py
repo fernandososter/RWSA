@@ -264,6 +264,10 @@ def classify_macro_epoch(
       tonic          : bool -- criterio tonico da epoca (aplica-se a toda a epoca)
       phasic         : bool -- criterio fasico da epoca (aplica-se a toda a epoca)
       any_mini       : (mini_per_macro,) bool -- criterio any, por mini-epoca de 3s
+      tonic_proto_mini  : (mini_per_macro,) bool -- mini-epocas cobertas por
+                           atividade sustentada >5s acima do limiar
+      phasic_proto_mini : (mini_per_macro,) bool -- mini-epocas com burst
+                           0.1-5.0s acima do limiar
       n_phasic_mini  : int  -- quantas das mini_per_macro mini-epocas tem burst fasico
       tonic_coverage_s : float -- soma das duracoes dos segmentos >5s usados no criterio tonico
     """
@@ -277,9 +281,17 @@ def classify_macro_epoch(
     tonic_coverage_s = float(sum(tonic_segments_s))
     macro_dur_s = mini_per_macro * epoch_sec
     tonic = tonic_coverage_s >= (tonic_epoch_coverage * macro_dur_s)
+    tonic_proto_mini = np.zeros(mini_per_macro, dtype=bool)
 
     # --- fasico: >=50% das mini-epocas de 3s contem burst 0.1-5.0s ---
     n_mini_samples = int(round(epoch_sec * fs))
+    for (s, e), dur_s in zip(segs, durations_s):
+        if dur_s <= tonic_segment_min_s:
+            continue
+        m0 = s // n_mini_samples
+        m1 = (e - 1) // n_mini_samples
+        for m in range(max(0, m0), min(mini_per_macro - 1, m1) + 1):
+            tonic_proto_mini[m] = True
     phasic_mini = np.zeros(mini_per_macro, dtype=bool)
     for s, e in segs:
         dur_s = (e - s) / fs
@@ -312,6 +324,8 @@ def classify_macro_epoch(
         "tonic": bool(tonic),
         "phasic": bool(phasic),
         "any_mini": any_mini,
+        "tonic_proto_mini": tonic_proto_mini,
+        "phasic_proto_mini": phasic_mini.copy(),
         "n_phasic_mini": n_phasic_mini,
         "tonic_coverage_s": tonic_coverage_s,
     }
@@ -368,6 +382,8 @@ def apply_aasm_rule(
     tonic_labels = np.zeros(T, dtype=np.float32)
     phasic_labels = np.zeros(T, dtype=np.float32)
     any_labels = np.zeros(T, dtype=np.float32)
+    tonic_proto_labels = np.zeros(T, dtype=np.float32)
+    phasic_proto_labels = np.zeros(T, dtype=np.float32)
 
     n_rem_macro = 0
     n_tonic_macro = 0
@@ -376,6 +392,7 @@ def apply_aasm_rule(
     if atonia_source == "unavailable":
         return {
             "tonic_labels": tonic_labels, "phasic_labels": phasic_labels, "any_labels": any_labels,
+            "tonic_proto_labels": tonic_proto_labels, "phasic_proto_labels": phasic_proto_labels,
             "atonia_baseline_uv": float("nan"), "atonia_source": atonia_source,
             "n_rem_macro_epochs": 0, "n_tonic_macro_epochs": 0, "n_phasic_macro_epochs": 0,
         }
@@ -399,6 +416,8 @@ def apply_aasm_rule(
             env_uv, threshold_uv, fs=fs, mini_per_macro=mini_per_macro, epoch_sec=epoch_sec,
             merge_gap_s=merge_gap_s,
         )
+        tonic_proto_labels[m0:m1] = result["tonic_proto_mini"].astype(np.float32)
+        phasic_proto_labels[m0:m1] = result["phasic_proto_mini"].astype(np.float32)
         any_block = result["any_mini"].copy()
         if result["tonic"]:
             tonic_labels[m0:m1] = 1.0
@@ -414,6 +433,8 @@ def apply_aasm_rule(
         "tonic_labels": tonic_labels,
         "phasic_labels": phasic_labels,
         "any_labels": any_labels,
+        "tonic_proto_labels": tonic_proto_labels,
+        "phasic_proto_labels": phasic_proto_labels,
         "atonia_baseline_uv": baseline_uv,
         "atonia_source": atonia_source,
         "n_rem_macro_epochs": n_rem_macro,
@@ -471,6 +492,7 @@ def label_exam_with_aasm_rule(
 
     Retorna dict com as mesmas chaves de auto_label_rswa_from_signals:
       tonic_labels, phasic_labels, any_labels : (T,) float32 {0,1}
+      tonic_proto_labels, phasic_proto_labels : (T,) float32 {0,1}
       rswa_labels : (T,) int64 {0,1,2,3} (0=nada,1=fasico,2=tonico,3=ambos;
                     NAO inclui "any", mesma convencao de rswa_labels.py)
       rswa_conf   : (T,) float32 {0,1} -- validade (1.0 onde stage != -1)
@@ -513,6 +535,8 @@ def label_exam_with_aasm_rule(
         "tonic_labels": tonic_labels,
         "phasic_labels": phasic_labels,
         "any_labels": any_labels,
+        "tonic_proto_labels": result["tonic_proto_labels"],
+        "phasic_proto_labels": result["phasic_proto_labels"],
         "rswa_labels": rswa_labels_int,
         "rswa_conf": rswa_conf,
         "tonic_cov": tonic_labels.copy(),

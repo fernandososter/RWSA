@@ -48,6 +48,34 @@ def test_collect_rswa_predictions_accepts_joint_system():
     assert result["any_probability"].shape==(3,)
 
 
+def test_collect_rswa_predictions_supports_aasm_simple_postprocess():
+    class _Fake(torch.nn.Module):
+        def forward(self, signals, emg_center, mask=None):
+            del signals, emg_center, mask
+            tonic = torch.tensor([[3.0, 3.0, 3.0, 3.0, 3.0, -3.0, -3.0, -3.0, -3.0, -3.0]])
+            phasic = torch.tensor([[3.0, 3.0, 3.0, 3.0, 3.0, -3.0, -3.0, -3.0, -3.0, -3.0]])
+            any_logits = torch.full_like(tonic, -3.0)
+            return {"tonic_logits": tonic, "phasic_logits": phasic, "any_logits": any_logits}
+
+    batch={
+        "signals": torch.randn(1,10,4,900),
+        "emg_center": torch.randn(1,10,1,300),
+        "padding_mask": torch.ones(1,10,dtype=torch.bool),
+        "rswa_valid": torch.ones(1,10,dtype=torch.bool),
+        "tonic_labels": torch.ones(1,10),
+        "phasic_labels": torch.ones(1,10),
+        "any_labels": torch.ones(1,10),
+        "subject_ids": ["synthetic"],
+    }
+    result=collect_rswa_predictions(
+        _Fake(), [batch], torch.device("cpu"), amp=False, threshold=0.5,
+        postprocess_mode="aasm_simple",
+    )
+    assert result["tonic_prediction"].sum()==10
+    assert result["phasic_prediction"].sum()==10
+    assert result["any_prediction"].sum()==10
+
+
 def test_rswa_standalone_defaults_to_no_stage_conditioning():
     model=RSWADetectionNet().eval()
     assert model.use_stage_conditioning is False
@@ -73,3 +101,14 @@ def test_build_movement_model_variants_match_multihead_contract():
         assert out["phasic_logits"].shape==(1,2)
         assert out["any_logits"].shape==(1,2)
         assert model.use_stage_conditioning is True
+
+
+def test_rswa_model_accepts_baseline_relative_second_channel():
+    cfg=ModelConfig(rswa_stage_conditioning=True,rswa_emg_in_channels=2,rswa_use_baseline_relative_channel=True)
+    model=build_movement_model("cnn_bimamba",config=cfg,stage_conditioning=True).eval()
+    out=model(
+        torch.randn(1,2,2,300),
+        torch.ones(1,2,dtype=torch.bool),
+        stage_probs=torch.softmax(torch.randn(1,2,5),dim=-1),
+    )
+    assert out["tonic_logits"].shape==(1,2)

@@ -29,6 +29,7 @@ class ModelConfig:
     rswa_emg_filters: int = 64
     rswa_stage_conditioning: bool = False
     rswa_stage_conditioning_detach: bool = True
+    rswa_use_baseline_relative_channel: bool = False
 
 @dataclass(frozen=True)
 class RSWAConfig:

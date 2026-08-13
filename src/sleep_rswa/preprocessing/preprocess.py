@@ -47,6 +47,8 @@ Formato salvo (torch.save)
   "phasic_labels": Tensor (T,)  float32  {0,1}
   "any_labels":    Tensor (T,)  float32  {0,1}  (evento com duracao ambigua,
                                                   entre limiar fasico e minimo tonico)
+  "tonic_proto_labels":  Tensor (T,) float32 {0,1}
+  "phasic_proto_labels": Tensor (T,) float32 {0,1}
   "rswa_labels":   Tensor (T,)  int64    {0,1,2,3}  (NAO inclui "any")
   "rswa_conf":     Tensor (T,)  float32  {0,1}  (validade p/ mascara da loss)
   "tonic_cov":     Tensor (T,)  float32  0..1   (fracao de cobertura, diagnostico)
@@ -470,6 +472,8 @@ def preprocess_exam(
         "tonic_labels":  rswa["tonic_labels"],
         "phasic_labels": rswa["phasic_labels"],
         "any_labels":    rswa["any_labels"],
+        "tonic_proto_labels": rswa.get("tonic_proto_labels"),
+        "phasic_proto_labels": rswa.get("phasic_proto_labels"),
         "rswa_labels":   rswa["rswa_labels"],
         "rswa_conf":     rswa["rswa_conf"],
         "tonic_cov":     rswa["tonic_cov"],
@@ -495,6 +499,14 @@ def _save_result(result: Dict, out_path: Path) -> None:
         "tonic_labels":  torch.from_numpy(result["tonic_labels"]),
         "phasic_labels": torch.from_numpy(result["phasic_labels"]),
         "any_labels":    torch.from_numpy(result["any_labels"]),
+        "tonic_proto_labels": (
+            torch.from_numpy(result["tonic_proto_labels"])
+            if result.get("tonic_proto_labels") is not None else None
+        ),
+        "phasic_proto_labels": (
+            torch.from_numpy(result["phasic_proto_labels"])
+            if result.get("phasic_proto_labels") is not None else None
+        ),
         "rswa_labels":   torch.from_numpy(result["rswa_labels"]),
         "rswa_conf":     torch.from_numpy(result["rswa_conf"]),
         "tonic_cov":     torch.from_numpy(result["tonic_cov"]),
