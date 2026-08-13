@@ -5,23 +5,53 @@ try:
 except ImportError:
     MambaOfficial=None
 
-class FallbackSequenceBlock(nn.Module):
-    """Fallback bidirecional portátil quando mamba-ssm não está instalado."""
-    def __init__(self,d_model,dropout=0.1):
-        super().__init__(); self.norm=nn.LayerNorm(d_model); self.rnn=nn.GRU(d_model,d_model//2,batch_first=True,bidirectional=True); self.drop=nn.Dropout(dropout)
+class _FallbackDirectionalBlock(nn.Module):
+    """Fallback unidirecional portátil quando mamba-ssm não está instalado."""
+
+    def __init__(self,d_model):
+        super().__init__(); self.rnn=nn.GRU(d_model,d_model,batch_first=True)
+
     def forward(self,x):
-        y,_=self.rnn(self.norm(x)); return x+self.drop(y)
+        y,_=self.rnn(x); return y
 
 class BidirMambaBlock(nn.Module):
+    """Bloco bidirecional explícito.
+
+    Quando ``mamba_ssm`` está disponível, executa dois módulos independentes:
+      1. ``forward_out = fwd_mamba(x)``
+      2. ``backward_out = flip(bwd_mamba(flip(x, dim=1)), dim=1)``
+
+    O fallback mantém a mesma topologia conceitual, mas usando GRUs
+    unidirecionais em vez de Mamba.
+    """
+
     def __init__(self,d_model,d_state=16,dropout=0.1):
         super().__init__(); self.norm=nn.LayerNorm(d_model); self.drop=nn.Dropout(dropout)
         if MambaOfficial is None:
-            self.fallback=FallbackSequenceBlock(d_model,dropout); self.fwd=self.bwd=None
+            self.sequence_impl="gru_fallback"; self.fwd=_FallbackDirectionalBlock(d_model); self.bwd=_FallbackDirectionalBlock(d_model)
         else:
-            self.fallback=None; self.fwd=MambaOfficial(d_model=d_model,d_state=d_state); self.bwd=MambaOfficial(d_model=d_model,d_state=d_state)
+            self.sequence_impl="mamba"; self.fwd=MambaOfficial(d_model=d_model,d_state=d_state); self.bwd=MambaOfficial(d_model=d_model,d_state=d_state)
+
+    @staticmethod
+    def _flip_time(x):
+        return torch.flip(x,[1])
+
+    def _forward_direction(self,z):
+        return self.fwd(z)
+
+    def _backward_direction(self,z):
+        return self._flip_time(self.bwd(self._flip_time(z)))
+
+    @staticmethod
+    def _combine_directions(forward_out,backward_out):
+        return forward_out+backward_out
+
     def forward(self,x):
-        if self.fallback is not None: return self.fallback(x)
-        z=self.norm(x); y=self.fwd(z)+torch.flip(self.bwd(torch.flip(z,[1])),[1]); return x+self.drop(y)
+        z=self.norm(x)
+        forward_out=self._forward_direction(z)
+        backward_out=self._backward_direction(z)
+        y=self._combine_directions(forward_out,backward_out)
+        return x+self.drop(y)
 
 class MambaStack(nn.Module):
     def __init__(self,d_model,n_layers=1,d_state=16,dropout=0.1):

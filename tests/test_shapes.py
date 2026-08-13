@@ -1,6 +1,7 @@
 import torch
 from sleep_rswa import SleepStagingRSWASystem
 from sleep_rswa.config import ModelConfig
+from sleep_rswa.models import mamba as mamba_module
 from sleep_rswa.models import MovementCNN, build_movement_model
 from sleep_rswa.models import RSWADetectionNet
 from sleep_rswa.training.engine import collect_rswa_predictions
@@ -112,3 +113,29 @@ def test_rswa_model_accepts_baseline_relative_second_channel():
         stage_probs=torch.softmax(torch.randn(1,2,5),dim=-1),
     )
     assert out["tonic_logits"].shape==(1,2)
+
+
+def test_bidir_mamba_block_runs_explicit_forward_and_backward_passes(monkeypatch):
+    calls=[]
+
+    class _FakeMamba(torch.nn.Module):
+        def __init__(self, d_model, d_state):
+            super().__init__()
+            self.d_model=d_model
+            self.d_state=d_state
+
+        def forward(self, x):
+            calls.append(x.detach().clone())
+            return x
+
+    monkeypatch.setattr(mamba_module,"MambaOfficial",_FakeMamba)
+    block=mamba_module.BidirMambaBlock(d_model=4,d_state=16,dropout=0.0).eval()
+    x=torch.tensor(
+        [[[1.0,2.0,3.0,4.0],[5.0,6.0,7.0,8.0],[9.0,10.0,11.0,12.0]]]
+    )
+    out=block(x)
+    assert block.sequence_impl=="mamba"
+    assert len(calls)==2
+    assert torch.allclose(calls[1],torch.flip(calls[0],[1]))
+    expected=x+(calls[0]+torch.flip(calls[1],[1]))
+    assert torch.allclose(out,expected)
