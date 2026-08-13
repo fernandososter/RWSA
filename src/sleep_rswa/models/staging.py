@@ -9,19 +9,20 @@ from .staging_base import BaseStagingModel
 from .staging_encoder import StagingCNNEncoder
 
 
-class SleepStagingBiMamba(BaseStagingModel):
+class SleepStagingMamba(BaseStagingModel):
     """
-    Modelo CNN + BiMamba para sleep staging.
+    Modelo CNN + Mamba/BiMamba para sleep staging.
 
     Mantém o mesmo comportamento do SleepStagingNet anterior.
     """
 
-    model_name = "cnn_bimamba"
+    model_name = "cnn_mamba"
 
     def __init__(
         self,
         config: ModelConfig | None = None,
         *,
+        bidirectional: bool = False,
         use_se: bool = True,
         num_classes: int = 5,
     ) -> None:
@@ -29,6 +30,7 @@ class SleepStagingBiMamba(BaseStagingModel):
 
         self.cfg = config or ModelConfig()
         self.num_classes = num_classes
+        self.bidirectional = bidirectional
 
         self.encoder = StagingCNNEncoder(
             config=self.cfg,
@@ -40,6 +42,7 @@ class SleepStagingBiMamba(BaseStagingModel):
             self.cfg.staging_mamba_layers,
             self.cfg.d_state,
             self.cfg.dropout,
+            self.bidirectional,
         )
 
         self.classifier = nn.Sequential(
@@ -68,6 +71,26 @@ class SleepStagingBiMamba(BaseStagingModel):
         )
 
         return self.classifier(temporal_features)
+
+
+class SleepStagingBiMamba(SleepStagingMamba):
+    """Alias bidirecional para o ablation."""
+
+    model_name = "cnn_bimamba"
+
+    def __init__(
+        self,
+        config: ModelConfig | None = None,
+        *,
+        use_se: bool = True,
+        num_classes: int = 5,
+    ) -> None:
+        super().__init__(
+            config=config,
+            bidirectional=True,
+            use_se=use_se,
+            num_classes=num_classes,
+        )
 
 
 # Alias temporário para não quebrar scripts antigos.

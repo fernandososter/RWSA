@@ -31,6 +31,25 @@ class _FallbackDirectionalBlock(nn.Module):
     def forward(self,x):
         y,_=self.rnn(x); return y
 
+
+class MambaBlock(nn.Module):
+    """Bloco unidirecional explícito."""
+
+    def __init__(self,d_model,d_state=16,dropout=0.1):
+        super().__init__(); self.norm=nn.LayerNorm(d_model); self.drop=nn.Dropout(dropout)
+        if MambaOfficial is None:
+            self.sequence_impl="gru_fallback"; self.core=_FallbackDirectionalBlock(d_model)
+        else:
+            self.sequence_impl="mamba"; self.core=MambaOfficial(d_model=d_model,d_state=d_state)
+
+    def extra_repr(self):
+        return f"sequence_impl={self.sequence_impl}"
+
+    def forward(self,x):
+        z=self.norm(x)
+        y=self.core(z)
+        return x+self.drop(y)
+
 class BidirMambaBlock(nn.Module):
     """Bloco bidirecional explícito.
 
@@ -74,8 +93,9 @@ class BidirMambaBlock(nn.Module):
         return x+self.drop(y)
 
 class MambaStack(nn.Module):
-    def __init__(self,d_model,n_layers=1,d_state=16,dropout=0.1):
-        super().__init__(); self.blocks=nn.ModuleList([BidirMambaBlock(d_model,d_state,dropout) for _ in range(n_layers)]); self.norm_out=nn.LayerNorm(d_model)
+    def __init__(self,d_model,n_layers=1,d_state=16,dropout=0.1,bidirectional=True):
+        block_cls=BidirMambaBlock if bidirectional else MambaBlock
+        super().__init__(); self.blocks=nn.ModuleList([block_cls(d_model,d_state,dropout) for _ in range(n_layers)]); self.norm_out=nn.LayerNorm(d_model)
     def forward(self,x,mask=None):
         for block in self.blocks: x=block(x)
         x=self.norm_out(x)

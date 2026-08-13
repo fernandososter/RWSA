@@ -8,7 +8,9 @@ from .factory import (
 from .movement import (
     MovementBiMamba,
     MovementCNN,
+    MovementGRU,
     MovementLSTM,
+    MovementMamba,
 )
 from .rswa import (
     RSWAFeatureEncoder,
@@ -16,12 +18,13 @@ from .rswa import (
 )
 from .staging import (
     SleepStagingBiMamba,
+    SleepStagingMamba,
     SleepStagingNet,
 )
 from .staging_base import BaseStagingModel
 from .staging_cnn import SleepStagingCNN
 from .staging_encoder import StagingCNNEncoder
-from .staging_lstm import SleepStagingLSTM
+from .staging_lstm import SleepStagingGRU, SleepStagingLSTM
 from .system import SleepStagingRSWASystem
 
 
@@ -30,6 +33,8 @@ __all__ = [
     "StagingCNNEncoder",
     "SleepStagingCNN",
     "SleepStagingLSTM",
+    "SleepStagingGRU",
+    "SleepStagingMamba",
     "SleepStagingBiMamba",
     "SleepStagingNet",
     "available_staging_models",
@@ -39,6 +44,8 @@ __all__ = [
     "build_movement_model",
     "MovementCNN",
     "MovementLSTM",
+    "MovementGRU",
+    "MovementMamba",
     "MovementBiMamba",
     "RSWAFeatureEncoder",
     "RSWADetectionNet",

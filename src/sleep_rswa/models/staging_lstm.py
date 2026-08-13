@@ -28,6 +28,7 @@ class SleepStagingLSTM(BaseStagingModel):
         hidden_size: int | None = None,
         num_layers: int = 1,
         bidirectional: bool = True,
+        rnn_cls: type[nn.Module] = nn.LSTM,
         use_se: bool = True,
         num_classes: int = 5,
     ) -> None:
@@ -42,13 +43,14 @@ class SleepStagingLSTM(BaseStagingModel):
         )
         self.num_layers = num_layers
         self.bidirectional = bidirectional
+        self.rnn_cls = rnn_cls
 
         self.encoder = StagingCNNEncoder(
             config=self.cfg,
             use_se=use_se,
         )
 
-        self.temporal = nn.LSTM(
+        self.temporal = self.rnn_cls(
             input_size=self.encoder.output_dim,
             hidden_size=self.hidden_size,
             num_layers=num_layers,
@@ -96,3 +98,29 @@ class SleepStagingLSTM(BaseStagingModel):
             )
 
         return logits
+
+
+class SleepStagingGRU(SleepStagingLSTM):
+    """Modelo CNN + GRU ou CNN + BiGRU."""
+
+    model_name = "cnn_gru"
+
+    def __init__(
+        self,
+        config: ModelConfig | None = None,
+        *,
+        hidden_size: int | None = None,
+        num_layers: int = 1,
+        bidirectional: bool = True,
+        use_se: bool = True,
+        num_classes: int = 5,
+    ) -> None:
+        super().__init__(
+            config=config,
+            hidden_size=hidden_size,
+            num_layers=num_layers,
+            bidirectional=bidirectional,
+            rnn_cls=nn.GRU,
+            use_se=use_se,
+            num_classes=num_classes,
+        )

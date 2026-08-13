@@ -2,7 +2,7 @@ import torch
 from sleep_rswa import SleepStagingRSWASystem
 from sleep_rswa.config import ModelConfig
 from sleep_rswa.models import mamba as mamba_module
-from sleep_rswa.models import MovementCNN, build_movement_model
+from sleep_rswa.models import MovementCNN, build_movement_model, build_staging_model
 from sleep_rswa.models import RSWADetectionNet
 from sleep_rswa.training.engine import collect_rswa_predictions
 
@@ -91,7 +91,7 @@ def test_joint_system_default_enables_stage_conditioning():
 
 def test_build_movement_model_variants_match_multihead_contract():
     cfg=ModelConfig(rswa_stage_conditioning=True)
-    for name in ("cnn","cnn_lstm","cnn_bilstm"):
+    for name in ("cnn","cnn_lstm","cnn_bilstm","cnn_gru","cnn_bigru","cnn_mamba","cnn_bimamba"):
         model=build_movement_model(name,config=cfg,stage_conditioning=True).eval()
         out=model(
             torch.randn(1,2,1,300),
@@ -102,6 +102,17 @@ def test_build_movement_model_variants_match_multihead_contract():
         assert out["phasic_logits"].shape==(1,2)
         assert out["any_logits"].shape==(1,2)
         assert model.use_stage_conditioning is True
+
+
+def test_build_staging_model_variants_match_output_contract():
+    cfg=ModelConfig()
+    for name in ("cnn","cnn_lstm","cnn_bilstm","cnn_gru","cnn_bigru","cnn_mamba","cnn_bimamba"):
+        model=build_staging_model(name,config=cfg).eval()
+        logits=model(
+            torch.randn(1,2,4,900),
+            torch.ones(1,2,dtype=torch.bool),
+        )
+        assert logits.shape==(1,2,5)
 
 
 def test_rswa_model_accepts_baseline_relative_second_channel():

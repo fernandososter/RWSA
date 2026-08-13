@@ -15,6 +15,7 @@ import torch
 import torch.nn as nn
 
 from ..config import ModelConfig
+from .mamba import MambaStack
 from .rswa import RSWADetectionNet, RSWAFeatureEncoder, _rswa_head
 
 
@@ -133,6 +134,7 @@ class MovementLSTM(nn.Module, _RSWAHeadMixin):
         hidden_size: int | None = None,
         num_layers: int = 1,
         bidirectional: bool = True,
+        rnn_cls: type[nn.Module] = nn.LSTM,
         use_se: bool = True,
         stage_conditioning: bool | None = None,
     ) -> None:
@@ -151,7 +153,8 @@ class MovementLSTM(nn.Module, _RSWAHeadMixin):
         )
         self.hidden_size = hidden_size if hidden_size is not None else self.cfg.d_model // 2
         self.bidirectional = bidirectional
-        self.temporal = nn.LSTM(
+        self.rnn_cls = rnn_cls
+        self.temporal = self.rnn_cls(
             input_size=self.cfg.d_model,
             hidden_size=self.hidden_size,
             num_layers=num_layers,
@@ -183,7 +186,100 @@ class MovementLSTM(nn.Module, _RSWAHeadMixin):
         return out
 
 
-class MovementBiMamba(RSWADetectionNet):
+class MovementGRU(MovementLSTM):
+    """CNN + GRU ou CNN + BiGRU sobre as features de mini-época."""
+
+    model_name = "cnn_gru"
+
+    def __init__(
+        self,
+        config: ModelConfig | None = None,
+        *,
+        hidden_size: int | None = None,
+        num_layers: int = 1,
+        bidirectional: bool = True,
+        use_se: bool = True,
+        stage_conditioning: bool | None = None,
+    ) -> None:
+        super().__init__(
+            config=config,
+            hidden_size=hidden_size,
+            num_layers=num_layers,
+            bidirectional=bidirectional,
+            rnn_cls=nn.GRU,
+            use_se=use_se,
+            stage_conditioning=stage_conditioning,
+        )
+
+
+class MovementMamba(nn.Module, _RSWAHeadMixin):
+    """CNN + Mamba/BiMamba sobre as features de mini-época."""
+
+    model_name = "cnn_mamba"
+
+    def __init__(
+        self,
+        config: ModelConfig | None = None,
+        *,
+        bidirectional: bool = False,
+        use_se: bool = True,
+        stage_conditioning: bool | None = None,
+    ) -> None:
+        super().__init__()
+        self.cfg = config or ModelConfig()
+        self.encoder = RSWAFeatureEncoder(self.cfg, use_se)
+        self.use_stage_conditioning = bool(
+            self.cfg.rswa_stage_conditioning
+            if stage_conditioning is None
+            else stage_conditioning
+        )
+        self.stage_context_dim = int(self.cfg.staging_num_classes)
+        self.stage_fusion = _stage_fusion(
+            self.cfg,
+            use_stage_conditioning=self.use_stage_conditioning,
+        )
+        self.bidirectional = bidirectional
+        self.temporal = MambaStack(
+            self.cfg.d_model,
+            self.cfg.rswa_mamba_layers,
+            self.cfg.d_state,
+            self.cfg.dropout,
+            self.bidirectional,
+        )
+        self._build_heads(self.cfg.d_model, self.cfg.dropout)
+
+    def forward(
+        self,
+        emg_center: torch.Tensor,
+        mask: torch.Tensor | None = None,
+        stage_probs: torch.Tensor | None = None,
+    ) -> dict[str, torch.Tensor]:
+        z = self.encoder(emg_center)
+        z = _apply_stage_conditioning(
+            z,
+            stage_probs,
+            stage_fusion=self.stage_fusion,
+            stage_context_dim=self.stage_context_dim,
+        )
+        temporal_features = self.temporal(z, mask)
+        return self._pack_outputs(temporal_features)
+
+
+class MovementBiMamba(MovementMamba):
     """CNN + BiMamba — arquitetura padrão do ramo RSWA multi-head."""
 
     model_name = "cnn_bimamba"
+
+    def __init__(
+        self,
+        config: ModelConfig | None = None,
+        *,
+        use_se: bool = True,
+        stage_conditioning: bool | None = None,
+    ) -> None:
+        super().__init__(
+            config=config,
+            bidirectional=True,
+            use_se=use_se,
+            stage_conditioning=stage_conditioning,
+        )

@@ -6,10 +6,10 @@ from typing import Any
 import torch.nn as nn
 
 from ..config import ModelConfig
-from .movement import MovementBiMamba, MovementCNN, MovementLSTM
-from .staging import SleepStagingBiMamba
+from .movement import MovementBiMamba, MovementCNN, MovementGRU, MovementLSTM, MovementMamba
+from .staging import SleepStagingBiMamba, SleepStagingMamba
 from .staging_cnn import SleepStagingCNN
-from .staging_lstm import SleepStagingLSTM
+from .staging_lstm import SleepStagingGRU, SleepStagingLSTM
 
 
 StagingBuilder = Callable[..., nn.Module]
@@ -19,6 +19,9 @@ _STAGING_MODELS: dict[str, StagingBuilder] = {
     "cnn": SleepStagingCNN,
     "cnn_lstm": SleepStagingLSTM,
     "cnn_bilstm": SleepStagingLSTM,
+    "cnn_gru": SleepStagingGRU,
+    "cnn_bigru": SleepStagingGRU,
+    "cnn_mamba": SleepStagingMamba,
     "cnn_bimamba": SleepStagingBiMamba,
 }
 
@@ -27,6 +30,9 @@ _MOVEMENT_MODELS: dict[str, StagingBuilder] = {
     "cnn": MovementCNN,
     "cnn_lstm": MovementLSTM,
     "cnn_bilstm": MovementLSTM,
+    "cnn_gru": MovementGRU,
+    "cnn_bigru": MovementGRU,
+    "cnn_mamba": MovementMamba,
     "cnn_bimamba": MovementBiMamba,
 }
 
@@ -90,6 +96,24 @@ def build_staging_model(
             True,
         )
 
+    if normalized_name == "cnn_gru":
+        model_kwargs.setdefault(
+            "bidirectional",
+            False,
+        )
+
+    if normalized_name == "cnn_bigru":
+        model_kwargs.setdefault(
+            "bidirectional",
+            True,
+        )
+
+    if normalized_name == "cnn_mamba":
+        model_kwargs.setdefault(
+            "bidirectional",
+            False,
+        )
+
     model = builder(
         config=config,
         **model_kwargs,
@@ -113,7 +137,7 @@ def build_movement_model(
     """Constrói o ramo RSWA multi-head por nome.
 
     Mesmas famílias de arquitetura do staging: cnn, cnn_lstm, cnn_bilstm,
-    cnn_bimamba. Encoder CNN compartilhado + cabeça temporal + heads
+    cnn_gru, cnn_bigru, cnn_mamba, cnn_bimamba. Encoder CNN compartilhado + cabeça temporal + heads
     independentes tonic/phasic/any.
     """
     normalized_name = name.strip().lower()
@@ -131,6 +155,12 @@ def build_movement_model(
         model_kwargs.setdefault("bidirectional", False)
     if normalized_name == "cnn_bilstm":
         model_kwargs.setdefault("bidirectional", True)
+    if normalized_name == "cnn_gru":
+        model_kwargs.setdefault("bidirectional", False)
+    if normalized_name == "cnn_bigru":
+        model_kwargs.setdefault("bidirectional", True)
+    if normalized_name == "cnn_mamba":
+        model_kwargs.setdefault("bidirectional", False)
 
     model = builder(config=config, **model_kwargs)
     model.model_name = normalized_name
