@@ -26,7 +26,7 @@ class ModelConfig:
     eog_kernels: tuple[int, ...] = (50, 150, 250)
     emg_kernels: tuple[int, ...] = (10, 30, 70)
     rswa_emg_in_channels: int = 1
-    rswa_emg_filters: int = 64
+    rswa_emg_filters: int = 128
     rswa_stage_conditioning: bool = False
     rswa_stage_conditioning_detach: bool = True
     rswa_use_baseline_relative_channel: bool = False
