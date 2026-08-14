@@ -17,6 +17,7 @@ from .models import (
     MovementLSTM,
     MovementMamba,
     RSWADetectionNet,
+    SharedBiMambaJointSystem,
     SleepStagingBiMamba,
     SleepStagingCNN,
     SleepStagingGRU,
@@ -61,6 +62,7 @@ __all__ = [
     "build_movement_model",
     "available_movement_models",
     "RSWADetectionNet",
+    "SharedBiMambaJointSystem",
     "SleepStagingRSWASystem",
     "StageDistribution",
 ]

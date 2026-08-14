@@ -1,14 +1,25 @@
 import torch
-from sleep_rswa import SleepStagingRSWASystem
+from sleep_rswa import SharedBiMambaJointSystem, SleepStagingRSWASystem
 from sleep_rswa.config import ModelConfig
 from sleep_rswa.models import mamba as mamba_module
 from sleep_rswa.models import MovementCNN, build_movement_model, build_staging_model
 from sleep_rswa.models import RSWADetectionNet
-from sleep_rswa.training.engine import collect_rswa_predictions
+from sleep_rswa.training.engine import collect_rswa_predictions, collect_staging_predictions
 
 
 def test_output_shapes():
     model=SleepStagingRSWASystem().eval(); b,t=1,4
+    with torch.no_grad(): out=model(torch.randn(b,t,4,900),torch.randn(b,t,1,300),torch.ones(b,t,dtype=torch.bool))
+    assert out["staging_logits"].shape==(b,t,5)
+    assert out["stage_probs"].shape==(b,t,5)
+    assert torch.allclose(out["stage_probs"].sum(dim=-1),torch.ones(b,t),atol=1e-5)
+    assert out["tonic_logits"].shape==(b,t)
+    assert out["phasic_logits"].shape==(b,t)
+    assert out["any_logits"].shape==(b,t)
+
+
+def test_shared_bimamba_joint_system_output_shapes():
+    model=SharedBiMambaJointSystem().eval(); b,t=1,4
     with torch.no_grad(): out=model(torch.randn(b,t,4,900),torch.randn(b,t,1,300),torch.ones(b,t,dtype=torch.bool))
     assert out["staging_logits"].shape==(b,t,5)
     assert out["stage_probs"].shape==(b,t,5)
@@ -47,6 +58,22 @@ def test_collect_rswa_predictions_accepts_joint_system():
     assert result["tonic_probability"].shape==(3,)
     assert result["phasic_probability"].shape==(3,)
     assert result["any_probability"].shape==(3,)
+
+
+def test_collect_staging_predictions_accepts_shared_joint_system():
+    model=SharedBiMambaJointSystem().eval(); b,t=1,4
+    batch={
+        "signals": torch.randn(b,t,4,900),
+        "emg_center": torch.randn(b,t,1,300),
+        "padding_mask": torch.ones(b,t,dtype=torch.bool),
+        "staging_valid": torch.tensor([[True,True,False,True]]),
+        "sleep_stages": torch.tensor([[0,4,2,3]]),
+        "subject_ids": ["synthetic"],
+    }
+    result=collect_staging_predictions(model,[batch],torch.device("cpu"),amp=False)
+    assert result["subject_id"].shape==(3,)
+    assert result["mini_epoch_index"].tolist()==[0,1,3]
+    assert result["probabilities"].shape==(3,5)
 
 
 def test_collect_rswa_predictions_supports_aasm_simple_postprocess():

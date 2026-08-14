@@ -25,7 +25,7 @@ from .staging_base import BaseStagingModel
 from .staging_cnn import SleepStagingCNN
 from .staging_encoder import StagingCNNEncoder
 from .staging_lstm import SleepStagingGRU, SleepStagingLSTM
-from .system import SleepStagingRSWASystem
+from .system import SharedBiMambaJointSystem, SleepStagingRSWASystem
 
 
 __all__ = [
@@ -49,5 +49,6 @@ __all__ = [
     "MovementBiMamba",
     "RSWAFeatureEncoder",
     "RSWADetectionNet",
+    "SharedBiMambaJointSystem",
     "SleepStagingRSWASystem",
 ]

@@ -22,6 +22,7 @@ from sleep_rswa import (
     build_movement_model,
     build_staging_model,
     RSWADetectionNet,
+    SharedBiMambaJointSystem,
     SleepAnalysisDataset,
     SleepStagingNet,
     SleepStagingRSWASystem,
@@ -257,6 +258,10 @@ def joint_monitor_value(monitor: str, val_metrics: dict[str, float]) -> float:
     return float(val_metrics.get(monitor, float("-inf")))
 
 
+def _use_shared_joint_system(model_name: str) -> bool:
+    return model_name == "cnn_bimamba"
+
+
 def plot_joint_curves(history: list[dict[str, float]], output_path: Path, *, title: str) -> Path:
     """Curvas de treino do joint: losses (staging/rswa) e F1 de validação (staging/movement)."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -333,6 +338,14 @@ def main() -> None:
     ) as logger:
         logger.info(f"Dispositivo: {device}")
         logger.info(f"Modelo (staging + movimento): {args.model}")
+        logger.info(
+            "Topologia conjunta: "
+            + (
+                "encoder EEG/EOG + encoder EMG + fusao + BiMamba compartilhado"
+                if _use_shared_joint_system(args.model)
+                else "staging e RSWA com troncos temporais separados"
+            )
+        )
         logger.info(
             f"Backend temporal BiMamba: {mamba_backend_name()} | "
             f"{mamba_backend_detail()}"
@@ -426,13 +439,23 @@ def main() -> None:
                 dataset=val_loader.dataset, loader=val_loader,
             )
 
-            staging_model = build_staging_model(args.model, config=rswa_model_cfg).to(device)
-            rswa_model = build_movement_model(
-                args.model, config=rswa_model_cfg, stage_conditioning=True
-            ).to(device)
-            system = SleepStagingRSWASystem(staging_model, rswa_model).to(device)
-            _print_model_summary("staging_model", staging_model, logger)
-            _print_model_summary("rswa_model", rswa_model, logger)
+            shared_joint = _use_shared_joint_system(args.model)
+            if shared_joint:
+                system = SharedBiMambaJointSystem(config=rswa_model_cfg).to(device)
+                staging_model = None
+                rswa_model = None
+                _print_model_summary("shared_joint_system", system, logger)
+                _print_model_summary("shared_joint_staging_encoder", system.staging_encoder, logger)
+                _print_model_summary("shared_joint_rswa_encoder", system.rswa_encoder, logger)
+                _print_model_summary("shared_joint_temporal", system.temporal, logger)
+            else:
+                staging_model = build_staging_model(args.model, config=rswa_model_cfg).to(device)
+                rswa_model = build_movement_model(
+                    args.model, config=rswa_model_cfg, stage_conditioning=True
+                ).to(device)
+                system = SleepStagingRSWASystem(staging_model, rswa_model).to(device)
+                _print_model_summary("staging_model", staging_model, logger)
+                _print_model_summary("rswa_model", rswa_model, logger)
             _print_model_summary("joint_system", system, logger)
             staging_loss_fn = StagingLoss()
             tonic_weight = torch.tensor(args.tonic_pos_weight, device=device) if args.tonic_pos_weight else None
@@ -440,12 +463,36 @@ def main() -> None:
             any_weight = torch.tensor(args.any_pos_weight, device=device) if args.any_pos_weight else None
             rswa_loss_fn = RSWALoss(tonic_pos_weight=tonic_weight, phasic_pos_weight=phasic_weight, any_pos_weight=any_weight)
             thresholds = _resolve_thresholds(args)
-            staging_optimizer = torch.optim.AdamW(
-                staging_model.parameters(), lr=args.lr_staging, weight_decay=args.weight_decay
-            )
-            rswa_optimizer = torch.optim.AdamW(
-                rswa_model.parameters(), lr=args.lr_rswa, weight_decay=args.weight_decay
-            )
+            if shared_joint:
+                joint_optimizer = torch.optim.AdamW(
+                    [
+                        {
+                            "params": list(system.staging_encoder.parameters())
+                            + list(system.staging_classifier.parameters()),
+                            "lr": args.lr_staging,
+                        },
+                        {
+                            "params": list(system.rswa_encoder.parameters())
+                            + list(system.fusion.parameters())
+                            + list(system.temporal.parameters())
+                            + list(system.tonic_head.parameters())
+                            + list(system.phasic_head.parameters())
+                            + list(system.any_head.parameters()),
+                            "lr": args.lr_rswa,
+                        },
+                    ],
+                    weight_decay=args.weight_decay,
+                )
+                staging_optimizer = None
+                rswa_optimizer = None
+            else:
+                staging_optimizer = torch.optim.AdamW(
+                    staging_model.parameters(), lr=args.lr_staging, weight_decay=args.weight_decay
+                )
+                rswa_optimizer = torch.optim.AdamW(
+                    rswa_model.parameters(), lr=args.lr_rswa, weight_decay=args.weight_decay
+                )
+                joint_optimizer = None
 
             logger.log_subject_split(train_subjects, val_subjects, filename=f"fold_{fold}_split.json")
             logger.info(f"Fold {fold}: treino={len(train_subjects)} validação={len(val_subjects)}")
@@ -489,8 +536,11 @@ def main() -> None:
                     if not stage_valid.any() and not rswa_valid.any():
                         continue
 
-                    staging_optimizer.zero_grad(set_to_none=True)
-                    rswa_optimizer.zero_grad(set_to_none=True)
+                    if joint_optimizer is not None:
+                        joint_optimizer.zero_grad(set_to_none=True)
+                    else:
+                        staging_optimizer.zero_grad(set_to_none=True)
+                        rswa_optimizer.zero_grad(set_to_none=True)
                     with torch.autocast(
                         device_type="cuda", dtype=torch.bfloat16,
                         enabled=(not args.no_amp and device.type == "cuda"),
@@ -555,10 +605,14 @@ def main() -> None:
                     if total_loss is None:
                         continue
                     total_loss.backward()
-                    clip_grad_norm_(staging_model.parameters(), args.grad_clip)
-                    clip_grad_norm_(rswa_model.parameters(), args.grad_clip)
-                    staging_optimizer.step()
-                    rswa_optimizer.step()
+                    if joint_optimizer is not None:
+                        clip_grad_norm_(system.parameters(), args.grad_clip)
+                        joint_optimizer.step()
+                    else:
+                        clip_grad_norm_(staging_model.parameters(), args.grad_clip)
+                        clip_grad_norm_(rswa_model.parameters(), args.grad_clip)
+                        staging_optimizer.step()
+                        rswa_optimizer.step()
 
                 train_time = perf_counter() - train_start
 
@@ -600,8 +654,16 @@ def main() -> None:
                     "train_time_sec": train_time,
                     "val_time_sec": val_time,
                     "epoch_time_sec": perf_counter() - epoch_start,
-                    "staging_learning_rate": staging_optimizer.param_groups[0]["lr"],
-                    "rswa_learning_rate": rswa_optimizer.param_groups[0]["lr"],
+                    "staging_learning_rate": (
+                        joint_optimizer.param_groups[0]["lr"]
+                        if joint_optimizer is not None
+                        else staging_optimizer.param_groups[0]["lr"]
+                    ),
+                    "rswa_learning_rate": (
+                        joint_optimizer.param_groups[1]["lr"]
+                        if joint_optimizer is not None
+                        else rswa_optimizer.param_groups[0]["lr"]
+                    ),
                     "train_staging_loss": stage_loss_sum / max(stage_batches, 1),
                     "train_rswa_loss": rswa_loss_sum / max(rswa_batches, 1),
                     "train_rswa_tonic_loss": rswa_head_loss_sums["tonic"] / max(rswa_batches, 1),
@@ -661,16 +723,31 @@ def main() -> None:
                     _emit("val_any_targets", val_metrics, ORANGE, "any_target_distribution")
                     _emit("val_any_predictions", val_metrics, ORANGE, "any_prediction_distribution")
 
-                save_checkpoint(
-                    checkpoint_dir / "staging_last.pt", model=staging_model,
-                    optimizer=staging_optimizer, epoch=epoch, metrics=val_metrics,
-                    extra={"task": "staging", "trained_with": "joint", "fold": fold, "run_id": logger.run_id},
-                )
-                save_checkpoint(
-                    checkpoint_dir / "rswa_last.pt", model=rswa_model,
-                    optimizer=rswa_optimizer, epoch=epoch, metrics=val_metrics,
-                    extra={"task": "rswa", "trained_with": "joint", "fold": fold, "run_id": logger.run_id},
-                )
+                if joint_optimizer is not None:
+                    save_checkpoint(
+                        checkpoint_dir / "joint_last.pt",
+                        model=system,
+                        optimizer=joint_optimizer,
+                        epoch=epoch,
+                        metrics=val_metrics,
+                        extra={
+                            "task": "joint",
+                            "trained_with": "shared_bimamba",
+                            "fold": fold,
+                            "run_id": logger.run_id,
+                        },
+                    )
+                else:
+                    save_checkpoint(
+                        checkpoint_dir / "staging_last.pt", model=staging_model,
+                        optimizer=staging_optimizer, epoch=epoch, metrics=val_metrics,
+                        extra={"task": "staging", "trained_with": "joint", "fold": fold, "run_id": logger.run_id},
+                    )
+                    save_checkpoint(
+                        checkpoint_dir / "rswa_last.pt", model=rswa_model,
+                        optimizer=rswa_optimizer, epoch=epoch, metrics=val_metrics,
+                        extra={"task": "rswa", "trained_with": "joint", "fold": fold, "run_id": logger.run_id},
+                    )
 
                 current_metric = joint_monitor_value(args.monitor, val_metrics)
                 if current_metric > best_metric:
@@ -678,18 +755,35 @@ def main() -> None:
                     best_epoch = epoch
                     stale = 0
                     best_metrics = dict(val_metrics)
-                    save_checkpoint(
-                        checkpoint_dir / "staging_best.pt", model=staging_model,
-                        optimizer=staging_optimizer, epoch=epoch, metrics=val_metrics,
-                        extra={"task": "staging", "trained_with": "joint", "fold": fold,
-                               "monitor": args.monitor, "monitor_value": current_metric, "run_id": logger.run_id},
-                    )
-                    save_checkpoint(
-                        checkpoint_dir / "rswa_best.pt", model=rswa_model,
-                        optimizer=rswa_optimizer, epoch=epoch, metrics=val_metrics,
-                        extra={"task": "rswa", "trained_with": "joint", "fold": fold,
-                               "monitor": args.monitor, "monitor_value": current_metric, "run_id": logger.run_id},
-                    )
+                    if joint_optimizer is not None:
+                        save_checkpoint(
+                            checkpoint_dir / "joint_best.pt",
+                            model=system,
+                            optimizer=joint_optimizer,
+                            epoch=epoch,
+                            metrics=val_metrics,
+                            extra={
+                                "task": "joint",
+                                "trained_with": "shared_bimamba",
+                                "fold": fold,
+                                "monitor": args.monitor,
+                                "monitor_value": current_metric,
+                                "run_id": logger.run_id,
+                            },
+                        )
+                    else:
+                        save_checkpoint(
+                            checkpoint_dir / "staging_best.pt", model=staging_model,
+                            optimizer=staging_optimizer, epoch=epoch, metrics=val_metrics,
+                            extra={"task": "staging", "trained_with": "joint", "fold": fold,
+                                   "monitor": args.monitor, "monitor_value": current_metric, "run_id": logger.run_id},
+                        )
+                        save_checkpoint(
+                            checkpoint_dir / "rswa_best.pt", model=rswa_model,
+                            optimizer=rswa_optimizer, epoch=epoch, metrics=val_metrics,
+                            extra={"task": "rswa", "trained_with": "joint", "fold": fold,
+                                   "monitor": args.monitor, "monitor_value": current_metric, "run_id": logger.run_id},
+                        )
                     logger.info(
                         f"Fold {fold}: novo melhor checkpoint na época {epoch}, "
                         f"{args.monitor}={current_metric:.4f}"
@@ -704,9 +798,13 @@ def main() -> None:
             plot_joint_curves(history, figures_dir / "training_curves.png", title=f"Joint - Fold {fold}")
 
             # Matrizes de confusão no melhor checkpoint (staging 5 classes + movement binário).
-            load_checkpoint(checkpoint_dir / "staging_best.pt", staging_model, device)
-            load_checkpoint(checkpoint_dir / "rswa_best.pt", rswa_model, device)
-            stage_pred = collect_staging_predictions(staging_model, val_loader, device, amp=not args.no_amp)
+            if joint_optimizer is not None:
+                load_checkpoint(checkpoint_dir / "joint_best.pt", system, device)
+                stage_pred = collect_staging_predictions(system, val_loader, device, amp=not args.no_amp)
+            else:
+                load_checkpoint(checkpoint_dir / "staging_best.pt", staging_model, device)
+                load_checkpoint(checkpoint_dir / "rswa_best.pt", rswa_model, device)
+                stage_pred = collect_staging_predictions(staging_model, val_loader, device, amp=not args.no_amp)
             move_pred = collect_rswa_predictions(
                 system, val_loader, device, amp=not args.no_amp, threshold=thresholds,
                 postprocess_mode=(
@@ -738,14 +836,18 @@ def main() -> None:
                     display_labels=["Negative", "Positive"], title=f"{head.capitalize()} normalized confusion matrix - Fold {fold}", normalize="true",
                 )
 
-            staging_checkpoints.append({"fold": fold, "best_checkpoint": checkpoint_dir / "staging_best.pt"})
-            rswa_checkpoints.append(
-                {
-                    "fold": fold,
-                    "staging_checkpoint": checkpoint_dir / "staging_best.pt",
-                    "rswa_checkpoint": checkpoint_dir / "rswa_best.pt",
-                }
-            )
+            if joint_optimizer is not None:
+                staging_checkpoints.append({"fold": fold, "best_checkpoint": checkpoint_dir / "joint_best.pt"})
+                rswa_checkpoints.append({"fold": fold, "best_checkpoint": checkpoint_dir / "joint_best.pt"})
+            else:
+                staging_checkpoints.append({"fold": fold, "best_checkpoint": checkpoint_dir / "staging_best.pt"})
+                rswa_checkpoints.append(
+                    {
+                        "fold": fold,
+                        "staging_checkpoint": checkpoint_dir / "staging_best.pt",
+                        "rswa_checkpoint": checkpoint_dir / "rswa_best.pt",
+                    }
+                )
             fold_summaries.append(
                 {
                     "fold": fold,
@@ -769,14 +871,25 @@ def main() -> None:
             test_loader = make_loader(test_subjects, args, False, device)
             staging_test_summary = evaluate_staging_test_set(
                 test_loader=test_loader, fold_checkpoints=staging_checkpoints,
-                build_model=lambda: build_staging_model(args.model, config=rswa_model_cfg), device=device, logger=logger,
+                build_model=(
+                    (lambda: SharedBiMambaJointSystem(config=rswa_model_cfg))
+                    if _use_shared_joint_system(args.model)
+                    else (lambda: build_staging_model(args.model, config=rswa_model_cfg))
+                ),
+                device=device, logger=logger,
                 figures_dir=logger.run_dir / "test", amp=not args.no_amp,
             )
             movement_test_summary = evaluate_movement_test_set(
                 test_loader=test_loader, fold_checkpoints=rswa_checkpoints,
-                build_model=lambda: SleepStagingRSWASystem(
-                    build_staging_model(args.model, config=rswa_model_cfg),
-                    build_movement_model(args.model, config=rswa_model_cfg, stage_conditioning=True),
+                build_model=(
+                    (lambda: SharedBiMambaJointSystem(config=rswa_model_cfg))
+                    if _use_shared_joint_system(args.model)
+                    else (
+                        lambda: SleepStagingRSWASystem(
+                            build_staging_model(args.model, config=rswa_model_cfg),
+                            build_movement_model(args.model, config=rswa_model_cfg, stage_conditioning=True),
+                        )
+                    )
                 ),
                 device=device, logger=logger,
                 figures_dir=logger.run_dir / "test", amp=not args.no_amp, threshold=thresholds,

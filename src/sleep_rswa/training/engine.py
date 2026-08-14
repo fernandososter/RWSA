@@ -558,6 +558,7 @@ def collect_staging_predictions(
     probabilities: list[np.ndarray] = []
     subject_ids: list[str] = []
     mini_indices: list[np.ndarray] = []
+    expects_emg = "emg_center" in inspect.signature(model.forward).parameters
 
     with torch.no_grad():
         for batch in loader:
@@ -568,7 +569,12 @@ def collect_staging_predictions(
             if not valid_mask.any():
                 continue
             with _autocast_context(device, amp):
-                logits = model(signals, mask=padding_mask)
+                if expects_emg:
+                    emg = batch["emg_center"].to(device, non_blocking=True)
+                    outputs = model(signals, emg, mask=padding_mask)
+                    logits = outputs["staging_logits"]
+                else:
+                    logits = model(signals, mask=padding_mask)
             probs = torch.softmax(logits.float(), dim=-1)
 
             valid_cpu = valid_mask.detach().cpu()
