@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 from ..config import ModelConfig
-from .common import MultiKernelCNNBranch,SEBlock,make_group_norm
+from .common import SEBlock,make_group_norm
 from .mamba import MambaStack
 
 
@@ -17,12 +17,39 @@ def _rswa_head(d_in: int, dropout: float) -> nn.Sequential:
 class RSWAFeatureEncoder(nn.Module):
     def __init__(self,config=None,use_se=True):
         super().__init__(); cfg=config or ModelConfig(); self.cfg=cfg
-        self.branch=MultiKernelCNNBranch(cfg.rswa_emg_in_channels,cfg.rswa_emg_filters,cfg.emg_kernels,cfg.cnn_layers,cfg.dropout)
+        per=cfg.rswa_emg_filters//len(cfg.emg_kernels); rem=cfg.rswa_emg_filters-per*len(cfg.emg_kernels)
+        paths=[]
+        for i,k in enumerate(cfg.emg_kernels):
+            co=per+(rem if i==0 else 0)
+            paths.append(
+                nn.Sequential(
+                    nn.Conv1d(cfg.rswa_emg_in_channels,co,k,padding=k//2,bias=False),
+                    make_group_norm(co),
+                    nn.ReLU(inplace=True),
+                    nn.MaxPool1d(2,2),
+                )
+            )
+        self.paths=nn.ModuleList(paths)
+        self.drop=nn.Dropout(cfg.dropout)
         self.se=SEBlock(cfg.rswa_emg_filters) if use_se else nn.Identity()
-        self.proj=nn.Sequential(nn.Conv1d(cfg.rswa_emg_filters,cfg.d_model,1,bias=False),make_group_norm(cfg.d_model),nn.ReLU(inplace=True))
-        self.spatial=nn.Sequential(nn.Conv1d(cfg.d_model,cfg.d_model,3,padding=1,groups=cfg.d_model,bias=False),nn.Conv1d(cfg.d_model,cfg.d_model,1,bias=False),make_group_norm(cfg.d_model),nn.ReLU(inplace=True)); self.pool=nn.AdaptiveAvgPool1d(1)
+        self.refine=nn.Sequential(
+            nn.Conv1d(cfg.rswa_emg_filters,cfg.rswa_emg_filters,5,padding=2,bias=False),
+            make_group_norm(cfg.rswa_emg_filters),
+            nn.ReLU(inplace=True),
+            nn.MaxPool1d(2,2),
+            nn.Conv1d(cfg.rswa_emg_filters,cfg.d_model,3,padding=1,bias=False),
+            make_group_norm(cfg.d_model),
+            nn.ReLU(inplace=True),
+        )
+        self.pool=nn.AdaptiveAvgPool1d(1)
     def forward(self,x):
-        b,t,c,n=x.shape; z=x.reshape(b*t,c,n); z=self.pool(self.spatial(self.proj(self.se(self.branch(z))))).squeeze(-1); return z.reshape(b,t,-1)
+        b,t,c,n=x.shape; z=x.reshape(b*t,c,n)
+        ys=[path(z) for path in self.paths]; m=min(y.shape[-1] for y in ys)
+        z=self.drop(torch.cat([y[...,:m] for y in ys],1))
+        z=self.se(z)
+        z=self.refine(z)
+        z=self.pool(z).squeeze(-1)
+        return z.reshape(b,t,-1)
 
 class RSWADetectionNet(nn.Module):
     def __init__(self, config=None, use_se=True, *, stage_conditioning: bool | None = None):
