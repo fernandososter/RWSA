@@ -24,7 +24,7 @@ class ModelConfig:
     branch_filters: int = 64
     eeg_kernels: tuple[int, ...] = (30, 70, 150)
     eog_kernels: tuple[int, ...] = (50, 150, 250)
-    emg_kernels: tuple[int, ...] = (10, 30, 70)
+    emg_kernels: tuple[int, ...] = (10, 150, 300)
     rswa_emg_in_channels: int = 1
     rswa_emg_filters: int = 128
     rswa_stage_conditioning: bool = False
