@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 
 from ..config import ModelConfig
+from .recurrent import ExplicitBidirectionalRNN
 from .staging_base import BaseStagingModel
 from .staging_encoder import StagingCNNEncoder
 
@@ -50,18 +51,27 @@ class SleepStagingLSTM(BaseStagingModel):
             use_se=use_se,
         )
 
-        self.temporal = self.rnn_cls(
-            input_size=self.encoder.output_dim,
-            hidden_size=self.hidden_size,
-            num_layers=num_layers,
-            batch_first=True,
-            bidirectional=bidirectional,
-            dropout=(
-                self.cfg.dropout
-                if num_layers > 1
-                else 0.0
-            ),
-        )
+        if bidirectional:
+            self.temporal = ExplicitBidirectionalRNN(
+                self.rnn_cls,
+                input_size=self.encoder.output_dim,
+                hidden_size=self.hidden_size,
+                num_layers=num_layers,
+                dropout=self.cfg.dropout,
+            )
+        else:
+            self.temporal = self.rnn_cls(
+                input_size=self.encoder.output_dim,
+                hidden_size=self.hidden_size,
+                num_layers=num_layers,
+                batch_first=True,
+                bidirectional=False,
+                dropout=(
+                    self.cfg.dropout
+                    if num_layers > 1
+                    else 0.0
+                ),
+            )
 
         temporal_output_dim = self.hidden_size * (
             2 if bidirectional else 1

@@ -39,14 +39,21 @@ class RSWAConfig:
     tonic_label: int = 2
     rem_stage: int = 4
     min_confidence: float = 0.0
-    # Canal auxiliar "baseline-relative" (use_baseline_relative_channel=True):
-    # |EMG| / baseline_uv, clampado em [0, baseline_relative_clamp]. A
-    # baseline correta e' atonia_baseline_uv (a mesma que a regra AASM usa
+    # Dois canais auxiliares baseline-relative (use_baseline_relative_channel=True):
+    #   1. signed_relative = clip(EMG / baseline_uv, -signed_relative_clamp, +signed_relative_clamp)
+    #   2. amplitude_relative = clip(log1p(|EMG| / baseline_uv) / log(log_base), 0, amplitude_relative_clamp)
+    #
+    # Assim, ambos os canais ficam na MESMA familia fisiologica (relativos ao
+    # basal de atonia) e o valor 1.0 no canal amplitude_relative corresponde
+    # exatamente a 4x o basal quando log_base=5.0:
+    #   log(1+4) / log(5) = 1
+    #
+    # A baseline correta e' atonia_baseline_uv (a mesma que a regra AASM usa
     # para decidir tonico/fasico -- ver label_metadata.aasm_rule), NAO
     # rem_baseline_uv (baseline crua de baixo percentil, ~5-6x menor).
-    # Usar rem_baseline_uv fazia o canal saturar no clamp exatamente na
-    # faixa de amplitude que precisa discriminar evento de nao-evento.
-    baseline_relative_clamp: float = 50.0
+    baseline_relative_signed_clamp: float = 6.0
+    baseline_relative_log_base: float = 5.0
+    baseline_relative_amplitude_clamp: float = 2.0
     # Fallback quando o .pt nao tem label_metadata.aasm_rule.atonia_baseline_uv
     # (exames legados/antigos): aproxima atonia_baseline_uv como
     # rem_baseline_uv * baseline_relative_fallback_ratio. Razao medida

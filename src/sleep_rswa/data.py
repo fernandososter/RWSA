@@ -1,5 +1,6 @@
 from dataclasses import dataclass, field
 from pathlib import Path
+import math
 import os
 from concurrent.futures import ThreadPoolExecutor
 from tqdm import tqdm
@@ -23,8 +24,8 @@ class SubjectData:
     # atonia_baseline_uv: baseline REAL usada pela regra AASM para decidir
     # tonico/fasico (label_metadata.aasm_rule.atonia_baseline_uv no .pt).
     # NAO confundir com rem_baseline_uv (baseline crua de baixo percentil,
-    # tipicamente 5-6x menor) -- ver RSWAConfig.baseline_relative_fallback_ratio
-    # e o bug corrigido em _extract_emg/canal baseline-relative.
+    # tipicamente 5-6x menor). Quando use_baseline_relative_channel=True,
+    # os dois canais do ramo EMG passam a ser derivados desta baseline.
     atonia_baseline_uv: float | None = None
     emg_signals: torch.Tensor | None = None
     # Rotulos multi-rotulo por cabeca (opcionais). Se ausentes, sao derivados
@@ -198,10 +199,12 @@ class SleepAnalysisDataset(Dataset):
             return primary
         # Baseline correta = atonia_baseline_uv (a MESMA baseline que a regra
         # AASM usa para decidir tonico/fasico -- ver label_metadata.aasm_rule).
-        # NAO usar rem_baseline_uv cru: e' ~5-6x menor e faz o canal saturar
-        # no clamp bem dentro da faixa de amplitude que precisa discriminar
-        # evento de nao-evento (bug identificado e corrigido em 2026-08-14,
-        # mesma classe do bug do limiar 2x na UI de revisao).
+        # Quando o canal auxiliar baseline-relative esta habilitado, os DOIS
+        # canais do ramo EMG passam a ser relativos ao basal:
+        #   1. EMG assinado / baseline
+        #   2. log1p(|EMG| / baseline) / log(log_base)
+        # Assim, o limiar fisiologico de 4x o basal fica explicitamente
+        # representado no segundo canal (valor 1.0 quando log_base=5.0).
         baseline_uv = subject.atonia_baseline_uv
         if baseline_uv is None:
             # Exame legado sem label_metadata.aasm_rule: aproxima a partir de
@@ -211,12 +214,24 @@ class SleepAnalysisDataset(Dataset):
             if rem_baseline_uv is not None and rem_baseline_uv > 0:
                 baseline_uv = float(rem_baseline_uv) * self.rswa_config.baseline_relative_fallback_ratio
         if baseline_uv is None or baseline_uv <= 0:
-            relative = torch.zeros_like(primary)
+            signed_relative = torch.zeros_like(primary)
+            amplitude_relative = torch.zeros_like(primary)
         else:
             baseline_v = float(baseline_uv) / 1e6
-            clamp_max = self.rswa_config.baseline_relative_clamp
-            relative = (emg[:, :, : self.signal_config.samples_per_epoch].abs() / baseline_v).clamp(0.0, clamp_max)
-        return torch.cat([primary, relative], dim=1)
+            window = emg[:, :, : self.signal_config.samples_per_epoch]
+            ratio = window / baseline_v
+            signed_relative = ratio.clamp(
+                -self.rswa_config.baseline_relative_signed_clamp,
+                self.rswa_config.baseline_relative_signed_clamp,
+            )
+            amplitude_relative = (
+                torch.log1p(ratio.abs())
+                / math.log(self.rswa_config.baseline_relative_log_base)
+            ).clamp(
+                0.0,
+                self.rswa_config.baseline_relative_amplitude_clamp,
+            )
+        return torch.cat([signed_relative, amplitude_relative], dim=1)
 
 
     def stage_distribution(self) -> StageDistribution:

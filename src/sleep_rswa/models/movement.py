@@ -16,6 +16,7 @@ import torch.nn as nn
 
 from ..config import ModelConfig
 from .mamba import MambaStack
+from .recurrent import ExplicitBidirectionalRNN
 from .rswa import RSWADetectionNet, RSWAFeatureEncoder, _rswa_head
 
 
@@ -154,14 +155,23 @@ class MovementLSTM(nn.Module, _RSWAHeadMixin):
         self.hidden_size = hidden_size if hidden_size is not None else self.cfg.d_model // 2
         self.bidirectional = bidirectional
         self.rnn_cls = rnn_cls
-        self.temporal = self.rnn_cls(
-            input_size=self.cfg.d_model,
-            hidden_size=self.hidden_size,
-            num_layers=num_layers,
-            batch_first=True,
-            bidirectional=bidirectional,
-            dropout=self.cfg.dropout if num_layers > 1 else 0.0,
-        )
+        if bidirectional:
+            self.temporal = ExplicitBidirectionalRNN(
+                self.rnn_cls,
+                input_size=self.cfg.d_model,
+                hidden_size=self.hidden_size,
+                num_layers=num_layers,
+                dropout=self.cfg.dropout,
+            )
+        else:
+            self.temporal = self.rnn_cls(
+                input_size=self.cfg.d_model,
+                hidden_size=self.hidden_size,
+                num_layers=num_layers,
+                batch_first=True,
+                bidirectional=False,
+                dropout=self.cfg.dropout if num_layers > 1 else 0.0,
+            )
         temporal_output_dim = self.hidden_size * (2 if bidirectional else 1)
         self._build_heads(temporal_output_dim, self.cfg.dropout)
 

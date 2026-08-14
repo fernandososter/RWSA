@@ -1,13 +1,15 @@
-"""Testes do canal auxiliar 'baseline-relative' (SleepAnalysisDataset._extract_emg).
+"""Testes dos canais baseline-relative (SleepAnalysisDataset._extract_emg).
 
-Cobre o bug corrigido em 2026-08-14: o canal normalizava por rem_baseline_uv
-(baseline crua de baixo percentil) em vez de atonia_baseline_uv (a baseline
-REAL usada pela regra AASM para decidir tonico/fasico -- ~5-6x maior),
-fazendo o canal saturar no clamp exatamente na faixa de amplitude que
-precisa discriminar evento de nao-evento. Mesma classe do bug corrigido na
-UI de revisao (limiar 2x hardcoded vs limiar real da regra).
+Desde 2026-08-14, quando use_baseline_relative_channel=True, o ramo EMG
+passa a usar DOIS canais relativos ao basal de atonia:
+  1. EMG assinado / baseline (clipado)
+  2. log1p(|EMG| / baseline) / log(log_base)
+
+Assim, ambos ficam na mesma familia fisiologica e o valor 1.0 do segundo
+canal corresponde exatamente a 4x o basal quando log_base=5.0.
 """
 import torch
+import math
 
 import tempfile
 from pathlib import Path
@@ -48,13 +50,23 @@ def test_baseline_relative_channel_uses_atonia_baseline_when_available():
     emg = ds._extract_emg(subj)
     assert emg.shape[1] == 2
 
-    # Reconstroi o canal esperado usando atonia_baseline_uv e compara.
-    raw_emg = subj.signals[:, ds.rswa_config.emg_channel_index, :].abs()
-    expected = (raw_emg / (atonia_baseline_uv / 1e6)).clamp(0.0, ds.rswa_config.baseline_relative_clamp)
-    torch.testing.assert_close(emg[:, 1, :], expected)
+    raw_emg = subj.signals[:, ds.rswa_config.emg_channel_index, :]
+    expected_signed = (raw_emg / (atonia_baseline_uv / 1e6)).clamp(
+        -ds.rswa_config.baseline_relative_signed_clamp,
+        ds.rswa_config.baseline_relative_signed_clamp,
+    )
+    expected_amplitude = (
+        torch.log1p(raw_emg.abs() / (atonia_baseline_uv / 1e6))
+        / math.log(ds.rswa_config.baseline_relative_log_base)
+    ).clamp(0.0, ds.rswa_config.baseline_relative_amplitude_clamp)
+    torch.testing.assert_close(emg[:, 0, :], expected_signed)
+    torch.testing.assert_close(emg[:, 1, :], expected_amplitude)
 
     # Confirma que NAO e' igual ao calculo antigo (normalizando por rem_baseline_uv).
-    wrong = (raw_emg / (rem_baseline_uv / 1e6)).clamp(0.0, 20.0)
+    wrong = (
+        torch.log1p(raw_emg.abs() / (rem_baseline_uv / 1e6))
+        / math.log(ds.rswa_config.baseline_relative_log_base)
+    ).clamp(0.0, ds.rswa_config.baseline_relative_amplitude_clamp)
     assert not torch.allclose(emg[:, 1, :], wrong)
 
 
@@ -66,25 +78,56 @@ def test_baseline_relative_channel_legacy_fallback_uses_ratio():
     subj = _make_subject(rem_baseline_uv=rem_baseline_uv, atonia_baseline_uv=None)
     emg = ds._extract_emg(subj)
 
-    raw_emg = subj.signals[:, ds.rswa_config.emg_channel_index, :].abs()
+    raw_emg = subj.signals[:, ds.rswa_config.emg_channel_index, :]
     approx_baseline_uv = rem_baseline_uv * ds.rswa_config.baseline_relative_fallback_ratio
-    expected = (raw_emg / (approx_baseline_uv / 1e6)).clamp(0.0, ds.rswa_config.baseline_relative_clamp)
-    torch.testing.assert_close(emg[:, 1, :], expected)
+    expected_signed = (raw_emg / (approx_baseline_uv / 1e6)).clamp(
+        -ds.rswa_config.baseline_relative_signed_clamp,
+        ds.rswa_config.baseline_relative_signed_clamp,
+    )
+    expected_amplitude = (
+        torch.log1p(raw_emg.abs() / (approx_baseline_uv / 1e6))
+        / math.log(ds.rswa_config.baseline_relative_log_base)
+    ).clamp(0.0, ds.rswa_config.baseline_relative_amplitude_clamp)
+    torch.testing.assert_close(emg[:, 0, :], expected_signed)
+    torch.testing.assert_close(emg[:, 1, :], expected_amplitude)
 
 
 def test_baseline_relative_channel_returns_zero_when_no_baseline_available():
     ds = SleepAnalysisDataset([_make_subject()], use_baseline_relative_channel=True)
     subj_none = _make_subject(rem_baseline_uv=None, atonia_baseline_uv=None)
     emg_none = ds._extract_emg(subj_none)
+    assert torch.all(emg_none[:, 0, :] == 0)
     assert torch.all(emg_none[:, 1, :] == 0)
 
     subj_zero = _make_subject(rem_baseline_uv=0.0, atonia_baseline_uv=None)
     emg_zero = ds._extract_emg(subj_zero)
+    assert torch.all(emg_zero[:, 0, :] == 0)
     assert torch.all(emg_zero[:, 1, :] == 0)
 
 
-def test_baseline_relative_clamp_is_configurable_via_rswa_config():
+def test_baseline_relative_clamps_are_respected():
     ds = SleepAnalysisDataset([_make_subject()], use_baseline_relative_channel=True)
     subj = _make_subject(rem_baseline_uv=0.01, atonia_baseline_uv=0.001)  # forca saturacao
     emg = ds._extract_emg(subj)
-    assert float(emg[:, 1, :].max()) <= RSWAConfig().baseline_relative_clamp
+    cfg = RSWAConfig()
+    assert float(emg[:, 0, :].abs().max()) <= cfg.baseline_relative_signed_clamp
+    assert float(emg[:, 1, :].max()) <= cfg.baseline_relative_amplitude_clamp
+
+
+def test_baseline_relative_amplitude_channel_maps_4x_baseline_to_one():
+    ds = SleepAnalysisDataset([_make_subject()], use_baseline_relative_channel=True)
+    baseline_uv = 2.0
+    baseline_v = baseline_uv / 1e6
+    signals = torch.zeros(1, 5, 300)
+    signals[:, ds.rswa_config.emg_channel_index, :] = 4.0 * baseline_v
+    subj = SubjectData(
+        subject_id="dummy_4x",
+        signals=signals,
+        sleep_stages=torch.zeros(1, dtype=torch.long),
+        rswa_labels=torch.zeros(1, dtype=torch.long),
+        rswa_conf=torch.ones(1),
+        rem_baseline_uv=baseline_uv / ds.rswa_config.baseline_relative_fallback_ratio,
+        atonia_baseline_uv=baseline_uv,
+    )
+    emg = ds._extract_emg(subj)
+    torch.testing.assert_close(emg[:, 1, :], torch.ones_like(emg[:, 1, :]))

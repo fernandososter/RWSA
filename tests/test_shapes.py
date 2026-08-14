@@ -2,6 +2,7 @@ import torch
 from sleep_rswa import SharedBiMambaJointSystem, SleepStagingRSWASystem
 from sleep_rswa.config import ModelConfig
 from sleep_rswa.models import mamba as mamba_module
+from sleep_rswa.models import recurrent as recurrent_module
 from sleep_rswa.models import MovementCNN, build_movement_model, build_staging_model
 from sleep_rswa.models import RSWADetectionNet
 from sleep_rswa.training.engine import collect_rswa_predictions, collect_staging_predictions
@@ -176,4 +177,46 @@ def test_bidir_mamba_block_runs_explicit_forward_and_backward_passes(monkeypatch
     assert len(calls)==2
     assert torch.allclose(calls[1],torch.flip(calls[0],[1]))
     expected=x+(calls[0]+torch.flip(calls[1],[1]))
+    assert torch.allclose(out,expected)
+
+
+def test_explicit_bidirectional_rnn_runs_independent_forward_and_backward_passes():
+    calls=[]
+
+    class _FakeRNN(torch.nn.Module):
+        def __init__(
+            self,
+            input_size,
+            hidden_size,
+            num_layers=1,
+            batch_first=True,
+            bidirectional=False,
+            dropout=0.0,
+        ):
+            super().__init__()
+            assert batch_first is True
+            assert bidirectional is False
+            self.input_size=input_size
+            self.hidden_size=hidden_size
+            self.num_layers=num_layers
+            self.dropout=dropout
+
+        def forward(self,x):
+            calls.append(x.detach().clone())
+            return x, torch.zeros(1)
+
+    block=recurrent_module.ExplicitBidirectionalRNN(
+        _FakeRNN,
+        input_size=4,
+        hidden_size=4,
+        num_layers=1,
+        dropout=0.0,
+    ).eval()
+    x=torch.tensor(
+        [[[1.0,2.0,3.0,4.0],[5.0,6.0,7.0,8.0],[9.0,10.0,11.0,12.0]]]
+    )
+    out,_=block(x)
+    assert len(calls)==2
+    assert torch.allclose(calls[1],torch.flip(calls[0],[1]))
+    expected=torch.cat([x,x],dim=-1)
     assert torch.allclose(out,expected)
