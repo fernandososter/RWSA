@@ -20,6 +20,12 @@ class SubjectData:
     rswa_labels: torch.Tensor
     rswa_conf: torch.Tensor
     rem_baseline_uv: float | None = None
+    # atonia_baseline_uv: baseline REAL usada pela regra AASM para decidir
+    # tonico/fasico (label_metadata.aasm_rule.atonia_baseline_uv no .pt).
+    # NAO confundir com rem_baseline_uv (baseline crua de baixo percentil,
+    # tipicamente 5-6x menor) -- ver RSWAConfig.baseline_relative_fallback_ratio
+    # e o bug corrigido em _extract_emg/canal baseline-relative.
+    atonia_baseline_uv: float | None = None
     emg_signals: torch.Tensor | None = None
     # Rotulos multi-rotulo por cabeca (opcionais). Se ausentes, sao derivados
     # de rswa_labels no load (retrocompatibilidade com .pt mono-rotulo antigos).
@@ -73,6 +79,16 @@ def load_subject_file(path: str | Path) -> SubjectData:
     any_lab = obj.get("any_labels")
     tonic_proto = obj.get("tonic_proto_labels")
     phasic_proto = obj.get("phasic_proto_labels")
+    label_metadata = obj.get("label_metadata")
+    aasm_meta = label_metadata.get("aasm_rule") if isinstance(label_metadata, dict) else None
+    atonia_baseline_uv = None
+    if isinstance(aasm_meta, dict) and aasm_meta.get("atonia_baseline_uv") is not None:
+        try:
+            _val = float(aasm_meta["atonia_baseline_uv"])
+            if _val == _val and _val > 0:  # exclui NaN/<=0 (atonia_source="unavailable")
+                atonia_baseline_uv = _val
+        except (TypeError, ValueError):
+            atonia_baseline_uv = None
     return SubjectData(
         subject_id=str(obj.get("subject_id", path.stem)),
         signals=signals,
@@ -84,6 +100,7 @@ def load_subject_file(path: str | Path) -> SubjectData:
             if obj.get("rem_baseline_uv") is not None
             else None
         ),
+        atonia_baseline_uv=atonia_baseline_uv,
         emg_signals=emg,
         tonic_labels=tonic,
         phasic_labels=phasic,
@@ -179,12 +196,26 @@ class SleepAnalysisDataset(Dataset):
         primary = _zscore_per_channel(emg)[:, :, : self.signal_config.samples_per_epoch]
         if not self.use_baseline_relative_channel:
             return primary
-        baseline_uv = subject.rem_baseline_uv
+        # Baseline correta = atonia_baseline_uv (a MESMA baseline que a regra
+        # AASM usa para decidir tonico/fasico -- ver label_metadata.aasm_rule).
+        # NAO usar rem_baseline_uv cru: e' ~5-6x menor e faz o canal saturar
+        # no clamp bem dentro da faixa de amplitude que precisa discriminar
+        # evento de nao-evento (bug identificado e corrigido em 2026-08-14,
+        # mesma classe do bug do limiar 2x na UI de revisao).
+        baseline_uv = subject.atonia_baseline_uv
+        if baseline_uv is None:
+            # Exame legado sem label_metadata.aasm_rule: aproxima a partir de
+            # rem_baseline_uv usando a razao media medida empiricamente
+            # (ver RSWAConfig.baseline_relative_fallback_ratio).
+            rem_baseline_uv = subject.rem_baseline_uv
+            if rem_baseline_uv is not None and rem_baseline_uv > 0:
+                baseline_uv = float(rem_baseline_uv) * self.rswa_config.baseline_relative_fallback_ratio
         if baseline_uv is None or baseline_uv <= 0:
             relative = torch.zeros_like(primary)
         else:
             baseline_v = float(baseline_uv) / 1e6
-            relative = (emg[:, :, : self.signal_config.samples_per_epoch].abs() / baseline_v).clamp(0.0, 20.0)
+            clamp_max = self.rswa_config.baseline_relative_clamp
+            relative = (emg[:, :, : self.signal_config.samples_per_epoch].abs() / baseline_v).clamp(0.0, clamp_max)
         return torch.cat([primary, relative], dim=1)
 
 
