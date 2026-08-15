@@ -32,20 +32,24 @@ class StagingCNNEncoder(nn.Module):
 
         self.cfg = config or ModelConfig()
 
+        # A extração multiescala ocorre apenas na primeira etapa; as camadas
+        # profundas usam kernels pequenos compartilhados para evitar que os
+        # maiores caminhos operem predominantemente sobre padding após vários
+        # poolings sucessivos.
         self.branches = nn.ModuleList(
             [
                 MultiKernelCNNBranch(
                     in_ch=self.cfg.eeg_in_channels,
                     out_ch=self.cfg.branch_filters,
                     kernels=self.cfg.eeg_kernels,
-                    n_layers=self.cfg.cnn_layers,
+                    n_layers=1,
                     drop=self.cfg.dropout,
                 ),
                 MultiKernelCNNBranch(
                     in_ch=self.cfg.eog_in_channels,
                     out_ch=self.cfg.branch_filters,
                     kernels=self.cfg.eog_kernels,
-                    n_layers=self.cfg.cnn_layers,
+                    n_layers=1,
                     drop=self.cfg.dropout,
                 ),
             ]
@@ -59,30 +63,22 @@ class StagingCNNEncoder(nn.Module):
             else nn.Identity()
         )
 
-        self.branch_projection = nn.Sequential(
+        self.refine = nn.Sequential(
+            nn.Conv1d(
+                merged_channels,
+                merged_channels,
+                kernel_size=5,
+                padding=2,
+                bias=False,
+            ),
+            make_group_norm(merged_channels),
+            nn.ReLU(inplace=True),
+            nn.MaxPool1d(2, 2),
             nn.Conv1d(
                 merged_channels,
                 self.cfg.d_model,
-                kernel_size=1,
-                bias=False,
-            ),
-            make_group_norm(self.cfg.d_model),
-            nn.ReLU(inplace=True),
-        )
-
-        self.spatial_block = nn.Sequential(
-            nn.Conv1d(
-                self.cfg.d_model,
-                self.cfg.d_model,
                 kernel_size=3,
                 padding=1,
-                groups=self.cfg.d_model,
-                bias=False,
-            ),
-            nn.Conv1d(
-                self.cfg.d_model,
-                self.cfg.d_model,
-                kernel_size=1,
                 bias=False,
             ),
             make_group_norm(self.cfg.d_model),
@@ -141,8 +137,7 @@ class StagingCNNEncoder(nn.Module):
         )
 
         features = self.se_global(features)
-        features = self.branch_projection(features)
-        features = self.spatial_block(features)
+        features = self.refine(features)
         features = self.pool(features).squeeze(-1)
 
         return features.reshape(

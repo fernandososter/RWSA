@@ -27,6 +27,7 @@ class SubjectData:
     # tipicamente 5-6x menor). Quando use_baseline_relative_channel=True,
     # os dois canais do ramo EMG passam a ser derivados desta baseline.
     atonia_baseline_uv: float | None = None
+    baseline_relative_reference_ratio: float | None = None
     emg_signals: torch.Tensor | None = None
     # Rotulos multi-rotulo por cabeca (opcionais). Se ausentes, sao derivados
     # de rswa_labels no load (retrocompatibilidade com .pt mono-rotulo antigos).
@@ -81,7 +82,9 @@ def load_subject_file(path: str | Path) -> SubjectData:
     tonic_proto = obj.get("tonic_proto_labels")
     phasic_proto = obj.get("phasic_proto_labels")
     label_metadata = obj.get("label_metadata")
+    rswa_meta = label_metadata if isinstance(label_metadata, dict) else {}
     aasm_meta = label_metadata.get("aasm_rule") if isinstance(label_metadata, dict) else None
+    auto_meta = label_metadata.get("auto_label") if isinstance(label_metadata, dict) else None
     atonia_baseline_uv = None
     if isinstance(aasm_meta, dict) and aasm_meta.get("atonia_baseline_uv") is not None:
         try:
@@ -90,6 +93,34 @@ def load_subject_file(path: str | Path) -> SubjectData:
                 atonia_baseline_uv = _val
         except (TypeError, ValueError):
             atonia_baseline_uv = None
+    baseline_relative_reference_ratio = None
+    ref_candidates: tuple[object | None, ...] = ()
+    if isinstance(aasm_meta, dict):
+        ref_candidates = (
+            aasm_meta.get("min_amplitude_ratio_used"),
+            aasm_meta.get("reference_ratio_used"),
+        )
+    elif isinstance(auto_meta, dict):
+        ref_candidates = (
+            auto_meta.get("k_on"),
+            auto_meta.get("min_amplitude_ratio_used"),
+            auto_meta.get("reference_ratio_used"),
+        )
+    else:
+        ref_candidates = (
+            rswa_meta.get("baseline_relative_reference_ratio"),
+            rswa_meta.get("reference_ratio_used"),
+        )
+    for candidate in ref_candidates:
+        if candidate is None:
+            continue
+        try:
+            parsed = float(candidate)
+        except (TypeError, ValueError):
+            continue
+        if parsed == parsed and parsed > 0:
+            baseline_relative_reference_ratio = parsed
+            break
     return SubjectData(
         subject_id=str(obj.get("subject_id", path.stem)),
         signals=signals,
@@ -102,6 +133,7 @@ def load_subject_file(path: str | Path) -> SubjectData:
             else None
         ),
         atonia_baseline_uv=atonia_baseline_uv,
+        baseline_relative_reference_ratio=baseline_relative_reference_ratio,
         emg_signals=emg,
         tonic_labels=tonic,
         phasic_labels=phasic,
@@ -202,10 +234,11 @@ class SleepAnalysisDataset(Dataset):
         # Quando o canal auxiliar baseline-relative esta habilitado, os DOIS
         # canais do ramo EMG passam a ser relativos ao basal:
         #   1. EMG assinado / baseline
-        #   2. log1p(|EMG| / baseline) / log(log_base)
-        # Assim, o limiar fisiologico de 4x o basal fica explicitamente
-        # representado no segundo canal (valor 1.0 quando log_base=5.0).
+        #   2. log1p(|EMG| / baseline) / log1p(reference_ratio)
+        # Assim, o mesmo limiar de amplitude usado no preprocessamento pode
+        # ser representado explicitamente no segundo canal (valor 1.0).
         baseline_uv = subject.atonia_baseline_uv
+        reference_ratio = subject.baseline_relative_reference_ratio
         if baseline_uv is None:
             # Exame legado sem label_metadata.aasm_rule: aproxima a partir de
             # rem_baseline_uv usando a razao media medida empiricamente
@@ -213,6 +246,8 @@ class SleepAnalysisDataset(Dataset):
             rem_baseline_uv = subject.rem_baseline_uv
             if rem_baseline_uv is not None and rem_baseline_uv > 0:
                 baseline_uv = float(rem_baseline_uv) * self.rswa_config.baseline_relative_fallback_ratio
+        if reference_ratio is None or reference_ratio <= 0:
+            reference_ratio = self.rswa_config.baseline_relative_reference_ratio
         if baseline_uv is None or baseline_uv <= 0:
             signed_relative = torch.zeros_like(primary)
             amplitude_relative = torch.zeros_like(primary)
@@ -226,7 +261,7 @@ class SleepAnalysisDataset(Dataset):
             )
             amplitude_relative = (
                 torch.log1p(ratio.abs())
-                / math.log(self.rswa_config.baseline_relative_log_base)
+                / math.log1p(float(reference_ratio))
             ).clamp(
                 0.0,
                 self.rswa_config.baseline_relative_amplitude_clamp,
