@@ -1,0 +1,69 @@
+{
+  "fold": 1,
+  "train": {
+    "exams": 63,
+    "stage_distribution": {
+      "W": {
+        "count": 135990,
+        "percentage": 20.746944940271867
+      },
+      "N1": {
+        "count": 31220,
+        "percentage": 4.762994492501564
+      },
+      "N2": {
+        "count": 226300,
+        "percentage": 34.52484476787649
+      },
+      "N3": {
+        "count": 149850,
+        "percentage": 22.86145819030619
+      },
+      "REM": {
+        "count": 112110,
+        "percentage": 17.103757609043893
+      }
+    },
+    "movement": {
+      "total_mini_epochs": 655470,
+      "evaluable_mini_epochs": 112110,
+      "movement_positive": 23155,
+      "pct_movement_of_evaluable": 20.653822138970654,
+      "pct_movement_of_total": 3.532579675652585,
+      "pct_evaluable_of_total": 17.103757609043893
+    }
+  },
+  "validation": {
+    "exams": 16,
+    "stage_distribution": {
+      "W": {
+        "count": 22920,
+        "percentage": 14.671616950454487
+      },
+      "N1": {
+        "count": 7350,
+        "percentage": 4.704903341441557
+      },
+      "N2": {
+        "count": 64040,
+        "percentage": 40.9934707463833
+      },
+      "N3": {
+        "count": 36960,
+        "percentage": 23.658942516963258
+      },
+      "REM": {
+        "count": 24950,
+        "percentage": 15.971066444757394
+      }
+    },
+    "movement": {
+      "total_mini_epochs": 156220,
+      "evaluable_mini_epochs": 24950,
+      "movement_positive": 4871,
+      "pct_movement_of_evaluable": 19.52304609218437,
+      "pct_movement_of_total": 3.1180386634233774,
+      "pct_evaluable_of_total": 15.971066444757394
+    }
+  }
+}

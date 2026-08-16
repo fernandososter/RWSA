@@ -9,7 +9,9 @@ from .engine import (
 from .logger import ExperimentLogger
 from .losses import RSWALoss, StagingLoss
 from .plots import plot_confusion_matrix, plot_training_curves
+from .prediction_export import save_rswa_predictions_csv, save_staging_predictions_csv
 from .prediction_logger import ValidationPredictionLogger
+from .resource_monitor import ResourceMonitor
 from .testing import (
     describe_split,
     evaluate_movement_test_set,
@@ -43,6 +45,9 @@ __all__ = [
     "evaluate_staging_test_set",
     "plot_training_curves",
     "plot_confusion_matrix",
+    "save_staging_predictions_csv",
+    "save_rswa_predictions_csv",
+    "ResourceMonitor",
     "seed_everything",
     "resolve_device",
     "split_subjects",

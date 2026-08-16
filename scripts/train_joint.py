@@ -50,7 +50,10 @@ from sleep_rswa.training import (
     format_split_description,
     load_checkpoint,
     plot_confusion_matrix,
+    ResourceMonitor,
     resolve_device,
+    save_rswa_predictions_csv,
+    save_staging_predictions_csv,
     save_checkpoint,
     seed_everything,
     stratified_group_folds,
@@ -176,6 +179,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", default="auto")
     parser.add_argument("--no-amp", action="store_true")
+    parser.add_argument(
+        "--resource-log-interval-sec",
+        type=float,
+        default=30.0,
+        help="Intervalo, em segundos, para registrar uso de CPU/RAM/GPU em resource_usage.csv.",
+    )
     parser.add_argument("--run-dir", type=Path, default=Path("runs/joint"))
     parser.add_argument("--experiment-name", default=None)
     parser.add_argument("--notes", default=None)
@@ -336,428 +345,401 @@ def main() -> None:
         task="joint", experiment_name=args.experiment_name, root_dir=args.run_dir,
         device=device, args=vars(args), notes=args.notes, tags=args.tags,
     ) as logger:
-        logger.info(f"Dispositivo: {device}")
-        logger.info(f"Modelo (staging + movimento): {args.model}")
-        logger.info(
-            "Topologia conjunta: "
-            + (
-                "encoder EEG/EOG + encoder EMG + fusao + BiMamba compartilhado"
-                if _use_shared_joint_system(args.model)
-                else "staging e RSWA com troncos temporais separados"
-            )
-        )
-        logger.info(
-            f"Backend temporal BiMamba: {mamba_backend_name()} | "
-            f"{mamba_backend_detail()}"
-        )
-        logger.info(
-            f"RSWA experimental: target_mode={args.rswa_target_mode} "
-            f"postprocess_mode={args.rswa_postprocess_mode} "
-            f"use_baseline_relative_channel={args.rswa_use_baseline_relative_channel}"
-        )
-        logger.info(
-            f"Sujeitos: total={len(all_subjects)} | CV={len(subjects)} | teste={len(test_subjects)} | "
-            f"n_splits={args.n_splits} | estratificação CV={args.stratify_by} | teste={args.test_stratify_by}"
-        )
-
-        fold_summaries = []
-        staging_checkpoints: list[dict[str, Any]] = []
-        rswa_checkpoints: list[dict[str, Any]] = []
-        data_report: dict[str, Any] = {"folds": []}
-
-        if test_subjects:
-            logger.log_subject_split(subjects, test_subjects, filename="test_split.json")
-            test_dataset = make_loader(test_subjects, args, False, device).dataset
-            test_desc = describe_split(test_dataset)
-            data_report["test"] = test_desc
-            logger.info(format_split_description("TESTE (held-out)", test_desc))
-            print_stage_distribution(
-                "TESTE (held-out) - Stage distribution",
-                test_dataset.stage_distribution().as_dict(),
-            )
-            print_movement_distribution(
-                "TESTE (held-out) - Movement distribution",
-                test_dataset.movement_distribution(),
-            )
-
-        for fold, train_subjects, val_subjects in folds:
-            seed_everything(args.seed + fold)
-            fold_dir = logger.run_dir / f"fold_{fold}"
-            checkpoint_dir = fold_dir / "checkpoints"
-            figures_dir = fold_dir / "figures"
-            checkpoint_dir.mkdir(parents=True, exist_ok=True)
-            figures_dir.mkdir(parents=True, exist_ok=True)
-
-            train_loader = make_loader(train_subjects, args, True, device)
-            val_loader = make_loader(val_subjects, args, False, device)
-
-            # ── Documentação de dados do fold (exames, % estágios, % movimento) ──
-            train_desc = describe_split(train_loader.dataset)
-            val_desc = describe_split(val_loader.dataset)
-            fold_data = {"fold": fold, "train": train_desc, "validation": val_desc}
-            data_report["folds"].append(fold_data)
-            logger.write_json(f"fold_{fold}/data_description.json", fold_data)
-            logger.info(format_split_description(f"Fold {fold} TREINO", train_desc))
-            logger.info(format_split_description(f"Fold {fold} VALIDAÇÃO", val_desc))
-            train_tonic_subjects = _count_tonic_subjects(train_subjects)
-            val_tonic_subjects = _count_tonic_subjects(val_subjects)
+        with ResourceMonitor(
+            logger.run_dir / "resource_usage.csv",
+            device=device,
+            interval_sec=args.resource_log_interval_sec,
+        ):
+            logger.info(f"Dispositivo: {device}")
+            logger.info(f"Modelo (staging + movimento): {args.model}")
             logger.info(
-                f"Fold {fold}: sujeitos com tonic -> treino={train_tonic_subjects}/{len(train_subjects)} "
-                f"validação={val_tonic_subjects}/{len(val_subjects)} | "
-                f"oversample_tonic_subjects={args.oversample_tonic_subjects} "
-                f"tonic_subject_weight={args.tonic_subject_weight:.2f}"
-            )
-
-            print()
-            print("=" * 80)
-            print(f"FOLD {fold}/{args.n_splits}")
-            print("=" * 80)
-
-            print_stage_distribution(
-                f"Fold {fold} - Train stage distribution",
-                train_loader.dataset.stage_distribution().as_dict(),
-            )
-            print_movement_distribution(
-                f"Fold {fold} - Train movement distribution",
-                train_loader.dataset.movement_distribution(),
-            )
-            print_stage_distribution(
-                f"Fold {fold} - Validation stage distribution",
-                val_loader.dataset.stage_distribution().as_dict(),
-            )
-            print_movement_distribution(
-                f"Fold {fold} - Validation movement distribution",
-                val_loader.dataset.movement_distribution(),
-            )
-
-            print_split_summary(
-                split_name="Train", subjects=train_subjects,
-                dataset=train_loader.dataset, loader=train_loader,
-            )
-            print_split_summary(
-                split_name="Validation", subjects=val_subjects,
-                dataset=val_loader.dataset, loader=val_loader,
-            )
-
-            shared_joint = _use_shared_joint_system(args.model)
-            if shared_joint:
-                system = SharedBiMambaJointSystem(config=rswa_model_cfg).to(device)
-                staging_model = None
-                rswa_model = None
-                _print_model_summary("shared_joint_system", system, logger)
-                _print_model_summary("shared_joint_staging_encoder", system.staging_encoder, logger)
-                _print_model_summary("shared_joint_rswa_encoder", system.rswa_encoder, logger)
-                _print_model_summary("shared_joint_temporal", system.temporal, logger)
-            else:
-                staging_model = build_staging_model(args.model, config=rswa_model_cfg).to(device)
-                rswa_model = build_movement_model(
-                    args.model, config=rswa_model_cfg, stage_conditioning=True
-                ).to(device)
-                system = SleepStagingRSWASystem(staging_model, rswa_model).to(device)
-                _print_model_summary("staging_model", staging_model, logger)
-                _print_model_summary("rswa_model", rswa_model, logger)
-            _print_model_summary("joint_system", system, logger)
-            staging_loss_fn = StagingLoss()
-            tonic_weight = torch.tensor(args.tonic_pos_weight, device=device) if args.tonic_pos_weight else None
-            phasic_weight = torch.tensor(args.phasic_pos_weight, device=device) if args.phasic_pos_weight else None
-            any_weight = torch.tensor(args.any_pos_weight, device=device) if args.any_pos_weight else None
-            rswa_loss_fn = RSWALoss(tonic_pos_weight=tonic_weight, phasic_pos_weight=phasic_weight, any_pos_weight=any_weight)
-            thresholds = _resolve_thresholds(args)
-            if shared_joint:
-                joint_optimizer = torch.optim.AdamW(
-                    [
-                        {
-                            "params": list(system.staging_encoder.parameters())
-                            + list(system.staging_classifier.parameters()),
-                            "lr": args.lr_staging,
-                        },
-                        {
-                            "params": list(system.rswa_encoder.parameters())
-                            + list(system.fusion.parameters())
-                            + list(system.temporal.parameters())
-                            + list(system.tonic_head.parameters())
-                            + list(system.phasic_head.parameters())
-                            + list(system.any_head.parameters()),
-                            "lr": args.lr_rswa,
-                        },
-                    ],
-                    weight_decay=args.weight_decay,
+                "Topologia conjunta: "
+                + (
+                    "encoder EEG/EOG + encoder EMG + fusao + BiMamba compartilhado"
+                    if _use_shared_joint_system(args.model)
+                    else "staging e RSWA com troncos temporais separados"
                 )
-                staging_optimizer = None
-                rswa_optimizer = None
-            else:
-                staging_optimizer = torch.optim.AdamW(
-                    staging_model.parameters(), lr=args.lr_staging, weight_decay=args.weight_decay
+            )
+            logger.info(
+                f"Backend temporal BiMamba: {mamba_backend_name()} | "
+                f"{mamba_backend_detail()}"
+            )
+            logger.info(
+                f"RSWA experimental: target_mode={args.rswa_target_mode} "
+                f"postprocess_mode={args.rswa_postprocess_mode} "
+                f"use_baseline_relative_channel={args.rswa_use_baseline_relative_channel}"
+            )
+            logger.info(
+                f"Sujeitos: total={len(all_subjects)} | CV={len(subjects)} | teste={len(test_subjects)} | "
+                f"n_splits={args.n_splits} | estratificação CV={args.stratify_by} | teste={args.test_stratify_by}"
+            )
+
+            fold_summaries = []
+            staging_checkpoints: list[dict[str, Any]] = []
+            rswa_checkpoints: list[dict[str, Any]] = []
+            data_report: dict[str, Any] = {"folds": []}
+
+            if test_subjects:
+                logger.log_subject_split(subjects, test_subjects, filename="test_split.json")
+                test_dataset = make_loader(test_subjects, args, False, device).dataset
+                test_desc = describe_split(test_dataset)
+                data_report["test"] = test_desc
+                logger.info(format_split_description("TESTE (held-out)", test_desc))
+                print_stage_distribution(
+                    "TESTE (held-out) - Stage distribution",
+                    test_dataset.stage_distribution().as_dict(),
                 )
-                rswa_optimizer = torch.optim.AdamW(
-                    rswa_model.parameters(), lr=args.lr_rswa, weight_decay=args.weight_decay
+                print_movement_distribution(
+                    "TESTE (held-out) - Movement distribution",
+                    test_dataset.movement_distribution(),
                 )
-                joint_optimizer = None
 
-            logger.log_subject_split(train_subjects, val_subjects, filename=f"fold_{fold}_split.json")
-            logger.info(f"Fold {fold}: treino={len(train_subjects)} validação={len(val_subjects)}")
+            for fold, train_subjects, val_subjects in folds:
+                seed_everything(args.seed + fold)
+                fold_dir = logger.run_dir / f"fold_{fold}"
+                checkpoint_dir = fold_dir / "checkpoints"
+                figures_dir = fold_dir / "figures"
+                predictions_dir = fold_dir / "predictions"
+                checkpoint_dir.mkdir(parents=True, exist_ok=True)
+                figures_dir.mkdir(parents=True, exist_ok=True)
+                predictions_dir.mkdir(parents=True, exist_ok=True)
+                train_loader = make_loader(train_subjects, args, True, device)
+                val_loader = make_loader(val_subjects, args, False, device)
 
-            best_metric = float("-inf")
-            best_epoch = 0
-            stale = 0
-            best_metrics: dict[str, float] = {}
-            history: list[dict[str, float]] = []
-
-            for epoch in range(1, args.epochs + 1):
-                epoch_start = perf_counter()
-                train_start = perf_counter()
-                system.train()
-                stage_loss_sum = 0.0
-                rswa_loss_sum = 0.0
-                rswa_head_loss_sums = {"tonic": 0.0, "phasic": 0.0, "any": 0.0}
-                stage_batches = 0
-                rswa_batches = 0
-                tr_stage_targets: list[torch.Tensor] = []
-                tr_stage_preds: list[torch.Tensor] = []
-                tr_move_targets: list[torch.Tensor] = []
-                tr_move_preds: list[torch.Tensor] = []
-                tr_head_targets: dict[str, list[torch.Tensor]] = {h: [] for h in ("tonic", "phasic", "any")}
-                tr_head_preds: dict[str, list[torch.Tensor]] = {h: [] for h in ("tonic", "phasic", "any")}
-
-                for batch in train_loader:
-                    signals = batch["signals"].to(device, non_blocking=True)
-                    emg = batch["emg_center"].to(device, non_blocking=True)
-                    padding_mask = batch["padding_mask"].to(device, non_blocking=True)
-                    stage_targets = batch["sleep_stages"].to(device, non_blocking=True)
-                    tonic_targets = batch["tonic_targets"].to(device, non_blocking=True)
-                    phasic_targets = batch["phasic_targets"].to(device, non_blocking=True)
-                    any_targets = batch["any_targets"].to(device, non_blocking=True)
-                    tonic_labels = batch["tonic_labels"].to(device, non_blocking=True)
-                    phasic_labels = batch["phasic_labels"].to(device, non_blocking=True)
-                    any_labels = batch["any_labels"].to(device, non_blocking=True)
-                    stage_valid = batch["staging_valid"].to(device, non_blocking=True) & padding_mask
-                    rswa_valid = batch["rswa_valid"].to(device, non_blocking=True) & padding_mask
-
-                    if not stage_valid.any() and not rswa_valid.any():
-                        continue
-
-                    if joint_optimizer is not None:
-                        joint_optimizer.zero_grad(set_to_none=True)
-                    else:
-                        staging_optimizer.zero_grad(set_to_none=True)
-                        rswa_optimizer.zero_grad(set_to_none=True)
-                    with torch.autocast(
-                        device_type="cuda", dtype=torch.bfloat16,
-                        enabled=(not args.no_amp and device.type == "cuda"),
-                    ):
-                        outputs = system(signals, emg, mask=padding_mask)
-
-                    if stage_valid.any():
-                        stage_loss = staging_loss_fn(
-                            outputs["staging_logits"], stage_targets, stage_valid
-                        )
-                        stage_loss_sum += float(stage_loss.detach().cpu())
-                        stage_batches += 1
-                        tr_stage_targets.append(stage_targets[stage_valid].detach().cpu())
-                        tr_stage_preds.append(
-                            outputs["staging_logits"].detach().argmax(dim=-1)[stage_valid].cpu()
-                        )
-                    else:
-                        stage_loss = None
-
-                    if rswa_valid.any():
-                        rswa_loss, per_head = rswa_loss_fn(
-                            outputs, tonic_targets, phasic_targets, any_targets, rswa_valid
-                        )
-                        rswa_loss_sum += float(rswa_loss.detach().cpu())
-                        for head in ("tonic", "phasic", "any"):
-                            rswa_head_loss_sums[head] += float(
-                                per_head[f"{head}_loss"].detach().cpu()
-                            )
-                        rswa_batches += 1
-                        move_targets = (
-                            (tonic_labels > 0.5) | (phasic_labels > 0.5) | (any_labels > 0.5)
-                        ).float()
-                        move_preds = (
-                            (torch.sigmoid(outputs["tonic_logits"].detach()) >= thresholds["tonic"])
-                            | (torch.sigmoid(outputs["phasic_logits"].detach()) >= thresholds["phasic"])
-                            | (torch.sigmoid(outputs["any_logits"].detach()) >= thresholds["any"])
-                        ).long()
-                        tr_move_targets.append(move_targets[rswa_valid].long().detach().cpu())
-                        tr_move_preds.append(move_preds[rswa_valid].cpu())
-                        head_targets = {
-                            "tonic": tonic_labels,
-                            "phasic": phasic_labels,
-                            "any": any_labels,
-                        }
-                        for head in ("tonic", "phasic", "any"):
-                            head_preds = (
-                                torch.sigmoid(outputs[f"{head}_logits"].detach())
-                                >= thresholds[head]
-                            ).long()
-                            tr_head_targets[head].append(
-                                head_targets[head][rswa_valid].long().detach().cpu()
-                            )
-                            tr_head_preds[head].append(head_preds[rswa_valid].cpu())
-                    else:
-                        rswa_loss = None
-
-                    total_loss = None
-                    if stage_loss is not None:
-                        total_loss = stage_loss
-                    if rswa_loss is not None:
-                        total_loss = rswa_loss if total_loss is None else (total_loss + rswa_loss)
-                    if total_loss is None:
-                        continue
-                    total_loss.backward()
-                    if joint_optimizer is not None:
-                        clip_grad_norm_(system.parameters(), args.grad_clip)
-                        joint_optimizer.step()
-                    else:
-                        clip_grad_norm_(staging_model.parameters(), args.grad_clip)
-                        clip_grad_norm_(rswa_model.parameters(), args.grad_clip)
-                        staging_optimizer.step()
-                        rswa_optimizer.step()
-
-                train_time = perf_counter() - train_start
-
-                # Distribuições de treino (staging 5-classes e movimento binário).
-                train_dist: dict[str, Any] = {}
-                if tr_stage_targets:
-                    st_t = StageDistribution(); st_p = StageDistribution()
-                    st_t.update(torch.cat(tr_stage_targets)); st_p.update(torch.cat(tr_stage_preds))
-                    train_dist["staging_target_distribution"] = st_t.as_dict()
-                    train_dist["staging_prediction_distribution"] = st_p.as_dict()
-                if tr_move_targets:
-                    train_dist["movement_target_distribution"] = _binary_distribution(
-                        torch.cat(tr_move_targets).numpy())
-                    train_dist["movement_prediction_distribution"] = _binary_distribution(
-                        torch.cat(tr_move_preds).numpy())
-                for head in ("tonic", "phasic", "any"):
-                    if tr_head_targets[head]:
-                        train_dist[f"{head}_target_distribution"] = _binary_distribution(
-                            torch.cat(tr_head_targets[head]).numpy()
-                        )
-                        train_dist[f"{head}_prediction_distribution"] = _binary_distribution(
-                            torch.cat(tr_head_preds[head]).numpy()
-                        )
-
-                val_start = perf_counter()
-                val_metrics = evaluate_joint(
-                    system, val_loader, staging_loss_fn, rswa_loss_fn, device,
-                    amp=not args.no_amp, threshold=thresholds,
-                    postprocess_mode=(
-                        None if args.rswa_postprocess_mode == "none"
-                        else args.rswa_postprocess_mode
-                    ),
-                )
-                val_time = perf_counter() - val_start
-
-                row = {
-                    "fold": fold,
-                    "epoch": epoch,
-                    "train_time_sec": train_time,
-                    "val_time_sec": val_time,
-                    "epoch_time_sec": perf_counter() - epoch_start,
-                    "staging_learning_rate": (
-                        joint_optimizer.param_groups[0]["lr"]
-                        if joint_optimizer is not None
-                        else staging_optimizer.param_groups[0]["lr"]
-                    ),
-                    "rswa_learning_rate": (
-                        joint_optimizer.param_groups[1]["lr"]
-                        if joint_optimizer is not None
-                        else rswa_optimizer.param_groups[0]["lr"]
-                    ),
-                    "train_staging_loss": stage_loss_sum / max(stage_batches, 1),
-                    "train_rswa_loss": rswa_loss_sum / max(rswa_batches, 1),
-                    "train_rswa_tonic_loss": rswa_head_loss_sums["tonic"] / max(rswa_batches, 1),
-                    "train_rswa_phasic_loss": rswa_head_loss_sums["phasic"] / max(rswa_batches, 1),
-                    "train_rswa_any_loss": rswa_head_loss_sums["any"] / max(rswa_batches, 1),
-                    **{f"val_{key}": value for key, value in val_metrics.items()
-                       if isinstance(value, (int, float))},
-                }
-                history.append(row)
-                logger.log_epoch(row)
+                # ── Documentação de dados do fold (exames, % estágios, % movimento) ──
+                train_desc = describe_split(train_loader.dataset)
+                val_desc = describe_split(val_loader.dataset)
+                fold_data = {"fold": fold, "train": train_desc, "validation": val_desc}
+                data_report["folds"].append(fold_data)
+                logger.write_json(f"fold_{fold}/data_description.json", fold_data)
+                logger.info(format_split_description(f"Fold {fold} TREINO", train_desc))
+                logger.info(format_split_description(f"Fold {fold} VALIDAÇÃO", val_desc))
+                train_tonic_subjects = _count_tonic_subjects(train_subjects)
+                val_tonic_subjects = _count_tonic_subjects(val_subjects)
                 logger.info(
-                    f"fold={fold} ep={epoch:03d} train={train_time:.1f}s val={val_time:.1f}s "
-                    f"{GREEN}"
-                    f"train_stg_loss={row['train_staging_loss']:.4f} "
-                    f"train_rswa_loss={row['train_rswa_loss']:.4f} "
-                    f"train_rswa_head_loss(t/p/a)="
-                    f"{row['train_rswa_tonic_loss']:.4f}/"
-                    f"{row['train_rswa_phasic_loss']:.4f}/"
-                    f"{row['train_rswa_any_loss']:.4f}"
-                    f"{RESET} | "
-                    f"{YELLOW}"
-                    f"val_stg_f1={val_metrics.get('staging_f1_macro', float('nan')):.4f} "
-                    f"val_stg_kappa={val_metrics.get('staging_kappa', float('nan')):.4f} "
-                    f"val_rswa_head_loss(t/p/a)="
-                    f"{val_metrics.get('rswa_tonic_loss', float('nan')):.4f}/"
-                    f"{val_metrics.get('rswa_phasic_loss', float('nan')):.4f}/"
-                    f"{val_metrics.get('rswa_any_loss', float('nan')):.4f} "
-                    f"val_f1(t/p/a)={val_metrics.get('rswa_tonic_f1', float('nan')):.3f}/"
-                    f"{val_metrics.get('rswa_phasic_f1', float('nan')):.3f}/"
-                    f"{val_metrics.get('rswa_any_f1', float('nan')):.3f} "
-                    f"val_f1_macro={val_metrics.get('rswa_rswa_f1_macro', float('nan')):.4f}"
-                    f"{RESET}"
+                    f"Fold {fold}: sujeitos com tonic -> treino={train_tonic_subjects}/{len(train_subjects)} "
+                    f"validação={val_tonic_subjects}/{len(val_subjects)} | "
+                    f"oversample_tonic_subjects={args.oversample_tonic_subjects} "
+                    f"tonic_subject_weight={args.tonic_subject_weight:.2f}"
                 )
 
-                if args.log_movement_distribution:
-                    def _emit(tag, dist, color, key):
-                        if key in dist:
-                            logger.info(f"{color}{tag}[{format_stage_distribution(dist[key])}]{RESET}")
-                    _emit("train_stage_targets", train_dist, GREEN, "staging_target_distribution")
-                    _emit("train_stage_predictions", train_dist, GREEN, "staging_prediction_distribution")
-                    _emit("train_move_targets", train_dist, GREEN, "movement_target_distribution")
-                    _emit("train_move_predictions", train_dist, GREEN, "movement_prediction_distribution")
-                    _emit("val_stage_targets", val_metrics, YELLOW, "staging_target_distribution")
-                    _emit("val_stage_predictions", val_metrics, YELLOW, "staging_prediction_distribution")
-                    _emit("val_move_targets", val_metrics, YELLOW, "movement_target_distribution")
-                    _emit("val_move_predictions", val_metrics, YELLOW, "movement_prediction_distribution")
-                    _emit("train_tonic_targets", train_dist, BLUE, "tonic_target_distribution")
-                    _emit("train_tonic_predictions", train_dist, BLUE, "tonic_prediction_distribution")
-                    _emit("val_tonic_targets", val_metrics, BLUE, "tonic_target_distribution")
-                    _emit("val_tonic_predictions", val_metrics, BLUE, "tonic_prediction_distribution")
-                    _emit("train_phasic_targets", train_dist, PURPLE, "phasic_target_distribution")
-                    _emit("train_phasic_predictions", train_dist, PURPLE, "phasic_prediction_distribution")
-                    _emit("val_phasic_targets", val_metrics, PURPLE, "phasic_target_distribution")
-                    _emit("val_phasic_predictions", val_metrics, PURPLE, "phasic_prediction_distribution")
-                    _emit("train_any_targets", train_dist, ORANGE, "any_target_distribution")
-                    _emit("train_any_predictions", train_dist, ORANGE, "any_prediction_distribution")
-                    _emit("val_any_targets", val_metrics, ORANGE, "any_target_distribution")
-                    _emit("val_any_predictions", val_metrics, ORANGE, "any_prediction_distribution")
+                print()
+                print("=" * 80)
+                print(f"FOLD {fold}/{args.n_splits}")
+                print("=" * 80)
 
-                if joint_optimizer is not None:
-                    save_checkpoint(
-                        checkpoint_dir / "joint_last.pt",
-                        model=system,
-                        optimizer=joint_optimizer,
-                        epoch=epoch,
-                        metrics=val_metrics,
-                        extra={
-                            "task": "joint",
-                            "trained_with": "shared_bimamba",
-                            "fold": fold,
-                            "run_id": logger.run_id,
-                        },
-                    )
+                print_stage_distribution(
+                    f"Fold {fold} - Train stage distribution",
+                    train_loader.dataset.stage_distribution().as_dict(),
+                )
+                print_movement_distribution(
+                    f"Fold {fold} - Train movement distribution",
+                    train_loader.dataset.movement_distribution(),
+                )
+                print_stage_distribution(
+                    f"Fold {fold} - Validation stage distribution",
+                    val_loader.dataset.stage_distribution().as_dict(),
+                )
+                print_movement_distribution(
+                    f"Fold {fold} - Validation movement distribution",
+                    val_loader.dataset.movement_distribution(),
+                )
+
+                print_split_summary(
+                    split_name="Train", subjects=train_subjects,
+                    dataset=train_loader.dataset, loader=train_loader,
+                )
+                print_split_summary(
+                    split_name="Validation", subjects=val_subjects,
+                    dataset=val_loader.dataset, loader=val_loader,
+                )
+
+                shared_joint = _use_shared_joint_system(args.model)
+                if shared_joint:
+                    system = SharedBiMambaJointSystem(config=rswa_model_cfg).to(device)
+                    staging_model = None
+                    rswa_model = None
+                    _print_model_summary("shared_joint_system", system, logger)
+                    _print_model_summary("shared_joint_staging_encoder", system.staging_encoder, logger)
+                    _print_model_summary("shared_joint_rswa_encoder", system.rswa_encoder, logger)
+                    _print_model_summary("shared_joint_temporal", system.temporal, logger)
                 else:
-                    save_checkpoint(
-                        checkpoint_dir / "staging_last.pt", model=staging_model,
-                        optimizer=staging_optimizer, epoch=epoch, metrics=val_metrics,
-                        extra={"task": "staging", "trained_with": "joint", "fold": fold, "run_id": logger.run_id},
+                    staging_model = build_staging_model(args.model, config=rswa_model_cfg).to(device)
+                    rswa_model = build_movement_model(
+                        args.model, config=rswa_model_cfg, stage_conditioning=True
+                    ).to(device)
+                    system = SleepStagingRSWASystem(staging_model, rswa_model).to(device)
+                    _print_model_summary("staging_model", staging_model, logger)
+                    _print_model_summary("rswa_model", rswa_model, logger)
+                _print_model_summary("joint_system", system, logger)
+                staging_loss_fn = StagingLoss()
+                tonic_weight = torch.tensor(args.tonic_pos_weight, device=device) if args.tonic_pos_weight else None
+                phasic_weight = torch.tensor(args.phasic_pos_weight, device=device) if args.phasic_pos_weight else None
+                any_weight = torch.tensor(args.any_pos_weight, device=device) if args.any_pos_weight else None
+                rswa_loss_fn = RSWALoss(tonic_pos_weight=tonic_weight, phasic_pos_weight=phasic_weight, any_pos_weight=any_weight)
+                thresholds = _resolve_thresholds(args)
+                if shared_joint:
+                    joint_optimizer = torch.optim.AdamW(
+                        [
+                            {
+                                "params": list(system.staging_encoder.parameters())
+                                + list(system.staging_classifier.parameters()),
+                                "lr": args.lr_staging,
+                            },
+                            {
+                                "params": list(system.rswa_encoder.parameters())
+                                + list(system.fusion.parameters())
+                                + list(system.temporal.parameters())
+                                + list(system.tonic_head.parameters())
+                                + list(system.phasic_head.parameters())
+                                + list(system.any_head.parameters()),
+                                "lr": args.lr_rswa,
+                            },
+                        ],
+                        weight_decay=args.weight_decay,
                     )
-                    save_checkpoint(
-                        checkpoint_dir / "rswa_last.pt", model=rswa_model,
-                        optimizer=rswa_optimizer, epoch=epoch, metrics=val_metrics,
-                        extra={"task": "rswa", "trained_with": "joint", "fold": fold, "run_id": logger.run_id},
+                    staging_optimizer = None
+                    rswa_optimizer = None
+                else:
+                    staging_optimizer = torch.optim.AdamW(
+                        staging_model.parameters(), lr=args.lr_staging, weight_decay=args.weight_decay
+                    )
+                    rswa_optimizer = torch.optim.AdamW(
+                        rswa_model.parameters(), lr=args.lr_rswa, weight_decay=args.weight_decay
+                    )
+                    joint_optimizer = None
+
+                logger.log_subject_split(train_subjects, val_subjects, filename=f"fold_{fold}_split.json")
+                logger.info(f"Fold {fold}: treino={len(train_subjects)} validação={len(val_subjects)}")
+
+                best_metric = float("-inf")
+                best_epoch = 0
+                stale = 0
+                best_metrics: dict[str, float] = {}
+                history: list[dict[str, float]] = []
+
+                for epoch in range(1, args.epochs + 1):
+                    epoch_start = perf_counter()
+                    train_start = perf_counter()
+                    system.train()
+                    stage_loss_sum = 0.0
+                    rswa_loss_sum = 0.0
+                    rswa_head_loss_sums = {"tonic": 0.0, "phasic": 0.0, "any": 0.0}
+                    stage_batches = 0
+                    rswa_batches = 0
+                    tr_stage_targets: list[torch.Tensor] = []
+                    tr_stage_preds: list[torch.Tensor] = []
+                    tr_move_targets: list[torch.Tensor] = []
+                    tr_move_preds: list[torch.Tensor] = []
+                    tr_head_targets: dict[str, list[torch.Tensor]] = {h: [] for h in ("tonic", "phasic", "any")}
+                    tr_head_preds: dict[str, list[torch.Tensor]] = {h: [] for h in ("tonic", "phasic", "any")}
+
+                    for batch in train_loader:
+                        signals = batch["signals"].to(device, non_blocking=True)
+                        emg = batch["emg_center"].to(device, non_blocking=True)
+                        padding_mask = batch["padding_mask"].to(device, non_blocking=True)
+                        stage_targets = batch["sleep_stages"].to(device, non_blocking=True)
+                        tonic_targets = batch["tonic_targets"].to(device, non_blocking=True)
+                        phasic_targets = batch["phasic_targets"].to(device, non_blocking=True)
+                        any_targets = batch["any_targets"].to(device, non_blocking=True)
+                        tonic_labels = batch["tonic_labels"].to(device, non_blocking=True)
+                        phasic_labels = batch["phasic_labels"].to(device, non_blocking=True)
+                        any_labels = batch["any_labels"].to(device, non_blocking=True)
+                        stage_valid = batch["staging_valid"].to(device, non_blocking=True) & padding_mask
+                        rswa_valid = batch["rswa_valid"].to(device, non_blocking=True) & padding_mask
+
+                        if not stage_valid.any() and not rswa_valid.any():
+                            continue
+
+                        if joint_optimizer is not None:
+                            joint_optimizer.zero_grad(set_to_none=True)
+                        else:
+                            staging_optimizer.zero_grad(set_to_none=True)
+                            rswa_optimizer.zero_grad(set_to_none=True)
+                        with torch.autocast(
+                            device_type="cuda", dtype=torch.bfloat16,
+                            enabled=(not args.no_amp and device.type == "cuda"),
+                        ):
+                            outputs = system(signals, emg, mask=padding_mask)
+
+                        if stage_valid.any():
+                            stage_loss = staging_loss_fn(
+                                outputs["staging_logits"], stage_targets, stage_valid
+                            )
+                            stage_loss_sum += float(stage_loss.detach().cpu())
+                            stage_batches += 1
+                            tr_stage_targets.append(stage_targets[stage_valid].detach().cpu())
+                            tr_stage_preds.append(
+                                outputs["staging_logits"].detach().argmax(dim=-1)[stage_valid].cpu()
+                            )
+                        else:
+                            stage_loss = None
+
+                        if rswa_valid.any():
+                            rswa_loss, per_head = rswa_loss_fn(
+                                outputs, tonic_targets, phasic_targets, any_targets, rswa_valid
+                            )
+                            rswa_loss_sum += float(rswa_loss.detach().cpu())
+                            for head in ("tonic", "phasic", "any"):
+                                rswa_head_loss_sums[head] += float(
+                                    per_head[f"{head}_loss"].detach().cpu()
+                                )
+                            rswa_batches += 1
+                            move_targets = (
+                                (tonic_labels > 0.5) | (phasic_labels > 0.5) | (any_labels > 0.5)
+                            ).float()
+                            move_preds = (
+                                (torch.sigmoid(outputs["tonic_logits"].detach()) >= thresholds["tonic"])
+                                | (torch.sigmoid(outputs["phasic_logits"].detach()) >= thresholds["phasic"])
+                                | (torch.sigmoid(outputs["any_logits"].detach()) >= thresholds["any"])
+                            ).long()
+                            tr_move_targets.append(move_targets[rswa_valid].long().detach().cpu())
+                            tr_move_preds.append(move_preds[rswa_valid].cpu())
+                            head_targets = {
+                                "tonic": tonic_labels,
+                                "phasic": phasic_labels,
+                                "any": any_labels,
+                            }
+                            for head in ("tonic", "phasic", "any"):
+                                head_preds = (
+                                    torch.sigmoid(outputs[f"{head}_logits"].detach())
+                                    >= thresholds[head]
+                                ).long()
+                                tr_head_targets[head].append(
+                                    head_targets[head][rswa_valid].long().detach().cpu()
+                                )
+                                tr_head_preds[head].append(head_preds[rswa_valid].cpu())
+                        else:
+                            rswa_loss = None
+
+                        total_loss = None
+                        if stage_loss is not None:
+                            total_loss = stage_loss
+                        if rswa_loss is not None:
+                            total_loss = rswa_loss if total_loss is None else (total_loss + rswa_loss)
+                        if total_loss is None:
+                            continue
+                        total_loss.backward()
+                        if joint_optimizer is not None:
+                            clip_grad_norm_(system.parameters(), args.grad_clip)
+                            joint_optimizer.step()
+                        else:
+                            clip_grad_norm_(staging_model.parameters(), args.grad_clip)
+                            clip_grad_norm_(rswa_model.parameters(), args.grad_clip)
+                            staging_optimizer.step()
+                            rswa_optimizer.step()
+
+                    train_time = perf_counter() - train_start
+
+                    train_dist: dict[str, Any] = {}
+                    if tr_stage_targets:
+                        st_t = StageDistribution(); st_p = StageDistribution()
+                        st_t.update(torch.cat(tr_stage_targets)); st_p.update(torch.cat(tr_stage_preds))
+                        train_dist["staging_target_distribution"] = st_t.as_dict()
+                        train_dist["staging_prediction_distribution"] = st_p.as_dict()
+                    if tr_move_targets:
+                        train_dist["movement_target_distribution"] = _binary_distribution(
+                            torch.cat(tr_move_targets).numpy())
+                        train_dist["movement_prediction_distribution"] = _binary_distribution(
+                            torch.cat(tr_move_preds).numpy())
+                    for head in ("tonic", "phasic", "any"):
+                        if tr_head_targets[head]:
+                            train_dist[f"{head}_target_distribution"] = _binary_distribution(
+                                torch.cat(tr_head_targets[head]).numpy()
+                            )
+                            train_dist[f"{head}_prediction_distribution"] = _binary_distribution(
+                                torch.cat(tr_head_preds[head]).numpy()
+                            )
+
+                    val_start = perf_counter()
+                    val_metrics = evaluate_joint(
+                        system, val_loader, staging_loss_fn, rswa_loss_fn, device,
+                        amp=not args.no_amp, threshold=thresholds,
+                        postprocess_mode=(
+                            None if args.rswa_postprocess_mode == "none"
+                            else args.rswa_postprocess_mode
+                        ),
+                    )
+                    val_time = perf_counter() - val_start
+
+                    row = {
+                        "fold": fold,
+                        "epoch": epoch,
+                        "train_time_sec": train_time,
+                        "val_time_sec": val_time,
+                        "epoch_time_sec": perf_counter() - epoch_start,
+                        "staging_learning_rate": (
+                            joint_optimizer.param_groups[0]["lr"]
+                            if joint_optimizer is not None
+                            else staging_optimizer.param_groups[0]["lr"]
+                        ),
+                        "rswa_learning_rate": (
+                            joint_optimizer.param_groups[1]["lr"]
+                            if joint_optimizer is not None
+                            else rswa_optimizer.param_groups[0]["lr"]
+                        ),
+                        "train_staging_loss": stage_loss_sum / max(stage_batches, 1),
+                        "train_rswa_loss": rswa_loss_sum / max(rswa_batches, 1),
+                        "train_rswa_tonic_loss": rswa_head_loss_sums["tonic"] / max(rswa_batches, 1),
+                        "train_rswa_phasic_loss": rswa_head_loss_sums["phasic"] / max(rswa_batches, 1),
+                        "train_rswa_any_loss": rswa_head_loss_sums["any"] / max(rswa_batches, 1),
+                        **{f"val_{key}": value for key, value in val_metrics.items()
+                           if isinstance(value, (int, float))},
+                    }
+                    history.append(row)
+                    logger.log_epoch(row)
+                    logger.info(
+                        f"fold={fold} ep={epoch:03d} train={train_time:.1f}s val={val_time:.1f}s "
+                        f"{GREEN}"
+                        f"train_stg_loss={row['train_staging_loss']:.4f} "
+                        f"train_rswa_loss={row['train_rswa_loss']:.4f} "
+                        f"train_rswa_head_loss(t/p/a)="
+                        f"{row['train_rswa_tonic_loss']:.4f}/"
+                        f"{row['train_rswa_phasic_loss']:.4f}/"
+                        f"{row['train_rswa_any_loss']:.4f}"
+                        f"{RESET} | "
+                        f"{YELLOW}"
+                        f"val_stg_f1={val_metrics.get('staging_f1_macro', float('nan')):.4f} "
+                        f"val_stg_kappa={val_metrics.get('staging_kappa', float('nan')):.4f} "
+                        f"val_rswa_head_loss(t/p/a)="
+                        f"{val_metrics.get('rswa_tonic_loss', float('nan')):.4f}/"
+                        f"{val_metrics.get('rswa_phasic_loss', float('nan')):.4f}/"
+                        f"{val_metrics.get('rswa_any_loss', float('nan')):.4f} "
+                        f"val_f1(t/p/a)={val_metrics.get('rswa_tonic_f1', float('nan')):.3f}/"
+                        f"{val_metrics.get('rswa_phasic_f1', float('nan')):.3f}/"
+                        f"{val_metrics.get('rswa_any_f1', float('nan')):.3f} "
+                        f"val_f1_macro={val_metrics.get('rswa_rswa_f1_macro', float('nan')):.4f}"
+                        f"{RESET}"
                     )
 
-                current_metric = joint_monitor_value(args.monitor, val_metrics)
-                if current_metric > best_metric:
-                    best_metric = current_metric
-                    best_epoch = epoch
-                    stale = 0
-                    best_metrics = dict(val_metrics)
+                    if args.log_movement_distribution:
+                        def _emit(tag, dist, color, key):
+                            if key in dist:
+                                logger.info(f"{color}{tag}[{format_stage_distribution(dist[key])}]{RESET}")
+                        _emit("train_stage_targets", train_dist, GREEN, "staging_target_distribution")
+                        _emit("train_stage_predictions", train_dist, GREEN, "staging_prediction_distribution")
+                        _emit("train_move_targets", train_dist, GREEN, "movement_target_distribution")
+                        _emit("train_move_predictions", train_dist, GREEN, "movement_prediction_distribution")
+                        _emit("val_stage_targets", val_metrics, YELLOW, "staging_target_distribution")
+                        _emit("val_stage_predictions", val_metrics, YELLOW, "staging_prediction_distribution")
+                        _emit("val_move_targets", val_metrics, YELLOW, "movement_target_distribution")
+                        _emit("val_move_predictions", val_metrics, YELLOW, "movement_prediction_distribution")
+                        _emit("train_tonic_targets", train_dist, BLUE, "tonic_target_distribution")
+                        _emit("train_tonic_predictions", train_dist, BLUE, "tonic_prediction_distribution")
+                        _emit("val_tonic_targets", val_metrics, BLUE, "tonic_target_distribution")
+                        _emit("val_tonic_predictions", val_metrics, BLUE, "tonic_prediction_distribution")
+                        _emit("train_phasic_targets", train_dist, PURPLE, "phasic_target_distribution")
+                        _emit("train_phasic_predictions", train_dist, PURPLE, "phasic_prediction_distribution")
+                        _emit("val_phasic_targets", val_metrics, PURPLE, "phasic_target_distribution")
+                        _emit("val_phasic_predictions", val_metrics, PURPLE, "phasic_prediction_distribution")
+                        _emit("train_any_targets", train_dist, ORANGE, "any_target_distribution")
+                        _emit("train_any_predictions", train_dist, ORANGE, "any_prediction_distribution")
+                        _emit("val_any_targets", val_metrics, ORANGE, "any_target_distribution")
+                        _emit("val_any_predictions", val_metrics, ORANGE, "any_prediction_distribution")
+
                     if joint_optimizer is not None:
                         save_checkpoint(
-                            checkpoint_dir / "joint_best.pt",
+                            checkpoint_dir / "joint_last.pt",
                             model=system,
                             optimizer=joint_optimizer,
                             epoch=epoch,
@@ -766,181 +748,231 @@ def main() -> None:
                                 "task": "joint",
                                 "trained_with": "shared_bimamba",
                                 "fold": fold,
-                                "monitor": args.monitor,
-                                "monitor_value": current_metric,
                                 "run_id": logger.run_id,
                             },
                         )
                     else:
                         save_checkpoint(
-                            checkpoint_dir / "staging_best.pt", model=staging_model,
+                            checkpoint_dir / "staging_last.pt", model=staging_model,
                             optimizer=staging_optimizer, epoch=epoch, metrics=val_metrics,
-                            extra={"task": "staging", "trained_with": "joint", "fold": fold,
-                                   "monitor": args.monitor, "monitor_value": current_metric, "run_id": logger.run_id},
+                            extra={"task": "staging", "trained_with": "joint", "fold": fold, "run_id": logger.run_id},
                         )
                         save_checkpoint(
-                            checkpoint_dir / "rswa_best.pt", model=rswa_model,
+                            checkpoint_dir / "rswa_last.pt", model=rswa_model,
                             optimizer=rswa_optimizer, epoch=epoch, metrics=val_metrics,
-                            extra={"task": "rswa", "trained_with": "joint", "fold": fold,
-                                   "monitor": args.monitor, "monitor_value": current_metric, "run_id": logger.run_id},
+                            extra={"task": "rswa", "trained_with": "joint", "fold": fold, "run_id": logger.run_id},
                         )
-                    logger.info(
-                        f"Fold {fold}: novo melhor checkpoint na época {epoch}, "
-                        f"{args.monitor}={current_metric:.4f}"
-                    )
+
+                    current_metric = joint_monitor_value(args.monitor, val_metrics)
+                    if current_metric > best_metric:
+                        best_metric = current_metric
+                        best_epoch = epoch
+                        stale = 0
+                        best_metrics = dict(val_metrics)
+                        if joint_optimizer is not None:
+                            save_checkpoint(
+                                checkpoint_dir / "joint_best.pt",
+                                model=system,
+                                optimizer=joint_optimizer,
+                                epoch=epoch,
+                                metrics=val_metrics,
+                                extra={
+                                    "task": "joint",
+                                    "trained_with": "shared_bimamba",
+                                    "fold": fold,
+                                    "monitor": args.monitor,
+                                    "monitor_value": current_metric,
+                                    "run_id": logger.run_id,
+                                },
+                            )
+                        else:
+                            save_checkpoint(
+                                checkpoint_dir / "staging_best.pt", model=staging_model,
+                                optimizer=staging_optimizer, epoch=epoch, metrics=val_metrics,
+                                extra={"task": "staging", "trained_with": "joint", "fold": fold,
+                                       "monitor": args.monitor, "monitor_value": current_metric, "run_id": logger.run_id},
+                            )
+                            save_checkpoint(
+                                checkpoint_dir / "rswa_best.pt", model=rswa_model,
+                                optimizer=rswa_optimizer, epoch=epoch, metrics=val_metrics,
+                                extra={"task": "rswa", "trained_with": "joint", "fold": fold,
+                                       "monitor": args.monitor, "monitor_value": current_metric, "run_id": logger.run_id},
+                            )
+                        logger.info(
+                            f"Fold {fold}: novo melhor checkpoint na época {epoch}, "
+                            f"{args.monitor}={current_metric:.4f}"
+                        )
+                    else:
+                        stale += 1
+
+                    if stale >= args.patience:
+                        logger.info(f"Fold {fold}: early stopping na época {epoch}.")
+                        break
+
+                plot_joint_curves(history, figures_dir / "training_curves.png", title=f"Joint - Fold {fold}")
+
+                if joint_optimizer is not None:
+                    load_checkpoint(checkpoint_dir / "joint_best.pt", system, device)
+                    stage_pred = collect_staging_predictions(system, val_loader, device, amp=not args.no_amp)
                 else:
-                    stale += 1
-
-                if stale >= args.patience:
-                    logger.info(f"Fold {fold}: early stopping na época {epoch}.")
-                    break
-
-            plot_joint_curves(history, figures_dir / "training_curves.png", title=f"Joint - Fold {fold}")
-
-            # Matrizes de confusão no melhor checkpoint (staging 5 classes + movement binário).
-            if joint_optimizer is not None:
-                load_checkpoint(checkpoint_dir / "joint_best.pt", system, device)
-                stage_pred = collect_staging_predictions(system, val_loader, device, amp=not args.no_amp)
-            else:
-                load_checkpoint(checkpoint_dir / "staging_best.pt", staging_model, device)
-                load_checkpoint(checkpoint_dir / "rswa_best.pt", rswa_model, device)
-                stage_pred = collect_staging_predictions(staging_model, val_loader, device, amp=not args.no_amp)
-            move_pred = collect_rswa_predictions(
-                system, val_loader, device, amp=not args.no_amp, threshold=thresholds,
-                postprocess_mode=(
-                    None if args.rswa_postprocess_mode == "none"
-                    else args.rswa_postprocess_mode
-                ),
-            )
-            plot_confusion_matrix(
-                stage_pred["expected"], stage_pred["prediction"],
-                figures_dir / "confusion_matrix_staging.png",
-                labels=[0, 1, 2, 3, 4], display_labels=["W", "N1", "N2", "N3", "REM"],
-                title=f"Staging confusion matrix - Fold {fold}",
-            )
-            plot_confusion_matrix(
-                stage_pred["expected"], stage_pred["prediction"],
-                figures_dir / "confusion_matrix_staging_normalized.png",
-                labels=[0, 1, 2, 3, 4], display_labels=["W", "N1", "N2", "N3", "REM"],
-                title=f"Staging normalized confusion matrix - Fold {fold}", normalize="true",
-            )
-            for head in ("tonic", "phasic", "any", "movement"):
-                plot_confusion_matrix(
-                    move_pred[f"{head}_expected"], move_pred[f"{head}_prediction"],
-                    figures_dir / f"confusion_matrix_{head}.png", labels=[0, 1],
-                    display_labels=["Negative", "Positive"], title=f"{head.capitalize()} confusion matrix - Fold {fold}",
+                    load_checkpoint(checkpoint_dir / "staging_best.pt", staging_model, device)
+                    load_checkpoint(checkpoint_dir / "rswa_best.pt", rswa_model, device)
+                    stage_pred = collect_staging_predictions(staging_model, val_loader, device, amp=not args.no_amp)
+                move_pred = collect_rswa_predictions(
+                    system, val_loader, device, amp=not args.no_amp, threshold=thresholds,
+                    postprocess_mode=(
+                        None if args.rswa_postprocess_mode == "none"
+                        else args.rswa_postprocess_mode
+                    ),
+                )
+                save_staging_predictions_csv(
+                    predictions_dir / "validation_staging_best.csv",
+                    stage_pred,
+                    split="validation",
+                    fold=int(fold),
+                    source="best_checkpoint",
+                )
+                save_rswa_predictions_csv(
+                    predictions_dir / "validation_rswa_best.csv",
+                    move_pred,
+                    split="validation",
+                    fold=int(fold),
+                    source="best_checkpoint",
                 )
                 plot_confusion_matrix(
-                    move_pred[f"{head}_expected"], move_pred[f"{head}_prediction"],
-                    figures_dir / f"confusion_matrix_{head}_normalized.png", labels=[0, 1],
-                    display_labels=["Negative", "Positive"], title=f"{head.capitalize()} normalized confusion matrix - Fold {fold}", normalize="true",
+                    stage_pred["expected"], stage_pred["prediction"],
+                    figures_dir / "confusion_matrix_staging.png",
+                    labels=[0, 1, 2, 3, 4], display_labels=["W", "N1", "N2", "N3", "REM"],
+                    title=f"Staging confusion matrix - Fold {fold}",
                 )
+                plot_confusion_matrix(
+                    stage_pred["expected"], stage_pred["prediction"],
+                    figures_dir / "confusion_matrix_staging_normalized.png",
+                    labels=[0, 1, 2, 3, 4], display_labels=["W", "N1", "N2", "N3", "REM"],
+                    title=f"Staging normalized confusion matrix - Fold {fold}", normalize="true",
+                )
+                for head in ("tonic", "phasic", "any", "movement"):
+                    plot_confusion_matrix(
+                        move_pred[f"{head}_expected"], move_pred[f"{head}_prediction"],
+                        figures_dir / f"confusion_matrix_{head}.png", labels=[0, 1],
+                        display_labels=["Negative", "Positive"], title=f"{head.capitalize()} confusion matrix - Fold {fold}",
+                    )
+                    plot_confusion_matrix(
+                        move_pred[f"{head}_expected"], move_pred[f"{head}_prediction"],
+                        figures_dir / f"confusion_matrix_{head}_normalized.png", labels=[0, 1],
+                        display_labels=["Negative", "Positive"], title=f"{head.capitalize()} normalized confusion matrix - Fold {fold}", normalize="true",
+                    )
 
-            if joint_optimizer is not None:
-                staging_checkpoints.append({"fold": fold, "best_checkpoint": checkpoint_dir / "joint_best.pt"})
-                rswa_checkpoints.append({"fold": fold, "best_checkpoint": checkpoint_dir / "joint_best.pt"})
-            else:
-                staging_checkpoints.append({"fold": fold, "best_checkpoint": checkpoint_dir / "staging_best.pt"})
-                rswa_checkpoints.append(
+                if joint_optimizer is not None:
+                    staging_checkpoints.append({"fold": fold, "best_checkpoint": checkpoint_dir / "joint_best.pt"})
+                    rswa_checkpoints.append({"fold": fold, "best_checkpoint": checkpoint_dir / "joint_best.pt"})
+                else:
+                    staging_checkpoints.append({"fold": fold, "best_checkpoint": checkpoint_dir / "staging_best.pt"})
+                    rswa_checkpoints.append(
+                        {
+                            "fold": fold,
+                            "staging_checkpoint": checkpoint_dir / "staging_best.pt",
+                            "rswa_checkpoint": checkpoint_dir / "rswa_best.pt",
+                        }
+                    )
+                fold_summaries.append(
                     {
                         "fold": fold,
-                        "staging_checkpoint": checkpoint_dir / "staging_best.pt",
-                        "rswa_checkpoint": checkpoint_dir / "rswa_best.pt",
+                        "best_epoch": best_epoch,
+                        "monitor": args.monitor,
+                        "best_monitor_value": best_metric,
+                        "best_val_staging_f1_macro": best_metrics.get("staging_f1_macro"),
+                        "best_val_staging_kappa": best_metrics.get("staging_kappa"),
+                        "best_val_tonic_f1": best_metrics.get("rswa_tonic_f1"),
+                        "best_val_phasic_f1": best_metrics.get("rswa_phasic_f1"),
+                        "best_val_any_f1": best_metrics.get("rswa_any_f1"),
+                        "best_val_rswa_f1_macro": best_metrics.get("rswa_rswa_f1_macro"),
+                        "best_val_rswa_kappa_macro": best_metrics.get("rswa_rswa_kappa_macro"),
                     }
                 )
-            fold_summaries.append(
-                {
-                    "fold": fold,
-                    "best_epoch": best_epoch,
-                    "monitor": args.monitor,
-                    "best_monitor_value": best_metric,
-                    "best_val_staging_f1_macro": best_metrics.get("staging_f1_macro"),
-                    "best_val_staging_kappa": best_metrics.get("staging_kappa"),
-                    "best_val_tonic_f1": best_metrics.get("rswa_tonic_f1"),
-                    "best_val_phasic_f1": best_metrics.get("rswa_phasic_f1"),
-                    "best_val_any_f1": best_metrics.get("rswa_any_f1"),
-                    "best_val_rswa_f1_macro": best_metrics.get("rswa_rswa_f1_macro"),
-                    "best_val_rswa_kappa_macro": best_metrics.get("rswa_rswa_kappa_macro"),
-                }
-            )
 
-        # ── Fase de TESTE (held-out): ensemble dos folds, staging e movimento ─
-        staging_test_summary: dict[str, Any] | None = None
-        movement_test_summary: dict[str, Any] | None = None
-        if test_subjects and staging_checkpoints:
-            test_loader = make_loader(test_subjects, args, False, device)
-            staging_test_summary = evaluate_staging_test_set(
-                test_loader=test_loader, fold_checkpoints=staging_checkpoints,
-                build_model=(
-                    (lambda: SharedBiMambaJointSystem(config=rswa_model_cfg))
-                    if _use_shared_joint_system(args.model)
-                    else (lambda: build_staging_model(args.model, config=rswa_model_cfg))
-                ),
-                device=device, logger=logger,
-                figures_dir=logger.run_dir / "test", amp=not args.no_amp,
-            )
-            movement_test_summary = evaluate_movement_test_set(
-                test_loader=test_loader, fold_checkpoints=rswa_checkpoints,
-                build_model=(
-                    (lambda: SharedBiMambaJointSystem(config=rswa_model_cfg))
-                    if _use_shared_joint_system(args.model)
-                    else (
-                        lambda: SleepStagingRSWASystem(
-                            build_staging_model(args.model, config=rswa_model_cfg),
-                            build_movement_model(args.model, config=rswa_model_cfg, stage_conditioning=True),
+            # ── Fase de TESTE (held-out): ensemble dos folds, staging e movimento ─
+            staging_test_summary: dict[str, Any] | None = None
+            movement_test_summary: dict[str, Any] | None = None
+            if test_subjects and staging_checkpoints:
+                test_loader = make_loader(test_subjects, args, False, device)
+                test_predictions_dir = logger.run_dir / "test" / "predictions"
+                staging_test_summary = evaluate_staging_test_set(
+                    test_loader=test_loader, fold_checkpoints=staging_checkpoints,
+                    build_model=(
+                        (lambda: SharedBiMambaJointSystem(config=rswa_model_cfg))
+                        if _use_shared_joint_system(args.model)
+                        else (lambda: build_staging_model(args.model, config=rswa_model_cfg))
+                    ),
+                    device=device, logger=logger,
+                    figures_dir=logger.run_dir / "test",
+                    predictions_dir=test_predictions_dir,
+                    amp=not args.no_amp,
+                )
+                movement_test_summary = evaluate_movement_test_set(
+                    test_loader=test_loader, fold_checkpoints=rswa_checkpoints,
+                    build_model=(
+                        (lambda: SharedBiMambaJointSystem(config=rswa_model_cfg))
+                        if _use_shared_joint_system(args.model)
+                        else (
+                            lambda: SleepStagingRSWASystem(
+                                build_staging_model(args.model, config=rswa_model_cfg),
+                                build_movement_model(args.model, config=rswa_model_cfg, stage_conditioning=True),
+                            )
                         )
-                    )
-                ),
-                device=device, logger=logger,
-                figures_dir=logger.run_dir / "test", amp=not args.no_amp, threshold=thresholds,
-                postprocess_mode=(
-                    None if args.rswa_postprocess_mode == "none"
-                    else args.rswa_postprocess_mode
-                ),
-            )
+                    ),
+                    device=device, logger=logger,
+                    figures_dir=logger.run_dir / "test",
+                    predictions_dir=test_predictions_dir,
+                    amp=not args.no_amp, threshold=thresholds,
+                    postprocess_mode=(
+                        None if args.rswa_postprocess_mode == "none"
+                        else args.rswa_postprocess_mode
+                    ),
+                )
 
-        logger.write_json("data_description.json", data_report)
+            logger.write_json("data_description.json", data_report)
 
-        staging_f1_values = np.asarray(
-            [f["best_val_staging_f1_macro"] for f in fold_summaries if f["best_val_staging_f1_macro"] is not None],
-            dtype=np.float64,
-        )
-        head_f1_values = {
-            head: np.asarray(
-                [f[f"best_val_{head}_f1"] for f in fold_summaries if f.get(f"best_val_{head}_f1") is not None],
+            staging_f1_values = np.asarray(
+                [f["best_val_staging_f1_macro"] for f in fold_summaries if f["best_val_staging_f1_macro"] is not None],
                 dtype=np.float64,
             )
-            for head in ("tonic", "phasic", "any")
-        }
-
-        def _mean_std(values: np.ndarray) -> dict[str, float | None]:
-            if values.size == 0:
-                return {"mean": None, "std": None}
-            return {
-                "mean": float(values.mean()),
-                "std": float(values.std(ddof=1)) if values.size > 1 else 0.0,
+            head_f1_values = {
+                head: np.asarray(
+                    [f[f"best_val_{head}_f1"] for f in fold_summaries if f.get(f"best_val_{head}_f1") is not None],
+                    dtype=np.float64,
+                )
+                for head in ("tonic", "phasic", "any")
             }
 
-        logger.finalize(
-            status="completed",
-            summary={
-                "folds": fold_summaries,
-                "cross_validation": {
-                    "n_folds": len(fold_summaries),
-                    "stratify_by": args.stratify_by,
-                    "staging_f1_macro": _mean_std(staging_f1_values),
-                    "tonic_f1": _mean_std(head_f1_values["tonic"]),
-                    "phasic_f1": _mean_std(head_f1_values["phasic"]),
-                    "any_f1": _mean_std(head_f1_values["any"]),
+            def _mean_std(values: np.ndarray) -> dict[str, float | None]:
+                if values.size == 0:
+                    return {"mean": None, "std": None}
+                return {
+                    "mean": float(values.mean()),
+                    "std": float(values.std(ddof=1)) if values.size > 1 else 0.0,
+                }
+
+            logger.finalize(
+                status="completed",
+                summary={
+                    "folds": fold_summaries,
+                    "cross_validation": {
+                        "n_folds": len(fold_summaries),
+                        "stratify_by": args.stratify_by,
+                        "staging_f1_macro": _mean_std(staging_f1_values),
+                        "tonic_f1": _mean_std(head_f1_values["tonic"]),
+                        "phasic_f1": _mean_std(head_f1_values["phasic"]),
+                        "any_f1": _mean_std(head_f1_values["any"]),
+                    },
+                    "test": {
+                        "stratify_by": args.test_stratify_by,
+                        "staging": staging_test_summary,
+                        "movement": movement_test_summary,
+                    },
+                    "data_description": data_report,
                 },
-                "test": {
-                    "stratify_by": args.test_stratify_by,
-                    "staging": staging_test_summary,
-                    "movement": movement_test_summary,
-                },
-                "data_description": data_report,
-            },
-        )
+            )
 
 
 if __name__ == "__main__":

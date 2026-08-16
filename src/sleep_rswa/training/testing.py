@@ -22,6 +22,7 @@ from sklearn.metrics import balanced_accuracy_score, cohen_kappa_score, f1_score
 
 from .engine import collect_rswa_predictions, collect_staging_predictions
 from .plots import plot_confusion_matrix
+from .prediction_export import save_rswa_predictions_csv, save_staging_predictions_csv
 from .utils import load_checkpoint
 
 
@@ -76,6 +77,7 @@ def evaluate_movement_test_set(
     device: torch.device,
     logger: Any,
     figures_dir: Path,
+    predictions_dir: Path | None = None,
     amp: bool = True,
     threshold: float | dict[str, float] = 0.5,
     postprocess_mode: str | None = None,
@@ -108,6 +110,8 @@ def evaluate_movement_test_set(
     prob_sum: dict[str, np.ndarray | None] = {h: None for h in (*_HEADS, "movement")}
     ref_expected: dict[str, np.ndarray | None] = {h: None for h in (*_HEADS, "movement")}
     ref_keys: np.ndarray | None = None
+    ref_subject_id: np.ndarray | None = None
+    ref_mini_epoch_index: np.ndarray | None = None
 
     for entry in fold_checkpoints:
         fold = entry["fold"]
@@ -141,6 +145,14 @@ def evaluate_movement_test_set(
             model, test_loader, device, amp=amp, threshold=thr,
             postprocess_mode=postprocess_mode,
         )
+        if predictions_dir is not None:
+            save_rswa_predictions_csv(
+                predictions_dir / f"rswa_test_fold_{fold}.csv",
+                result,
+                split="test",
+                fold=int(fold),
+                source="fold",
+            )
 
         keys = np.array(
             [f"{s}#{i}" for s, i in zip(result["subject_id"], result["mini_epoch_index"])],
@@ -173,6 +185,8 @@ def evaluate_movement_test_set(
                 prob_sum[h] = prob_sum[h] + probs
 
         ref_keys = keys
+        ref_subject_id = np.asarray(result["subject_id"], dtype=object)
+        ref_mini_epoch_index = np.asarray(result["mini_epoch_index"], dtype=np.int64)
 
     test_summary: dict[str, Any] = {"n_subjects": len(test_loader.dataset)}
 
@@ -199,6 +213,26 @@ def evaluate_movement_test_set(
             head_summary["ensemble"] = {"n_folds": n_folds, **m}
         test_summary[h] = head_summary
 
+    if predictions_dir is not None and ref_subject_id is not None and ref_mini_epoch_index is not None:
+        ensemble_result: dict[str, Any] = {
+            "subject_id": ref_subject_id,
+            "mini_epoch_index": ref_mini_epoch_index,
+        }
+        for h in (*_HEADS, "movement"):
+            if prob_sum[h] is None or ref_expected[h] is None:
+                continue
+            avg_prob = (prob_sum[h] / len(per_fold[h])).astype(np.float32, copy=False)
+            ensemble_result[f"{h}_expected"] = ref_expected[h]
+            ensemble_result[f"{h}_probability"] = avg_prob
+            ensemble_result[f"{h}_prediction"] = (avg_prob >= thr.get(h, 0.5)).astype(np.int64, copy=False)
+        save_rswa_predictions_csv(
+            predictions_dir / "rswa_test_ensemble.csv",
+            ensemble_result,
+            split="test",
+            fold=None,
+            source="ensemble",
+        )
+
     return test_summary
 
 
@@ -210,6 +244,7 @@ def evaluate_staging_test_set(
     device: torch.device,
     logger: Any,
     figures_dir: Path,
+    predictions_dir: Path | None = None,
     amp: bool = True,
 ) -> dict[str, Any]:
     """Avalia o staging no teste held-out com o best.pt de cada fold + ensemble
@@ -226,6 +261,8 @@ def evaluate_staging_test_set(
     prob_sum: np.ndarray | None = None
     ref_expected: np.ndarray | None = None
     ref_keys: np.ndarray | None = None
+    ref_subject_id: np.ndarray | None = None
+    ref_mini_epoch_index: np.ndarray | None = None
 
     for entry in fold_checkpoints:
         fold = entry["fold"]
@@ -237,6 +274,14 @@ def evaluate_staging_test_set(
         model = build_model().to(device)
         load_checkpoint(checkpoint_path, model, device)
         result = collect_staging_predictions(model, test_loader, device, amp=amp)
+        if predictions_dir is not None:
+            save_staging_predictions_csv(
+                predictions_dir / f"staging_test_fold_{fold}.csv",
+                result,
+                split="test",
+                fold=int(fold),
+                source="fold",
+            )
 
         expected = result["expected"]
         prediction = result["prediction"]
@@ -268,6 +313,8 @@ def evaluate_staging_test_set(
                 idx = np.array([order[k] for k in ref_keys], dtype=np.int64)
                 probs = probs[idx]
             prob_sum = prob_sum + probs
+        ref_subject_id = np.asarray(result["subject_id"], dtype=object)
+        ref_mini_epoch_index = np.asarray(result["mini_epoch_index"], dtype=np.int64)
 
     test_summary: dict[str, Any] = {"n_subjects": len(test_loader.dataset), "per_fold": per_fold}
 
@@ -293,5 +340,19 @@ def evaluate_staging_test_set(
         test_summary["per_fold_f1_macro_std"] = float(f1_vals.std(ddof=1)) if f1_vals.size > 1 else 0.0
         test_summary["ensemble"] = {"n_folds": n_folds, "n_samples": int(ref_expected.size),
                                     "f1_macro": ens_f1, "kappa": ens_kappa, "balanced_accuracy": ens_bacc}
+        if predictions_dir is not None and ref_subject_id is not None and ref_mini_epoch_index is not None:
+            save_staging_predictions_csv(
+                predictions_dir / "staging_test_ensemble.csv",
+                {
+                    "subject_id": ref_subject_id,
+                    "mini_epoch_index": ref_mini_epoch_index,
+                    "expected": ref_expected,
+                    "prediction": ensemble_pred,
+                    "probabilities": (prob_sum / n_folds).astype(np.float32, copy=False),
+                },
+                split="test",
+                fold=None,
+                source="ensemble",
+            )
 
     return test_summary

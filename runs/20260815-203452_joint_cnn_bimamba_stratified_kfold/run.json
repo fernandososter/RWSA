@@ -1,0 +1,73 @@
+{
+  "run_id": "20260815-203452_joint_cnn_bimamba_stratified_kfold",
+  "task": "joint",
+  "experiment_name": "joint_cnn_bimamba_stratified_kfold",
+  "notes": null,
+  "tags": [],
+  "arguments": {
+    "data_dir": "/content/drive/MyDrive/Cursos/RWSA/tensors_rswa_novo_3_70",
+    "n_splits": 5,
+    "fold": null,
+    "stratify_by": "staging",
+    "test_fraction": 0.2,
+    "test_dir": null,
+    "test_stratify_by": "rswa",
+    "model": "cnn_bimamba",
+    "epochs": 50,
+    "batch_size": 1,
+    "num_workers": 2,
+    "lr_staging": 0.0001,
+    "lr_rswa": 0.0001,
+    "weight_decay": 0.0001,
+    "grad_clip": 1.0,
+    "threshold": 0.5,
+    "tonic_threshold": null,
+    "phasic_threshold": null,
+    "any_threshold": null,
+    "min_confidence": 0.5,
+    "all_stages": false,
+    "tonic_pos_weight": 20.0,
+    "phasic_pos_weight": 1.0,
+    "any_pos_weight": 1.0,
+    "rswa_target_mode": "aasm_proto",
+    "rswa_postprocess_mode": "aasm_simple",
+    "rswa_use_baseline_relative_channel": true,
+    "oversample_tonic_subjects": true,
+    "tonic_subject_weight": 20.0,
+    "patience": 15,
+    "log_movement_distribution": true,
+    "monitor": "staging_f1_macro",
+    "seed": 42,
+    "device": "cuda",
+    "no_amp": false,
+    "run_dir": "/content/drive/MyDrive/Cursos/RWSA/src/RWSA/run",
+    "experiment_name": "joint_cnn_bimamba_stratified_kfold",
+    "notes": null,
+    "tags": []
+  },
+  "system": {
+    "created_at_utc": "2026-08-15T20:34:54+00:00",
+    "hostname": "a499a6b709d2",
+    "platform": "Linux-6.6.122+-x86_64-with-glibc2.35",
+    "python": "3.12.13 (main, Mar  4 2026, 09:23:07) [GCC 11.4.0]",
+    "python_executable": "/usr/bin/python3",
+    "torch": "2.9.1+cu128",
+    "numpy": "2.0.2",
+    "selected_device": "cuda",
+    "cuda": {
+      "available": true,
+      "torch_cuda_version": "12.8",
+      "cudnn_version": 91002,
+      "device_count": 1,
+      "devices": [
+        "NVIDIA A100-SXM4-80GB"
+      ]
+    },
+    "pid": 12013
+  },
+  "git": {
+    "commit": null,
+    "branch": null,
+    "dirty": null
+  }
+}
