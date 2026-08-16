@@ -20,6 +20,27 @@ from .recurrent import ExplicitBidirectionalRNN
 from .rswa import RSWADetectionNet, RSWAFeatureEncoder, _rswa_head
 
 
+def _stage_context_dim(cfg: ModelConfig) -> int:
+    return 1 if cfg.rswa_stage_conditioning_mode == "prem_only" else int(cfg.staging_num_classes)
+
+
+def _select_stage_context(
+    stage_probs: torch.Tensor | None,
+    cfg: ModelConfig,
+) -> torch.Tensor | None:
+    if stage_probs is None:
+        return None
+    if cfg.rswa_stage_conditioning_mode == "prem_only":
+        rem_index = int(cfg.rem_stage_index)
+        if stage_probs.shape[-1] <= rem_index:
+            raise ValueError(
+                "stage_probs não contém a classe REM esperada para rswa_stage_conditioning_mode='prem_only'. "
+                f"Recebido shape={tuple(stage_probs.shape)} com rem_stage_index={rem_index}."
+            )
+        return stage_probs[..., rem_index : rem_index + 1]
+    return stage_probs
+
+
 def _stage_fusion(
     cfg: ModelConfig,
     *,
@@ -27,9 +48,10 @@ def _stage_fusion(
 ) -> nn.Module | None:
     if not use_stage_conditioning:
         return None
+    stage_context_dim = _stage_context_dim(cfg)
     return nn.Sequential(
         nn.Linear(
-            cfg.d_model + int(cfg.staging_num_classes),
+            cfg.d_model + stage_context_dim,
             cfg.d_model,
             bias=False,
         ),
@@ -43,23 +65,25 @@ def _apply_stage_conditioning(
     z: torch.Tensor,
     stage_probs: torch.Tensor | None,
     *,
+    cfg: ModelConfig,
     stage_fusion: nn.Module | None,
     stage_context_dim: int,
 ) -> torch.Tensor:
-    if stage_fusion is None or stage_probs is None:
+    stage_context = _select_stage_context(stage_probs, cfg)
+    if stage_fusion is None or stage_context is None:
         return z
-    if stage_probs.shape[:2] != z.shape[:2]:
+    if stage_context.shape[:2] != z.shape[:2]:
         raise ValueError(
             "stage_probs deve alinhar com (B,T) das features RSWA; "
-            f"recebeu {tuple(stage_probs.shape)} para features {tuple(z.shape)}."
+            f"recebeu {tuple(stage_context.shape)} para features {tuple(z.shape)}."
         )
-    if stage_probs.shape[-1] != stage_context_dim:
+    if stage_context.shape[-1] != stage_context_dim:
         raise ValueError(
             "stage_probs deve ter "
             f"{stage_context_dim} classes de estagio; recebeu "
-            f"{stage_probs.shape[-1]}."
+            f"{stage_context.shape[-1]}."
         )
-    return stage_fusion(torch.cat([z, stage_probs.to(z.dtype)], dim=-1))
+    return stage_fusion(torch.cat([z, stage_context.to(z.dtype)], dim=-1))
 
 
 class _RSWAHeadMixin:
@@ -99,7 +123,7 @@ class MovementCNN(nn.Module, _RSWAHeadMixin):
             if stage_conditioning is None
             else stage_conditioning
         )
-        self.stage_context_dim = int(self.cfg.staging_num_classes)
+        self.stage_context_dim = _stage_context_dim(self.cfg)
         self.stage_fusion = _stage_fusion(
             self.cfg,
             use_stage_conditioning=self.use_stage_conditioning,
@@ -117,6 +141,7 @@ class MovementCNN(nn.Module, _RSWAHeadMixin):
         z = _apply_stage_conditioning(
             z,
             stage_probs,
+            cfg=self.cfg,
             stage_fusion=self.stage_fusion,
             stage_context_dim=self.stage_context_dim,
         )
@@ -147,7 +172,7 @@ class MovementLSTM(nn.Module, _RSWAHeadMixin):
             if stage_conditioning is None
             else stage_conditioning
         )
-        self.stage_context_dim = int(self.cfg.staging_num_classes)
+        self.stage_context_dim = _stage_context_dim(self.cfg)
         self.stage_fusion = _stage_fusion(
             self.cfg,
             use_stage_conditioning=self.use_stage_conditioning,
@@ -185,6 +210,7 @@ class MovementLSTM(nn.Module, _RSWAHeadMixin):
         z = _apply_stage_conditioning(
             z,
             stage_probs,
+            cfg=self.cfg,
             stage_fusion=self.stage_fusion,
             stage_context_dim=self.stage_context_dim,
         )
@@ -243,7 +269,7 @@ class MovementMamba(nn.Module, _RSWAHeadMixin):
             if stage_conditioning is None
             else stage_conditioning
         )
-        self.stage_context_dim = int(self.cfg.staging_num_classes)
+        self.stage_context_dim = _stage_context_dim(self.cfg)
         self.stage_fusion = _stage_fusion(
             self.cfg,
             use_stage_conditioning=self.use_stage_conditioning,
@@ -268,6 +294,7 @@ class MovementMamba(nn.Module, _RSWAHeadMixin):
         z = _apply_stage_conditioning(
             z,
             stage_probs,
+            cfg=self.cfg,
             stage_fusion=self.stage_fusion,
             stage_context_dim=self.stage_context_dim,
         )

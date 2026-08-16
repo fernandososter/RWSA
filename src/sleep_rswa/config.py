@@ -29,8 +29,14 @@ class ModelConfig:
     rswa_emg_filters: int = 64
     rswa_stage_conditioning: bool = False
     rswa_stage_conditioning_detach: bool = True
+    rswa_stage_conditioning_mode: str = "prem_only"
+    rem_stage_index: int = 4
     rswa_use_baseline_relative_channel: bool = False
     rswa_use_rms_relative_channel: bool = False
+    use_emg_subwindow_features: bool = False
+    emg_subwindow_ms: int = 250
+    emg_subwindow_hidden: int = 32
+    emg_local_embedding_dim: int = 64
 
 @dataclass(frozen=True)
 class RSWAConfig:

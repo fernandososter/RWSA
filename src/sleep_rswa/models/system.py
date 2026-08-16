@@ -38,18 +38,36 @@ class SleepStagingRSWASystem(nn.Module):
         self._rswa_accepts_stage_probs = (
             "stage_probs" in inspect.signature(self.rswa_model.forward).parameters
         )
+        self.last_shape_info: dict[str, tuple[int, ...]] = {}
 
     def forward(self, signals, emg_center, mask=None):
+        if signals.shape[:2] != emg_center.shape[:2]:
+            raise ValueError(
+                "signals e emg_center precisam alinhar em (B,T); "
+                f"recebido {tuple(signals.shape)} e {tuple(emg_center.shape)}."
+            )
         staging_logits = self.staging_model(signals, mask)
         stage_probs = torch.softmax(staging_logits, dim=-1)
         stage_context = stage_probs.detach() if self.detach_stage_probs else stage_probs
         rswa_kwargs = {"mask": mask}
         if self.use_stage_conditioning and self._rswa_accepts_stage_probs:
             rswa_kwargs["stage_probs"] = stage_context
+        rswa_out = self.rswa_model(emg_center, **rswa_kwargs)
+        context_dim = (
+            1
+            if getattr(self.cfg, "rswa_stage_conditioning_mode", "full_probs") == "prem_only"
+            else int(stage_probs.shape[-1])
+        )
+        rswa_shapes = getattr(getattr(self.rswa_model, "encoder", None), "last_shape_info", {})
+        self.last_shape_info = {
+            "staging_embedding": tuple(stage_probs.shape),
+            "stage_conditioning_context": (stage_probs.shape[0], stage_probs.shape[1], context_dim),
+            **rswa_shapes,
+        }
         return {
             "staging_logits": staging_logits,
             "stage_probs": stage_probs,
-            **self.rswa_model(emg_center, **rswa_kwargs),
+            **rswa_out,
         }
 
     def n_params(self):
@@ -132,6 +150,7 @@ class SharedBiMambaJointSystem(nn.Module):
 
         self.use_stage_conditioning = False
         self.detach_stage_probs = False
+        self.last_shape_info: dict[str, tuple[int, ...]] = {}
 
     def forward(
         self,
@@ -139,8 +158,18 @@ class SharedBiMambaJointSystem(nn.Module):
         emg_center: torch.Tensor,
         mask: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
+        if signals.shape[:2] != emg_center.shape[:2]:
+            raise ValueError(
+                "signals e emg_center precisam alinhar em (B,T); "
+                f"recebido {tuple(signals.shape)} e {tuple(emg_center.shape)}."
+            )
         staging_features = self.staging_encoder(signals)
         rswa_features = self.rswa_encoder(emg_center)
+        if staging_features.shape[:2] != rswa_features.shape[:2]:
+            raise ValueError(
+                "staging_features e rswa_features precisam alinhar em (B,T); "
+                f"recebido {tuple(staging_features.shape)} e {tuple(rswa_features.shape)}."
+            )
         fused_features = self.fusion(
             torch.cat(
                 [staging_features, rswa_features],
@@ -149,6 +178,12 @@ class SharedBiMambaJointSystem(nn.Module):
         )
         temporal_features = self.temporal(fused_features, mask)
         staging_logits = self.staging_classifier(temporal_features)
+        rswa_shapes = getattr(self.rswa_encoder, "last_shape_info", {})
+        self.last_shape_info = {
+            **rswa_shapes,
+            "staging_embedding": tuple(staging_features.shape),
+            "pre_mamba_embedding": tuple(fused_features.shape),
+        }
         return {
             "staging_logits": staging_logits,
             "stage_probs": torch.softmax(staging_logits, dim=-1),
