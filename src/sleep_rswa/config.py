@@ -30,6 +30,7 @@ class ModelConfig:
     rswa_stage_conditioning: bool = False
     rswa_stage_conditioning_detach: bool = True
     rswa_use_baseline_relative_channel: bool = False
+    rswa_use_rms_relative_channel: bool = False
 
 @dataclass(frozen=True)
 class RSWAConfig:
@@ -57,6 +58,7 @@ class RSWAConfig:
     baseline_relative_signed_clamp: float = 6.0
     baseline_relative_reference_ratio: float = 4.0
     baseline_relative_amplitude_clamp: float = 2.0
+    baseline_relative_rms_win_sec: float = 0.1
     # Fallback quando o .pt nao tem label_metadata.aasm_rule.atonia_baseline_uv
     # (exames legados/antigos): aproxima atonia_baseline_uv como
     # rem_baseline_uv * baseline_relative_fallback_ratio. Razao medida

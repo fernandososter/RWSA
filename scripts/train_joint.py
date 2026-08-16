@@ -150,6 +150,14 @@ def parse_args() -> argparse.Namespace:
         help="Adiciona ao ramo RSWA um segundo canal |EMG| / rem_baseline_uv.",
     )
     parser.add_argument(
+        "--rswa-use-rms-relative-channel",
+        action="store_true",
+        help=(
+            "Adiciona ao ramo RSWA um canal extra com envelope RMS de 100 ms "
+            "relativo ao basal de atonia. Exige --rswa-use-baseline-relative-channel."
+        ),
+    )
+    parser.add_argument(
         "--oversample-tonic-subjects",
         action="store_true",
         help="Aumenta a frequência de sujeitos que contêm ao menos um evento tônico no train_loader.",
@@ -217,6 +225,7 @@ def make_loader(subjects, args, shuffle, device):
         rem_mask_only=not args.all_stages,
         rswa_target_mode=args.rswa_target_mode,
         use_baseline_relative_channel=args.rswa_use_baseline_relative_channel,
+        use_rms_relative_channel=args.rswa_use_rms_relative_channel,
     )
     sampler = None
     if shuffle and args.oversample_tonic_subjects:
@@ -311,6 +320,10 @@ def _print_model_summary(name: str, model: torch.nn.Module, logger: Any) -> None
 
 def main() -> None:
     args = parse_args()
+    if args.rswa_use_rms_relative_channel and not args.rswa_use_baseline_relative_channel:
+        raise ValueError(
+            "--rswa-use-rms-relative-channel exige --rswa-use-baseline-relative-channel."
+        )
     if args.experiment_name is None:
         args.experiment_name = f"joint_{args.model}_stratified_kfold"
     seed_everything(args.seed)
@@ -318,8 +331,13 @@ def main() -> None:
     all_subjects = load_subject_directory(args.data_dir)
     rswa_model_cfg = ModelConfig(
         rswa_stage_conditioning=True,
-        rswa_emg_in_channels=(2 if args.rswa_use_baseline_relative_channel else 1),
+        rswa_emg_in_channels=(
+            3
+            if args.rswa_use_baseline_relative_channel and args.rswa_use_rms_relative_channel
+            else (2 if args.rswa_use_baseline_relative_channel else 1)
+        ),
         rswa_use_baseline_relative_channel=args.rswa_use_baseline_relative_channel,
+        rswa_use_rms_relative_channel=args.rswa_use_rms_relative_channel,
     )
 
     # ── Conjunto de TESTE fixo (held-out), separado ANTES da CV ────────────
@@ -367,7 +385,8 @@ def main() -> None:
             logger.info(
                 f"RSWA experimental: target_mode={args.rswa_target_mode} "
                 f"postprocess_mode={args.rswa_postprocess_mode} "
-                f"use_baseline_relative_channel={args.rswa_use_baseline_relative_channel}"
+                f"use_baseline_relative_channel={args.rswa_use_baseline_relative_channel} "
+                f"use_rms_relative_channel={args.rswa_use_rms_relative_channel}"
             )
             logger.info(
                 f"Sujeitos: total={len(all_subjects)} | CV={len(subjects)} | teste={len(test_subjects)} | "

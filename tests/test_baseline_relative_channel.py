@@ -3,7 +3,7 @@
 Desde 2026-08-14, quando use_baseline_relative_channel=True, o ramo EMG
 passa a usar DOIS canais relativos ao basal de atonia:
   1. EMG assinado / baseline (clipado)
-  2. log1p(|EMG| / baseline) / log(log_base)
+  2. log1p(|EMG| / baseline) / log1p(reference_ratio)
 
 Assim, ambos ficam na mesma familia fisiologica e o valor 1.0 do segundo
 canal corresponde exatamente a 4x o basal quando log_base=5.0.
@@ -57,7 +57,7 @@ def test_baseline_relative_channel_uses_atonia_baseline_when_available():
     )
     expected_amplitude = (
         torch.log1p(raw_emg.abs() / (atonia_baseline_uv / 1e6))
-        / math.log(ds.rswa_config.baseline_relative_log_base)
+        / math.log1p(ds.rswa_config.baseline_relative_reference_ratio)
     ).clamp(0.0, ds.rswa_config.baseline_relative_amplitude_clamp)
     torch.testing.assert_close(emg[:, 0, :], expected_signed)
     torch.testing.assert_close(emg[:, 1, :], expected_amplitude)
@@ -65,7 +65,7 @@ def test_baseline_relative_channel_uses_atonia_baseline_when_available():
     # Confirma que NAO e' igual ao calculo antigo (normalizando por rem_baseline_uv).
     wrong = (
         torch.log1p(raw_emg.abs() / (rem_baseline_uv / 1e6))
-        / math.log(ds.rswa_config.baseline_relative_log_base)
+        / math.log1p(ds.rswa_config.baseline_relative_reference_ratio)
     ).clamp(0.0, ds.rswa_config.baseline_relative_amplitude_clamp)
     assert not torch.allclose(emg[:, 1, :], wrong)
 
@@ -86,7 +86,7 @@ def test_baseline_relative_channel_legacy_fallback_uses_ratio():
     )
     expected_amplitude = (
         torch.log1p(raw_emg.abs() / (approx_baseline_uv / 1e6))
-        / math.log(ds.rswa_config.baseline_relative_log_base)
+        / math.log1p(ds.rswa_config.baseline_relative_reference_ratio)
     ).clamp(0.0, ds.rswa_config.baseline_relative_amplitude_clamp)
     torch.testing.assert_close(emg[:, 0, :], expected_signed)
     torch.testing.assert_close(emg[:, 1, :], expected_amplitude)
@@ -131,3 +131,40 @@ def test_baseline_relative_amplitude_channel_maps_4x_baseline_to_one():
     )
     emg = ds._extract_emg(subj)
     torch.testing.assert_close(emg[:, 1, :], torch.ones_like(emg[:, 1, :]))
+
+
+def test_baseline_relative_optional_rms_channel_adds_third_channel():
+    ds = SleepAnalysisDataset(
+        [_make_subject()],
+        use_baseline_relative_channel=True,
+        use_rms_relative_channel=True,
+    )
+    baseline_uv = 2.0
+    baseline_v = baseline_uv / 1e6
+    signals = torch.zeros(1, 5, 300)
+    signals[:, ds.rswa_config.emg_channel_index, 100:200] = 4.0 * baseline_v
+    subj = SubjectData(
+        subject_id="dummy_rms",
+        signals=signals,
+        sleep_stages=torch.zeros(1, dtype=torch.long),
+        rswa_labels=torch.zeros(1, dtype=torch.long),
+        rswa_conf=torch.ones(1),
+        rem_baseline_uv=baseline_uv / ds.rswa_config.baseline_relative_fallback_ratio,
+        atonia_baseline_uv=baseline_uv,
+    )
+    emg = ds._extract_emg(subj)
+    assert emg.shape[1] == 3
+    assert float(emg[:, 2, :].max()) > 0.0
+
+
+def test_rms_relative_channel_requires_baseline_relative_mode():
+    try:
+        SleepAnalysisDataset(
+            [_make_subject()],
+            use_baseline_relative_channel=False,
+            use_rms_relative_channel=True,
+        )
+    except ValueError as exc:
+        assert "use_rms_relative_channel" in str(exc)
+    else:
+        raise AssertionError("Era esperado ValueError quando RMS-relative é usado sem baseline-relative.")

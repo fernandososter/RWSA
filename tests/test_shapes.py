@@ -154,6 +154,22 @@ def test_rswa_model_accepts_baseline_relative_second_channel():
     assert out["tonic_logits"].shape==(1,2)
 
 
+def test_rswa_model_accepts_optional_rms_relative_third_channel():
+    cfg=ModelConfig(
+        rswa_stage_conditioning=True,
+        rswa_emg_in_channels=3,
+        rswa_use_baseline_relative_channel=True,
+        rswa_use_rms_relative_channel=True,
+    )
+    model=build_movement_model("cnn_bimamba",config=cfg,stage_conditioning=True).eval()
+    out=model(
+        torch.randn(1,2,3,300),
+        torch.ones(1,2,dtype=torch.bool),
+        stage_probs=torch.softmax(torch.randn(1,2,5),dim=-1),
+    )
+    assert out["tonic_logits"].shape==(1,2)
+
+
 def test_bidir_mamba_block_runs_explicit_forward_and_backward_passes(monkeypatch):
     calls=[]
 

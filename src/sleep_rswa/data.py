@@ -7,6 +7,7 @@ from tqdm import tqdm
 from typing import Sequence
 
 import torch
+import torch.nn.functional as F
 from torch.utils.data import Dataset
 from .distribution import StageDistribution
 
@@ -170,6 +171,22 @@ def _zscore_per_channel(signals: torch.Tensor) -> torch.Tensor:
     return (signals - mean[None, :, None]) / std[None, :, None]
 
 
+def _rms_envelope_same(x: torch.Tensor, *, win_sec: float, fs: int) -> torch.Tensor:
+    """Envelope RMS com janela deslizante e mesmo comprimento da entrada."""
+    if x.ndim != 3:
+        raise ValueError(f"x deve ter shape [T,C,N], recebeu {tuple(x.shape)}")
+    win = max(1, int(round(float(win_sec) * int(fs))))
+    if win <= 1:
+        return x.abs()
+    left = (win - 1) // 2
+    right = win - 1 - left
+    x2 = x.to(torch.float32).pow(2.0)
+    padded = F.pad(x2, (left, right))
+    kernel = torch.ones((x.shape[1], 1, win), dtype=x2.dtype, device=x2.device) / float(win)
+    ms = F.conv1d(padded, kernel, groups=x.shape[1])
+    return ms.clamp_min(0.0).sqrt()
+
+
 class SleepAnalysisDataset(Dataset):
     def __init__(
         self,
@@ -179,6 +196,7 @@ class SleepAnalysisDataset(Dataset):
         *,
         rswa_target_mode: str = "final",
         use_baseline_relative_channel: bool = False,
+        use_rms_relative_channel: bool = False,
     ):
         self.subjects = list(subjects)
         self.min_confidence = min_confidence
@@ -187,6 +205,11 @@ class SleepAnalysisDataset(Dataset):
         if self.rswa_target_mode not in {"final", "aasm_proto"}:
             raise ValueError(f"rswa_target_mode invalido: {rswa_target_mode!r}")
         self.use_baseline_relative_channel = bool(use_baseline_relative_channel)
+        self.use_rms_relative_channel = bool(use_rms_relative_channel)
+        if self.use_rms_relative_channel and not self.use_baseline_relative_channel:
+            raise ValueError(
+                "use_rms_relative_channel=True exige use_baseline_relative_channel=True."
+            )
         self.signal_config = SignalConfig()
         self.rswa_config = RSWAConfig()
 
@@ -235,6 +258,8 @@ class SleepAnalysisDataset(Dataset):
         # canais do ramo EMG passam a ser relativos ao basal:
         #   1. EMG assinado / baseline
         #   2. log1p(|EMG| / baseline) / log1p(reference_ratio)
+        # Opcionalmente, um terceiro canal carrega o envelope RMS de 100 ms
+        # relativo ao mesmo basal, alinhando a entrada ao dominio da regra AASM.
         # Assim, o mesmo limiar de amplitude usado no preprocessamento pode
         # ser representado explicitamente no segundo canal (valor 1.0).
         baseline_uv = subject.atonia_baseline_uv
@@ -251,6 +276,7 @@ class SleepAnalysisDataset(Dataset):
         if baseline_uv is None or baseline_uv <= 0:
             signed_relative = torch.zeros_like(primary)
             amplitude_relative = torch.zeros_like(primary)
+            rms_relative = torch.zeros_like(primary)
         else:
             baseline_v = float(baseline_uv) / 1e6
             window = emg[:, :, : self.signal_config.samples_per_epoch]
@@ -266,7 +292,24 @@ class SleepAnalysisDataset(Dataset):
                 0.0,
                 self.rswa_config.baseline_relative_amplitude_clamp,
             )
-        return torch.cat([signed_relative, amplitude_relative], dim=1)
+            rms_ratio = (
+                _rms_envelope_same(
+                    window,
+                    win_sec=self.rswa_config.baseline_relative_rms_win_sec,
+                    fs=self.signal_config.fs,
+                ) / baseline_v
+            )
+            rms_relative = (
+                torch.log1p(rms_ratio)
+                / math.log1p(float(reference_ratio))
+            ).clamp(
+                0.0,
+                self.rswa_config.baseline_relative_amplitude_clamp,
+            )
+        channels = [signed_relative, amplitude_relative]
+        if self.use_rms_relative_channel:
+            channels.append(rms_relative)
+        return torch.cat(channels, dim=1)
 
 
     def stage_distribution(self) -> StageDistribution:
