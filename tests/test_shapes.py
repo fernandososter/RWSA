@@ -30,6 +30,19 @@ def test_shared_bimamba_joint_system_output_shapes():
     assert out["any_logits"].shape==(b,t)
 
 
+def test_shared_bimamba_joint_system_with_emg_subwindow_features_output_shapes():
+    cfg=ModelConfig(use_emg_subwindow_features=True,emg_subwindow_ms=250)
+    model=SharedBiMambaJointSystem(config=cfg).eval(); b,t=1,4
+    with torch.no_grad():
+        out=model(torch.randn(b,t,4,900),torch.randn(b,t,1,300),torch.ones(b,t,dtype=torch.bool))
+    assert out["staging_logits"].shape==(b,t,5)
+    assert out["tonic_logits"].shape==(b,t)
+    assert out["phasic_logits"].shape==(b,t)
+    assert out["any_logits"].shape==(b,t)
+    assert model.last_shape_info["emg_subwindows"]==(b,t,12,25)
+    assert model.last_shape_info["emg_subwindow_features"]==(b,t,12,3)
+
+
 def test_rswa_head_accepts_optional_stage_probabilities():
     model=RSWADetectionNet().eval(); b,t=2,3; emg=torch.randn(b,t,1,300); stage_probs=torch.softmax(torch.randn(b,t,5),dim=-1)
     with torch.no_grad():
@@ -164,6 +177,22 @@ def test_rswa_model_accepts_optional_rms_relative_third_channel():
     model=build_movement_model("cnn_bimamba",config=cfg,stage_conditioning=True).eval()
     out=model(
         torch.randn(1,2,3,300),
+        torch.ones(1,2,dtype=torch.bool),
+        stage_probs=torch.softmax(torch.randn(1,2,5),dim=-1),
+    )
+    assert out["tonic_logits"].shape==(1,2)
+
+
+def test_rswa_model_accepts_subwindow_feature_encoder():
+    cfg=ModelConfig(
+        rswa_stage_conditioning=True,
+        rswa_emg_in_channels=1,
+        use_emg_subwindow_features=True,
+        emg_subwindow_ms=250,
+    )
+    model=build_movement_model("cnn_bimamba",config=cfg,stage_conditioning=True).eval()
+    out=model(
+        torch.randn(1,2,1,300),
         torch.ones(1,2,dtype=torch.bool),
         stage_probs=torch.softmax(torch.randn(1,2,5),dim=-1),
     )
