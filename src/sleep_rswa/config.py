@@ -31,6 +31,10 @@ class ModelConfig:
     rswa_stage_conditioning_detach: bool = True
     rswa_use_baseline_relative_channel: bool = False
     rswa_use_rms_relative_channel: bool = False
+    use_emg_subwindow_features: bool = False
+    emg_subwindow_ms: int = 250
+    emg_subwindow_hidden: int = 32
+    emg_local_embedding_dim: int = 64
 
 @dataclass(frozen=True)
 class RSWAConfig:

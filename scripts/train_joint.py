@@ -158,6 +158,20 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--use-emg-subwindow-features",
+        action="store_true",
+        help=(
+            "Ativa o encoder local de sub-janelas do EMG (features RMS/MAV/STD "
+            "em resolução mais fina dentro de cada mini-época de 3 s)."
+        ),
+    )
+    parser.add_argument(
+        "--emg-subwindow-ms",
+        type=int,
+        default=250,
+        help="Tamanho, em ms, das sub-janelas intramini-época do ramo EMG.",
+    )
+    parser.add_argument(
         "--oversample-tonic-subjects",
         action="store_true",
         help="Aumenta a frequência de sujeitos que contêm ao menos um evento tônico no train_loader.",
@@ -338,6 +352,8 @@ def main() -> None:
         ),
         rswa_use_baseline_relative_channel=args.rswa_use_baseline_relative_channel,
         rswa_use_rms_relative_channel=args.rswa_use_rms_relative_channel,
+        use_emg_subwindow_features=args.use_emg_subwindow_features,
+        emg_subwindow_ms=args.emg_subwindow_ms,
     )
 
     # ── Conjunto de TESTE fixo (held-out), separado ANTES da CV ────────────
@@ -386,7 +402,9 @@ def main() -> None:
                 f"RSWA experimental: target_mode={args.rswa_target_mode} "
                 f"postprocess_mode={args.rswa_postprocess_mode} "
                 f"use_baseline_relative_channel={args.rswa_use_baseline_relative_channel} "
-                f"use_rms_relative_channel={args.rswa_use_rms_relative_channel}"
+                f"use_rms_relative_channel={args.rswa_use_rms_relative_channel} "
+                f"use_emg_subwindow_features={args.use_emg_subwindow_features} "
+                f"emg_subwindow_ms={args.emg_subwindow_ms}"
             )
             logger.info(
                 f"Sujeitos: total={len(all_subjects)} | CV={len(subjects)} | teste={len(test_subjects)} | "
@@ -536,6 +554,7 @@ def main() -> None:
                 stale = 0
                 best_metrics: dict[str, float] = {}
                 history: list[dict[str, float]] = []
+                shape_logged = False
 
                 for epoch in range(1, args.epochs + 1):
                     epoch_start = perf_counter()
@@ -580,6 +599,26 @@ def main() -> None:
                             enabled=(not args.no_amp and device.type == "cuda"),
                         ):
                             outputs = system(signals, emg, mask=padding_mask)
+                        if not shape_logged:
+                            shape_info = getattr(system, "last_shape_info", None)
+                            if shape_info:
+                                ordered_keys = [
+                                    "emg_raw",
+                                    "emg_subwindows",
+                                    "emg_subwindow_features",
+                                    "emg_local_embedding",
+                                    "emg_cnn_embedding",
+                                    "fused_emg_embedding",
+                                    "staging_embedding",
+                                    "pre_mamba_embedding",
+                                ]
+                                for key in ordered_keys:
+                                    if key in shape_info:
+                                        logger.info(f"shape[{key}]={shape_info[key]}")
+                                for key, value in shape_info.items():
+                                    if key not in ordered_keys:
+                                        logger.info(f"shape[{key}]={value}")
+                                shape_logged = True
 
                         if stage_valid.any():
                             stage_loss = staging_loss_fn(
