@@ -116,6 +116,16 @@ def parse_args() -> argparse.Namespace:
         "--model", choices=available_staging_models(), default="cnn_bimamba",
         help="Arquitetura aplicada a AMBOS os ramos (staging e movimento/RSWA).",
     )
+    parser.add_argument(
+        "--joint-topology",
+        choices=["shared", "separate"],
+        default="separate",
+        help=(
+            "Topologia conjunta. 'shared' habilita apenas o sistema com BiMamba "
+            "compartilhada entre staging e RSWA; 'separate' usa ramos temporais "
+            "independentes."
+        ),
+    )
     parser.add_argument("--epochs", type=int, default=30)
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--num-workers", type=int, default=2)
@@ -290,8 +300,13 @@ def joint_monitor_value(monitor: str, val_metrics: dict[str, float]) -> float:
     return float(val_metrics.get(monitor, float("-inf")))
 
 
-def _use_shared_joint_system(model_name: str) -> bool:
-    del model_name
+def _use_shared_joint_system(model_name: str, joint_topology: str) -> bool:
+    if joint_topology == "shared":
+        if model_name != "cnn_bimamba":
+            raise ValueError(
+                "--joint-topology shared está disponível apenas para --model cnn_bimamba."
+            )
+        return True
     return False
 
 
@@ -339,6 +354,7 @@ def main() -> None:
         raise ValueError(
             "--rswa-use-rms-relative-channel exige --rswa-use-baseline-relative-channel."
         )
+    shared_joint = _use_shared_joint_system(args.model, args.joint_topology)
     if args.experiment_name is None:
         args.experiment_name = f"joint_{args.model}_stratified_kfold"
     seed_everything(args.seed)
@@ -391,7 +407,7 @@ def main() -> None:
                 "Topologia conjunta: "
                 + (
                     "encoder EEG/EOG + encoder EMG + fusao + BiMamba compartilhado"
-                    if _use_shared_joint_system(args.model)
+                    if shared_joint
                     else "staging e RSWA com troncos temporais separados"
                 )
             )
@@ -492,7 +508,6 @@ def main() -> None:
                     dataset=val_loader.dataset, loader=val_loader,
                 )
 
-                shared_joint = _use_shared_joint_system(args.model)
                 if shared_joint:
                     system = SharedBiMambaJointSystem(config=rswa_model_cfg).to(device)
                     staging_model = None
@@ -960,7 +975,7 @@ def main() -> None:
                     test_loader=test_loader, fold_checkpoints=staging_checkpoints,
                     build_model=(
                         (lambda: SharedBiMambaJointSystem(config=rswa_model_cfg))
-                        if _use_shared_joint_system(args.model)
+                        if shared_joint
                         else (lambda: build_staging_model(args.model, config=rswa_model_cfg))
                     ),
                     device=device, logger=logger,
@@ -972,7 +987,7 @@ def main() -> None:
                     test_loader=test_loader, fold_checkpoints=rswa_checkpoints,
                     build_model=(
                         (lambda: SharedBiMambaJointSystem(config=rswa_model_cfg))
-                        if _use_shared_joint_system(args.model)
+                        if shared_joint
                         else (
                             lambda: SleepStagingRSWASystem(
                                 build_staging_model(args.model, config=rswa_model_cfg),

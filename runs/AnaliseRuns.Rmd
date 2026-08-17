@@ -1,5 +1,152 @@
+---
+title: "Análise das ablações"
+output: html_document
+---
 
-``` {r}
-print("Hello World")
+```{r carregar-metricas}
+# Funciona tanto ao executar o Rmd a partir da raiz do projeto quanto da pasta runs/.
+runs_dir <- if (dir.exists("runs")) "runs" else "."
 
+pastas_ablation <- list.dirs(runs_dir, recursive = FALSE, full.names = TRUE)
+pastas_ablation <- pastas_ablation[
+  grepl("^ablation_[0-9]+_", basename(pastas_ablation))
+]
+
+arquivos_metrics <- file.path(pastas_ablation, "metrics.csv")
+arquivos_metrics <- arquivos_metrics[file.exists(arquivos_metrics)]
+
+if (!length(arquivos_metrics)) {
+  stop("Nenhum metrics.csv foi encontrado nas pastas ablation_*.")
+}
+
+# Lista nomeada: metrics_por_ablation$ablation_0, $ablation_1, etc.
+nomes_ablation <- sub("^(ablation_[0-9]+)_.*$", "\\\\1", basename(dirname(arquivos_metrics)))
+metrics_por_ablation <- setNames(
+  lapply(arquivos_metrics, utils::read.csv, check.names = FALSE),
+  nomes_ablation
+)
+
+# Data frames individuais: df_ablation_0, df_ablation_1, etc.
+nomes_dataframes <- paste0("df_", nomes_ablation)
+list2env(setNames(metrics_por_ablation, nomes_dataframes), envir = .GlobalEnv)
+
+# Conferência dos arquivos carregados.
+data.frame(
+  ablation = nomes_ablation,
+  arquivo = arquivos_metrics,
+  linhas = vapply(metrics_por_ablation, nrow, integer(1)),
+  colunas = vapply(metrics_por_ablation, ncol, integer(1)),
+  row.names = NULL
+)
 ```
+
+```{r processar-metricas}
+# Metricas de validacao a reter para comparar os modelos.
+colunas_metricas <- c(
+  "epoch", "fold",
+  "val_staging_f1_macro", "val_staging_kappa",
+  "val_rswa_any_f1", "val_rswa_any_kappa",
+  "val_rswa_tonic_f1", "val_rswa_tonic_kappa",
+  "val_rswa_phasic_f1", "val_rswa_phasic_kappa",
+  "val_rswa_movement_f1", "val_rswa_movement_kappa",
+  "val_rswa_rswa_f1_macro", "val_rswa_rswa_kappa_macro"
+)
+
+colunas_ausentes <- lapply(
+  metrics_por_ablation,
+  function(df) setdiff(colunas_metricas, names(df))
+)
+
+if (any(lengths(colunas_ausentes) > 0)) {
+  mensagem <- vapply(
+    names(colunas_ausentes)[lengths(colunas_ausentes) > 0],
+    function(nome) paste(nome, ":", paste(colunas_ausentes[[nome]], collapse = ", ")),
+    character(1)
+  )
+  stop("Colunas de metricas ausentes: ", paste(mensagem, collapse = "; "))
+}
+
+# Um dataframe processado por ablacao, contendo somente F1/Kappa solicitados.
+metricas_processadas_por_ablation <- lapply(
+  metrics_por_ablation,
+  function(df) df[, colunas_metricas, drop = FALSE]
+)
+
+# Objetos individuais: df_metricas_ablation_0, df_metricas_ablation_1, etc.
+nomes_metricas_processadas <- paste0("df_metricas_", names(metricas_processadas_por_ablation))
+list2env(
+  setNames(metricas_processadas_por_ablation, nomes_metricas_processadas),
+  envir = .GlobalEnv
+)
+
+# Tabela unica, util para graficos e comparacoes entre ablations.
+metricas_processadas <- do.call(
+  rbind,
+  Map(
+    function(nome, df) cbind(ablation = nome, df),
+    names(metricas_processadas_por_ablation),
+    metricas_processadas_por_ablation
+  )
+)
+rownames(metricas_processadas) <- NULL
+
+head(metricas_processadas)
+```
+
+```{r grafico-f1, fig.width=12, fig.height=5}
+# Media entre folds para cada epoca e ablation.
+f1_por_epoca <- aggregate(
+  cbind(val_staging_f1_macro, val_rswa_rswa_f1_macro) ~ ablation + epoch,
+  data = metricas_processadas,
+  FUN = mean
+)
+
+# Formato longo para exibir staging e RSWA em paineis separados.
+f1_long <- rbind(
+  data.frame(
+    ablation = f1_por_epoca$ablation,
+    epoch = f1_por_epoca$epoch,
+    categoria = "Staging",
+    f1 = f1_por_epoca$val_staging_f1_macro
+  ),
+  data.frame(
+    ablation = f1_por_epoca$ablation,
+    epoch = f1_por_epoca$epoch,
+    categoria = "RSWA",
+    f1 = f1_por_epoca$val_rswa_rswa_f1_macro
+  )
+)
+f1_long$ablation <- factor(
+  f1_long$ablation,
+  levels = c("ablation_0", "ablation_1", "ablation_2")
+)
+
+ggplot2::ggplot(
+  f1_long,
+  ggplot2::aes(
+    x = epoch, y = f1, colour = ablation, linetype = ablation, group = ablation
+  )
+) +
+  ggplot2::geom_line(linewidth = 0.9) +
+  ggplot2::geom_point(size = 1.4) +
+  ggplot2::facet_wrap(~ categoria, nrow = 1) +
+  ggplot2::scale_colour_manual(
+    values = c(ablation_0 = "#0072B2", ablation_1 = "#D55E00", ablation_2 = "#009E73")
+  ) +
+  ggplot2::scale_linetype_manual(
+    values = c(ablation_0 = "solid", ablation_1 = "dashed", ablation_2 = "dotted")
+  ) +
+  ggplot2::scale_y_continuous(limits = c(0, 1)) +
+  ggplot2::labs(
+    title = "Evolucao do F1 de validacao por ablation",
+    x = "Epoca",
+    y = "F1 macro (media entre folds)",
+    colour = "Ablation"
+  ) +
+  ggplot2::theme_minimal(base_size = 12) +
+  ggplot2::theme(legend.position = "bottom")
+```
+
+Após executar o chunk, por exemplo, `df_ablation_0` contém o arquivo
+`runs/ablation_0_.../metrics.csv`. Todos os data frames também estão reunidos em
+`metrics_por_ablation`.
