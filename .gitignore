@@ -6,6 +6,8 @@ data/
 outputs/
 checkpoints/
 runs/
+view/revisao_binaria/
+view/revisado/
 *.pt
 *.pth
 .ipynb_checkpoints/
