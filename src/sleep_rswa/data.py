@@ -30,8 +30,9 @@ class SubjectData:
     atonia_baseline_uv: float | None = None
     baseline_relative_reference_ratio: float | None = None
     emg_signals: torch.Tensor | None = None
-    # Rotulos multi-rotulo por cabeca (opcionais). Se ausentes, sao derivados
-    # de rswa_labels no load (retrocompatibilidade com .pt mono-rotulo antigos).
+    # Rotulos por cabeca (opcionais). Se ausentes, sao derivados de
+    # rswa_labels no load (retrocompatibilidade com .pt mono-rotulo antigos e
+    # suporte ao schema exclusivo novo: 0=nada, 1=fasico, 2=tonico, 3=any).
     tonic_labels: torch.Tensor | None = None
     phasic_labels: torch.Tensor | None = None
     # any_labels: categoria "any" do limiar duplo (amplitude confirmada, duracao
@@ -74,9 +75,9 @@ def load_subject_file(path: str | Path) -> SubjectData:
     rswa = obj.get("rswa_labels", torch.zeros_like(stages))
     conf = obj.get("rswa_conf", torch.zeros_like(stages, dtype=torch.float32))
     emg = obj.get("emg_signals", obj.get("emg", obj.get("emg_center")))
-    # Rotulos multi-rotulo por cabeca, se o .pt os gravou (parser novo).
-    # Se ausentes (.pt antigo mono-rotulo), ficam None e sao derivados de
-    # rswa_labels no __getitem__.
+    # Rotulos por cabeca, se o .pt os gravou (parser novo). Se ausentes
+    # (.pt antigo mono-rotulo), ficam None e sao derivados de rswa_labels
+    # no __getitem__.
     tonic = obj.get("tonic_labels")
     phasic = obj.get("phasic_labels")
     any_lab = obj.get("any_labels")
@@ -352,6 +353,7 @@ class SleepAnalysisDataset(Dataset):
                 movement = rswa.eq(self.rswa_config.tonic_label) | rswa.eq(
                     self.rswa_config.phasic_label
                 )
+                movement = movement | rswa.eq(self.rswa_config.any_label)
             if subject.any_labels is not None:
                 movement = movement | (subject.any_labels > 0.5)
 
@@ -403,8 +405,7 @@ class SleepAnalysisDataset(Dataset):
         if self.rem_mask_only:
             valid_rswa &= labels.eq(self.rswa_config.rem_stage)
 
-        # Rotulos multi-rotulo por cabeca. Se o .pt os traz explicitos, usa-os
-        # (permite co-ocorrencia tonico+fasico na mesma mini-epoca); senao,
+        # Rotulos por cabeca. Se o .pt os traz explicitos, usa-os; senao,
         # deriva do inteiro rswa_labels (retrocompat com .pt mono-rotulo).
         if subject.tonic_labels is not None and subject.phasic_labels is not None:
             tonic_labels = subject.tonic_labels.float().clone()
@@ -413,14 +414,13 @@ class SleepAnalysisDataset(Dataset):
             tonic_labels = rswa_labels.eq(self.rswa_config.tonic_label).float()
             phasic_labels = rswa_labels.eq(self.rswa_config.phasic_label).float()
 
-        # any_labels: cabeca nova, sem retrocompat possivel -- .pt que nao a
-        # trazem (nenhum, ainda) contam zeros (nenhum "any" conhecido) e ficam
-        # de fora da loss/metrica dessa cabeca so pela mascara rswa_valid, que
-        # e a mesma das outras duas (validade = mini-epoca escorada).
+        # any_labels: se o .pt nao a traz explicitamente, deriva de
+        # rswa_labels=3 no schema exclusivo novo. Em .pt legados isso segue
+        # zerado.
         if subject.any_labels is not None:
             any_labels = subject.any_labels.float().clone()
         else:
-            any_labels = torch.zeros_like(labels, dtype=torch.float32)
+            any_labels = rswa_labels.eq(self.rswa_config.any_label).float()
 
         if self.rswa_target_mode == "aasm_proto":
             tonic_targets = (

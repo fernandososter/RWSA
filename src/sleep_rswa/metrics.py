@@ -13,9 +13,10 @@ def _binary_f1_kappa(targets,preds):
 def rswa_metrics(tonic_targets,tonic_preds,phasic_targets,phasic_preds,any_targets,any_preds):
     """F1/kappa independentes para as 3 cabecas (tonic/phasic/any).
 
-    Cada cabeca e um alvo binario multi-rotulo separado (nao mutuamente
-    exclusivo em teoria, embora no rotulo de treino cada mini-epoca so
-    deva pertencer a uma categoria). Mantem os aliases historicos
+    Cada cabeca e um alvo binario separado. No schema atual do preprocessamento,
+    as tres categorias sao gravadas como mutuamente exclusivas por mini-epoca,
+    embora a implementacao das metricas continue generica o bastante para
+    aceitar coocorrencia em datasets legados. Mantem os aliases historicos
     'rswa_f1_macro'/'rswa_kappa_macro' como a MEDIA macro das 3 cabecas,
     para nao quebrar codigo de monitor/logging que ainda os referencia;
     'movement_f1'/'movement_kappa' (uniao das 3 = qualquer movimento

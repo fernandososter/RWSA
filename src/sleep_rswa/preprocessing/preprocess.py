@@ -14,7 +14,7 @@ ao notebook:
      da AASM (2023a) (rswa_source="aasm", ver aasm_rule.py -- EXPERIMENTAL,
      NAO usar em treinamento sem recalibrar aasm_atonia_pct primeiro, ver
      docs/relatorio_impacto_regra_aasm.md secao 4/5) sao convertidos em
-     rotulos por mini-epoca (tonic_labels, phasic_labels, rswa_labels,
+     rotulos por mini-epoca (tonic_labels, phasic_labels, any_labels, rswa_labels,
      rswa_conf) e gravados no .pt.
 
   3. Basal de EMG na fase REM (rem_baseline_uv): percentil 10 do envelope RMS
@@ -43,13 +43,14 @@ Formato salvo (torch.save)
   "sleep_stages":  Tensor (T,)                  int64   (-1 = gap)
   "channel_mask":  Tensor (N_CHANNELS,)         bool
   "channel_names": list[str | None]
-  "tonic_labels":  Tensor (T,)  float32  {0,1}
-  "phasic_labels": Tensor (T,)  float32  {0,1}
-  "any_labels":    Tensor (T,)  float32  {0,1}  (evento com duracao ambigua,
-                                                  entre limiar fasico e minimo tonico)
+  "tonic_labels":  Tensor (T,)  float32  {0,1}  (mutuamente exclusivo)
+  "phasic_labels": Tensor (T,)  float32  {0,1}  (mutuamente exclusivo)
+  "any_labels":    Tensor (T,)  float32  {0,1}  (mutuamente exclusivo; residual
+                                                  quando nao e nem tonico nem fasico)
   "tonic_proto_labels":  Tensor (T,) float32 {0,1}
   "phasic_proto_labels": Tensor (T,) float32 {0,1}
-  "rswa_labels":   Tensor (T,)  int64    {0,1,2,3}  (NAO inclui "any")
+  "rswa_labels":   Tensor (T,)  int64    {0,1,2,3}  (0=nada, 1=fasico,
+                                                      2=tonico, 3=any)
   "rswa_conf":     Tensor (T,)  float32  {0,1}  (validade p/ mascara da loss)
   "tonic_cov":     Tensor (T,)  float32  0..1   (fracao de cobertura, diagnostico)
   "phasic_cov":    Tensor (T,)  float32  0..1
@@ -96,6 +97,62 @@ from .aasm_rule import (
     MIN_AMPLITUDE_RATIO as AASM_MIN_AMPLITUDE_RATIO,
 )
 from .ecg_gating import apply_ecg_gating_to_raw
+
+
+def _enforce_exclusive_rswa_labels(
+    rswa: Dict[str, np.ndarray],
+    *,
+    tonic_priority: bool = True,
+) -> Dict[str, np.ndarray]:
+    """Torna tonic/phasic/any mutuamente exclusivos antes de gravar o .pt.
+
+    Prioridade adotada por padrao:
+      1. tonico
+      2. fasico
+      3. any
+
+    `tonic_proto_labels`/`phasic_proto_labels` tambem sao exclusivos entre si,
+    para que `rswa_target_mode="aasm_proto"` preserve a mesma regra.
+    """
+    tonic = np.asarray(rswa["tonic_labels"]).astype(bool, copy=False)
+    phasic = np.asarray(rswa["phasic_labels"]).astype(bool, copy=False)
+    any_lab = np.asarray(rswa["any_labels"]).astype(bool, copy=False)
+
+    if tonic_priority:
+        tonic_final = tonic.copy()
+        phasic_final = phasic & ~tonic_final
+    else:
+        phasic_final = phasic.copy()
+        tonic_final = tonic & ~phasic_final
+    any_final = any_lab & ~tonic_final & ~phasic_final
+
+    rswa["tonic_labels"] = tonic_final.astype(np.float32)
+    rswa["phasic_labels"] = phasic_final.astype(np.float32)
+    rswa["any_labels"] = any_final.astype(np.float32)
+
+    if rswa.get("tonic_proto_labels") is not None and rswa.get("phasic_proto_labels") is not None:
+        tonic_proto = np.asarray(rswa["tonic_proto_labels"]).astype(bool, copy=False)
+        phasic_proto = np.asarray(rswa["phasic_proto_labels"]).astype(bool, copy=False)
+        if tonic_priority:
+            tonic_proto_final = tonic_proto.copy()
+            phasic_proto_final = phasic_proto & ~tonic_proto_final
+        else:
+            phasic_proto_final = phasic_proto.copy()
+            tonic_proto_final = tonic_proto & ~phasic_proto_final
+        rswa["tonic_proto_labels"] = tonic_proto_final.astype(np.float32)
+        rswa["phasic_proto_labels"] = phasic_proto_final.astype(np.float32)
+
+    rswa_labels = np.zeros(tonic_final.shape[0], dtype=np.int64)
+    rswa_labels[phasic_final] = 1
+    rswa_labels[tonic_final] = 2
+    rswa_labels[any_final] = 3
+    rswa["rswa_labels"] = rswa_labels
+
+    for key in ("tonic_cov", "phasic_cov", "any_cov"):
+        if key in rswa:
+            rswa[key] = np.asarray(rswa[key]).astype(np.float32, copy=False)
+
+    return rswa
 
 
 def preprocess_exam(
@@ -398,13 +455,16 @@ def preprocess_exam(
             any_min_coverage=any_min_coverage,
         )
 
+    rswa = _enforce_exclusive_rswa_labels(rswa)
+
     if verbose:
         n_rem = int((stages_mini == 4).sum())
         n_gap = int((stages_mini == -1).sum())
         n_tonic = int(rswa["tonic_labels"].sum())
         n_phasic = int(rswa["phasic_labels"].sum())
+        n_any = int(rswa["any_labels"].sum())
         print(f" [ALINHAMENTO] {len(signals)} mini-epocas | REM={n_rem} | "
-              f"gap={n_gap} | tonic+={n_tonic} | phasic+={n_phasic}")
+              f"gap={n_gap} | tonic+={n_tonic} | phasic+={n_phasic} | any+={n_any}")
         if rswa_source == "auto":
             print(
                 f" [AUTO RSWA] candidatos_cnn={rswa['n_cnn_candidates']} "
@@ -429,6 +489,10 @@ def preprocess_exam(
     label_metadata = {
         "rswa_source": rswa_source,
         "label_source": label_source,
+        "label_exclusivity": {
+            "mutually_exclusive": True,
+            "priority": ["tonic", "phasic", "any"],
+        },
         "coverage_thresholds": {
             "tonic_min_coverage": float(tonic_min_coverage),
             "phasic_min_coverage": float(phasic_min_coverage),

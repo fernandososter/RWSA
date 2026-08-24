@@ -42,6 +42,7 @@ class RSWAConfig:
     none_label: int = 0
     phasic_label: int = 1
     tonic_label: int = 2
+    any_label: int = 3
     rem_stage: int = 4
     min_confidence: float = 0.0
     # Dois canais auxiliares baseline-relative (use_baseline_relative_channel=True):

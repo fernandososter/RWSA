@@ -83,7 +83,7 @@ def _get_head_labels(subject: SubjectData, rswa_cfg: RSWAConfig) -> tuple[torch.
     if subject.any_labels is not None:
         any_labels = subject.any_labels.float().clone()
     else:
-        any_labels = torch.zeros_like(subject.sleep_stages, dtype=torch.float32)
+        any_labels = rswa_labels.eq(rswa_cfg.any_label).float()
     return tonic, phasic, any_labels
 
 
