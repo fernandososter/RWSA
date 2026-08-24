@@ -113,6 +113,15 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--test-after-each-fold",
+        action="store_true",
+        help=(
+            "Executa uma rodada adicional no conjunto de teste held-out ao final "
+            "de cada fold, usando o melhor checkpoint daquele fold. O teste "
+            "final por ensemble ao fim da execução é mantido."
+        ),
+    )
+    parser.add_argument(
         "--model", choices=available_staging_models(), default="cnn_bimamba",
         help="Arquitetura aplicada a AMBOS os ramos (staging e movimento/RSWA).",
     )
@@ -938,17 +947,69 @@ def main() -> None:
                     )
 
                 if joint_optimizer is not None:
-                    staging_checkpoints.append({"fold": fold, "best_checkpoint": checkpoint_dir / "joint_best.pt"})
-                    rswa_checkpoints.append({"fold": fold, "best_checkpoint": checkpoint_dir / "joint_best.pt"})
+                    staging_checkpoint_entry = {"fold": fold, "best_checkpoint": checkpoint_dir / "joint_best.pt"}
+                    rswa_checkpoint_entry = {"fold": fold, "best_checkpoint": checkpoint_dir / "joint_best.pt"}
                 else:
-                    staging_checkpoints.append({"fold": fold, "best_checkpoint": checkpoint_dir / "staging_best.pt"})
-                    rswa_checkpoints.append(
-                        {
-                            "fold": fold,
-                            "staging_checkpoint": checkpoint_dir / "staging_best.pt",
-                            "rswa_checkpoint": checkpoint_dir / "rswa_best.pt",
-                        }
+                    staging_checkpoint_entry = {"fold": fold, "best_checkpoint": checkpoint_dir / "staging_best.pt"}
+                    rswa_checkpoint_entry = {
+                        "fold": fold,
+                        "staging_checkpoint": checkpoint_dir / "staging_best.pt",
+                        "rswa_checkpoint": checkpoint_dir / "rswa_best.pt",
+                    }
+                staging_checkpoints.append(staging_checkpoint_entry)
+                rswa_checkpoints.append(rswa_checkpoint_entry)
+
+                fold_test_summary: dict[str, Any] | None = None
+                if test_subjects and args.test_after_each_fold:
+                    logger.info("=" * 80)
+                    logger.info(f"TESTE INTERMEDIÁRIO APÓS FOLD {fold} (melhor checkpoint do fold)")
+                    logger.info("=" * 80)
+                    test_loader_fold = make_loader(test_subjects, args, False, device)
+                    fold_test_dir = fold_dir / "test_after_fold"
+                    fold_test_predictions_dir = fold_test_dir / "predictions"
+                    staging_fold_test = evaluate_staging_test_set(
+                        test_loader=test_loader_fold,
+                        fold_checkpoints=[staging_checkpoint_entry],
+                        build_model=(
+                            (lambda: SharedBiMambaJointSystem(config=rswa_model_cfg))
+                            if shared_joint
+                            else (lambda: build_staging_model(args.model, config=rswa_model_cfg))
+                        ),
+                        device=device,
+                        logger=logger,
+                        figures_dir=fold_test_dir,
+                        predictions_dir=fold_test_predictions_dir,
+                        amp=not args.no_amp,
                     )
+                    movement_fold_test = evaluate_movement_test_set(
+                        test_loader=test_loader_fold,
+                        fold_checkpoints=[rswa_checkpoint_entry],
+                        build_model=(
+                            (lambda: SharedBiMambaJointSystem(config=rswa_model_cfg))
+                            if shared_joint
+                            else (
+                                lambda: SleepStagingRSWASystem(
+                                    build_staging_model(args.model, config=rswa_model_cfg),
+                                    build_movement_model(args.model, config=rswa_model_cfg, stage_conditioning=True),
+                                )
+                            )
+                        ),
+                        device=device,
+                        logger=logger,
+                        figures_dir=fold_test_dir,
+                        predictions_dir=fold_test_predictions_dir,
+                        amp=not args.no_amp,
+                        threshold=thresholds,
+                        postprocess_mode=(
+                            None if args.rswa_postprocess_mode == "none"
+                            else args.rswa_postprocess_mode
+                        ),
+                    )
+                    fold_test_summary = {
+                        "staging": staging_fold_test,
+                        "movement": movement_fold_test,
+                    }
+                    logger.write_json(f"fold_{fold}/test_after_fold_summary.json", fold_test_summary)
                 fold_summaries.append(
                     {
                         "fold": fold,
@@ -962,6 +1023,30 @@ def main() -> None:
                         "best_val_any_f1": best_metrics.get("rswa_any_f1"),
                         "best_val_rswa_f1_macro": best_metrics.get("rswa_rswa_f1_macro"),
                         "best_val_rswa_kappa_macro": best_metrics.get("rswa_rswa_kappa_macro"),
+                        "test_after_fold_staging_f1_macro": (
+                            None if fold_test_summary is None
+                            else fold_test_summary["staging"].get("ensemble", {}).get("f1_macro")
+                        ),
+                        "test_after_fold_staging_kappa": (
+                            None if fold_test_summary is None
+                            else fold_test_summary["staging"].get("ensemble", {}).get("kappa")
+                        ),
+                        "test_after_fold_tonic_f1": (
+                            None if fold_test_summary is None
+                            else fold_test_summary["movement"].get("tonic", {}).get("ensemble", {}).get("f1")
+                        ),
+                        "test_after_fold_phasic_f1": (
+                            None if fold_test_summary is None
+                            else fold_test_summary["movement"].get("phasic", {}).get("ensemble", {}).get("f1")
+                        ),
+                        "test_after_fold_any_f1": (
+                            None if fold_test_summary is None
+                            else fold_test_summary["movement"].get("any", {}).get("ensemble", {}).get("f1")
+                        ),
+                        "test_after_fold_movement_f1": (
+                            None if fold_test_summary is None
+                            else fold_test_summary["movement"].get("movement", {}).get("ensemble", {}).get("f1")
+                        ),
                     }
                 )
 
