@@ -25,7 +25,8 @@ ao notebook:
 
 Etapas
 ──────
-1. Carrega EDF + hipnograma (.mat) alinhado + CSV de RSWA (se rswa_source=csv)
+1. Carrega EDF + hipnograma externo (.mat/.edf) OU anotacoes internas de
+   estagiamento do proprio EDF+ + CSV de RSWA (se rswa_source=csv)
 2. Resolve canais (ausentes -> zeros + channel_mask=False)
 3. Constroi stage_map, cropa o raw em [annot_start, annot_end]
 4. Filtra por tipo (EMG/EEG/EOG) + notch, reamostra para 100 Hz
@@ -82,7 +83,11 @@ from .config import (
     PSGConfig,
 )
 from .channels import find_mat_file, list_raw_edfs, resolve_channels
-from .hypnogram import _parse_stage_value, load_aligned_hyp_annotations
+from .hypnogram import (
+    _parse_stage_value,
+    load_aligned_hyp_annotations,
+    load_hyp_annotations_from_raw,
+)
 from .annotations import (
     count_annotations_by_description,
     find_annotations_csv_file,
@@ -201,17 +206,23 @@ def preprocess_exam(
     # ── 1. Carrega EDF + hipnograma + CSV de RSWA ─────────────────────────
     rswa_csv_path = None
     try:
-        scores_path = find_mat_file(subject_id, mat_dir)
-        if scores_path is None:
-            print(f"  [ERRO] {subject_id}: hipnograma nao encontrado em {mat_dir}")
-            return None
-        print(f"[SCORE FILE]: {scores_path}")
-
         raw = mne.io.read_raw_edf(str(edf_path), preload=True, verbose="ERROR")
-
-        annotations, hyp, alignment = load_aligned_hyp_annotations(
-            raw=raw, mat_path=scores_path, include_movement=False,
-        )
+        scores_path = find_mat_file(subject_id, mat_dir)
+        if scores_path is not None:
+            print(f"[SCORE FILE]: {scores_path}")
+            annotations, hyp, alignment = load_aligned_hyp_annotations(
+                raw=raw, mat_path=scores_path, include_movement=False,
+            )
+        else:
+            print(
+                f"[SCORE FILE] hipnograma externo nao encontrado para {subject_id}; "
+                "tentando anotacoes internas do proprio EDF+"
+            )
+            annotations, hyp, alignment = load_hyp_annotations_from_raw(
+                raw=raw,
+                include_movement=False,
+            )
+            print("[SCORE FILE] usando anotacoes internas do EDF")
 
         if rswa_source == "csv":
             rswa_csv_path = find_annotations_csv_file(

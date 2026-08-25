@@ -401,3 +401,38 @@ ggplot(dados_grafico_f1, aes(x = run, y = f1, fill = categoria)) +
     legend.position = "top"
   )
 ```
+
+## Comparacao pareada entre datasets
+
+```{r friedman-wilcoxon-datasets}
+friedman_global <- read_csv(
+  file.path(runs_dir, "tabela_friedman_global.csv"),
+  show_col_types = FALSE
+) %>%
+  mutate(
+    estatistica_friedman = round(estatistica_friedman, 3),
+    p_friedman = format(p_friedman, scientific = TRUE, digits = 3)
+  )
+
+wilcoxon_pareado <- read_csv(
+  file.path(runs_dir, "tabela_wilcoxon_pareado.csv"),
+  show_col_types = FALSE
+) %>%
+  mutate(
+    media_a_pct = round(media_a_pct, 3),
+    media_b_pct = round(media_b_pct, 3),
+    estatistica_w = round(estatistica_w, 3),
+    p_wilcoxon = format(p_wilcoxon, scientific = TRUE, digits = 3),
+    p_bh = format(p_bh, scientific = TRUE, digits = 3)
+  )
+
+knitr::kable(
+  friedman_global,
+  caption = "Teste de Friedman para os 83 sujeitos comuns entre os quatro datasets."
+)
+
+knitr::kable(
+  wilcoxon_pareado,
+  caption = "Comparacoes pareadas por Wilcoxon com correcao de Benjamini-Hochberg."
+)
+```
