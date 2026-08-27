@@ -198,8 +198,25 @@ class SleepAnalysisDataset(Dataset):
         rswa_target_mode: str = "final",
         use_baseline_relative_channel: bool = False,
         use_rms_relative_channel: bool = False,
+        target_epoch_sec: int = 3,
+        context_radius: int | None = None,
     ):
-        self.subjects = list(subjects)
+        self.source_signal_config = SignalConfig()
+        self.target_epoch_sec = int(target_epoch_sec)
+        if self.target_epoch_sec <= 0:
+            raise ValueError("target_epoch_sec precisa ser positivo.")
+        if self.target_epoch_sec % self.source_signal_config.epoch_sec != 0:
+            raise ValueError(
+                "target_epoch_sec precisa ser múltiplo de "
+                f"{self.source_signal_config.epoch_sec}s para reutilizar os .pt atuais."
+            )
+        resolved_context_radius = (
+            int(context_radius)
+            if context_radius is not None
+            else (1 if self.target_epoch_sec == self.source_signal_config.epoch_sec else 0)
+        )
+        if resolved_context_radius < 0:
+            raise ValueError("context_radius não pode ser negativo.")
         self.min_confidence = min_confidence
         self.rem_mask_only = rem_mask_only
         self.rswa_target_mode = rswa_target_mode.strip().lower()
@@ -211,11 +228,131 @@ class SleepAnalysisDataset(Dataset):
             raise ValueError(
                 "use_rms_relative_channel=True exige use_baseline_relative_channel=True."
             )
-        self.signal_config = SignalConfig()
+        self.signal_config = SignalConfig(
+            fs=self.source_signal_config.fs,
+            epoch_sec=self.target_epoch_sec,
+            samples_per_epoch=self.source_signal_config.fs * self.target_epoch_sec,
+            context_radius=resolved_context_radius,
+            n_channels=self.source_signal_config.n_channels,
+            staging_channel_indices=self.source_signal_config.staging_channel_indices,
+        )
         self.rswa_config = RSWAConfig()
+        self.subjects = [
+            self._aggregate_subject(subject)
+            for subject in subjects
+        ]
 
     def __len__(self) -> int:
         return len(self.subjects)
+
+    def _aggregate_subject(self, subject: SubjectData) -> SubjectData:
+        factor = self.target_epoch_sec // self.source_signal_config.epoch_sec
+        if factor == 1:
+            return subject
+
+        if subject.n_epochs % factor != 0:
+            raise ValueError(
+                f"{subject.subject_id}: n_epochs={subject.n_epochs} não é múltiplo de "
+                f"{factor} para agregação em {self.target_epoch_sec}s."
+            )
+
+        new_t = subject.n_epochs // factor
+
+        def _reshape_time(tensor: torch.Tensor | None) -> torch.Tensor | None:
+            if tensor is None:
+                return None
+            if tensor.shape[0] != subject.n_epochs:
+                raise ValueError(
+                    f"{subject.subject_id}: tensor temporal incompatível para agregação: "
+                    f"{tuple(tensor.shape)}"
+                )
+            return tensor.reshape(new_t, factor, *tensor.shape[1:])
+
+        def _agg_binary(tensor: torch.Tensor | None) -> torch.Tensor | None:
+            shaped = _reshape_time(tensor)
+            if shaped is None:
+                return None
+            return shaped.amax(dim=1)
+
+        stage_blocks = _reshape_time(subject.sleep_stages.long())
+        if stage_blocks is None:
+            raise RuntimeError("sleep_stages não pode ser None.")
+        same_stage = (stage_blocks == stage_blocks[:, :1]).all(dim=1)
+        valid_stage = (stage_blocks >= 0).all(dim=1) & same_stage
+        aggregated_stages = stage_blocks[:, 0].clone()
+        aggregated_stages[~valid_stage] = -1
+
+        conf_blocks = _reshape_time(subject.rswa_conf.float())
+        if conf_blocks is None:
+            raise RuntimeError("rswa_conf não pode ser None.")
+        aggregated_conf = conf_blocks.amin(dim=1)
+
+        aggregated_tonic = _agg_binary(subject.tonic_labels)
+        aggregated_phasic = _agg_binary(subject.phasic_labels)
+        aggregated_any = _agg_binary(subject.any_labels)
+        aggregated_tonic_proto = _agg_binary(subject.tonic_proto_labels)
+        aggregated_phasic_proto = _agg_binary(subject.phasic_proto_labels)
+
+        signals = _reshape_time(subject.signals)
+        if signals is None:
+            raise RuntimeError("signals não pode ser None.")
+        aggregated_signals = signals.reshape(
+            new_t,
+            factor,
+            *subject.signals.shape[1:],
+        ).transpose(1, 2).reshape(
+            new_t,
+            subject.signals.shape[1],
+            factor * subject.signals.shape[2],
+        )
+
+        aggregated_emg = None
+        if subject.emg_signals is not None:
+            emg = subject.emg_signals
+            if emg.ndim == 2:
+                emg = emg.unsqueeze(1)
+            emg_blocks = _reshape_time(emg)
+            if emg_blocks is None:
+                raise RuntimeError("emg_signals não pode ser None após checagem.")
+            aggregated_emg = emg_blocks.reshape(
+                new_t,
+                factor,
+                *emg.shape[1:],
+            ).transpose(1, 2).reshape(
+                new_t,
+                emg.shape[1],
+                factor * emg.shape[2],
+            )
+
+        rswa_blocks = _reshape_time(subject.rswa_labels.long())
+        if rswa_blocks is None:
+            raise RuntimeError("rswa_labels não pode ser None.")
+        aggregated_rswa = torch.zeros(new_t, dtype=torch.long)
+        if aggregated_any is not None:
+            aggregated_rswa[aggregated_any > 0.5] = self.rswa_config.any_label
+        if aggregated_phasic is not None:
+            aggregated_rswa[aggregated_phasic > 0.5] = self.rswa_config.phasic_label
+        if aggregated_tonic is not None:
+            aggregated_rswa[aggregated_tonic > 0.5] = self.rswa_config.tonic_label
+        if aggregated_tonic is None and aggregated_phasic is None and aggregated_any is None:
+            aggregated_rswa = rswa_blocks.amax(dim=1)
+
+        return SubjectData(
+            subject_id=subject.subject_id,
+            signals=aggregated_signals,
+            sleep_stages=aggregated_stages,
+            rswa_labels=aggregated_rswa,
+            rswa_conf=aggregated_conf,
+            rem_baseline_uv=subject.rem_baseline_uv,
+            atonia_baseline_uv=subject.atonia_baseline_uv,
+            baseline_relative_reference_ratio=subject.baseline_relative_reference_ratio,
+            emg_signals=aggregated_emg,
+            tonic_labels=aggregated_tonic,
+            phasic_labels=aggregated_phasic,
+            any_labels=aggregated_any,
+            tonic_proto_labels=aggregated_tonic_proto,
+            phasic_proto_labels=aggregated_phasic_proto,
+        )
 
     def _extract_staging_signals(self, subject: SubjectData) -> torch.Tensor:
         signals = subject.signals.float().clone()
@@ -385,19 +522,25 @@ class SleepAnalysisDataset(Dataset):
         t, c, n = signals.shape
 
         ctx = self.signal_config.context_radius
-        pad = torch.zeros(ctx, c, n, dtype=signals.dtype)
-        context = (
-            torch.cat([pad, signals, pad], dim=0)
-            .unfold(0, 2 * ctx + 1, 1)
-            .permute(0, 1, 3, 2)
-            .reshape(t, c, (2 * ctx + 1) * n)
-        )
+        if ctx == 0:
+            context = signals
+        else:
+            pad = torch.zeros(ctx, c, n, dtype=signals.dtype)
+            context = (
+                torch.cat([pad, signals, pad], dim=0)
+                .unfold(0, 2 * ctx + 1, 1)
+                .permute(0, 1, 3, 2)
+                .reshape(t, c, (2 * ctx + 1) * n)
+            )
 
         labels = subject.sleep_stages.long()
-        pad_lab = torch.full((ctx,), -1, dtype=labels.dtype)
-        valid_ctx = ~(
-            torch.cat([pad_lab, labels, pad_lab]).unfold(0, 2 * ctx + 1, 1) == -1
-        ).any(dim=1)
+        if ctx == 0:
+            valid_ctx = labels != -1
+        else:
+            pad_lab = torch.full((ctx,), -1, dtype=labels.dtype)
+            valid_ctx = ~(
+                torch.cat([pad_lab, labels, pad_lab]).unfold(0, 2 * ctx + 1, 1) == -1
+            ).any(dim=1)
 
         rswa_labels = subject.rswa_labels.long().clone()
         confidence = subject.rswa_conf.float().clone()

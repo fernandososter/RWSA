@@ -22,7 +22,12 @@ class EMGSubwindowFeatureEncoder(nn.Module):
     def __init__(self, config: ModelConfig | None = None):
         super().__init__()
         cfg = config or ModelConfig()
-        sig = SignalConfig()
+        sig = SignalConfig(
+            fs=cfg.signal_fs,
+            epoch_sec=cfg.signal_epoch_sec,
+            samples_per_epoch=cfg.signal_samples_per_epoch,
+            context_radius=cfg.signal_context_radius,
+        )
         self.cfg = cfg
         self.sig = sig
         self.subwindow_samples = int(round(sig.fs * (cfg.emg_subwindow_ms / 1000.0)))

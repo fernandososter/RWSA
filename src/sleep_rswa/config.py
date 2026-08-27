@@ -35,6 +35,10 @@ class ModelConfig:
     emg_subwindow_ms: int = 250
     emg_subwindow_hidden: int = 32
     emg_local_embedding_dim: int = 64
+    signal_fs: int = 100
+    signal_epoch_sec: int = 3
+    signal_samples_per_epoch: int = 300
+    signal_context_radius: int = 1
 
 @dataclass(frozen=True)
 class RSWAConfig:

@@ -138,6 +138,25 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--epochs", type=int, default=30)
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--num-workers", type=int, default=2)
+    parser.add_argument(
+        "--target-epoch-sec",
+        type=int,
+        choices=[3, 30],
+        default=3,
+        help=(
+            "Duração temporal processada pelo treino. Em 30 s, os .pt de 3 s "
+            "são agregados no DataLoader sem exigir novo preprocessamento."
+        ),
+    )
+    parser.add_argument(
+        "--context-radius",
+        type=int,
+        default=None,
+        help=(
+            "Número de janelas vizinhas concatenadas no ramo de staging. "
+            "Padrão: 1 em 3 s e 0 em 30 s."
+        ),
+    )
     parser.add_argument("--lr-staging", type=float, default=1e-4)
     parser.add_argument("--lr-rswa", type=float, default=1e-4)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
@@ -181,7 +200,7 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help=(
             "Ativa o encoder local de sub-janelas do EMG (features RMS/MAV/STD "
-            "em resolução mais fina dentro de cada mini-época de 3 s)."
+            "em resolução mais fina dentro de cada janela temporal do ramo EMG)."
         ),
     )
     parser.add_argument(
@@ -259,6 +278,8 @@ def make_loader(subjects, args, shuffle, device):
         rswa_target_mode=args.rswa_target_mode,
         use_baseline_relative_channel=args.rswa_use_baseline_relative_channel,
         use_rms_relative_channel=args.rswa_use_rms_relative_channel,
+        target_epoch_sec=args.target_epoch_sec,
+        context_radius=args.context_radius,
     )
     sampler = None
     if shuffle and args.oversample_tonic_subjects:
@@ -359,6 +380,13 @@ def _print_model_summary(name: str, model: torch.nn.Module, logger: Any) -> None
 
 def main() -> None:
     args = parse_args()
+    if args.context_radius is not None and args.context_radius < 0:
+        raise ValueError("--context-radius não pode ser negativo.")
+    disabled_aasm_postprocess = (
+        args.target_epoch_sec != 3 and args.rswa_postprocess_mode == "aasm_simple"
+    )
+    if args.target_epoch_sec != 3 and args.rswa_postprocess_mode == "aasm_simple":
+        args.rswa_postprocess_mode = "none"
     if args.rswa_use_rms_relative_channel and not args.rswa_use_baseline_relative_channel:
         raise ValueError(
             "--rswa-use-rms-relative-channel exige --rswa-use-baseline-relative-channel."
@@ -369,6 +397,10 @@ def main() -> None:
     seed_everything(args.seed)
     device = resolve_device(args.device)
     all_subjects = load_subject_directory(args.data_dir)
+    resolved_context_radius = (
+        args.context_radius if args.context_radius is not None
+        else (1 if args.target_epoch_sec == 3 else 0)
+    )
     rswa_model_cfg = ModelConfig(
         rswa_stage_conditioning=True,
         rswa_emg_in_channels=(
@@ -380,6 +412,9 @@ def main() -> None:
         rswa_use_rms_relative_channel=args.rswa_use_rms_relative_channel,
         use_emg_subwindow_features=args.use_emg_subwindow_features,
         emg_subwindow_ms=args.emg_subwindow_ms,
+        signal_epoch_sec=args.target_epoch_sec,
+        signal_samples_per_epoch=100 * args.target_epoch_sec,
+        signal_context_radius=resolved_context_radius,
     )
 
     # ── Conjunto de TESTE fixo (held-out), separado ANTES da CV ────────────
@@ -432,6 +467,16 @@ def main() -> None:
                 f"use_emg_subwindow_features={args.use_emg_subwindow_features} "
                 f"emg_subwindow_ms={args.emg_subwindow_ms}"
             )
+            logger.info(
+                f"Janela temporal: target_epoch_sec={args.target_epoch_sec}s "
+                f"context_radius={resolved_context_radius} "
+                f"samples_per_epoch={rswa_model_cfg.signal_samples_per_epoch}"
+            )
+            if disabled_aasm_postprocess:
+                logger.info(
+                    "Aviso: rswa_postprocess_mode='aasm_simple' foi desativado "
+                    "automaticamente porque o treino está em 30 s."
+                )
             logger.info(
                 f"Sujeitos: total={len(all_subjects)} | CV={len(subjects)} | teste={len(test_subjects)} | "
                 f"n_splits={args.n_splits} | estratificação CV={args.stratify_by} | teste={args.test_stratify_by}"

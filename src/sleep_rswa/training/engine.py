@@ -198,6 +198,13 @@ def _aasm_simple_postprocess_predictions(
     return post
 
 
+def _can_apply_aasm_simple_postprocess(loader: Iterable[dict[str, Any]]) -> bool:
+    dataset = getattr(loader, "dataset", None)
+    signal_config = getattr(dataset, "signal_config", None)
+    epoch_sec = getattr(signal_config, "epoch_sec", 3)
+    return int(epoch_sec) == 3
+
+
 def run_rswa_epoch(
     model: torch.nn.Module,
     loader: Iterable[dict[str, Any]],
@@ -286,7 +293,7 @@ def run_rswa_epoch(
         )
 
     targets_np = {h: torch.cat(targets_all[h]).numpy() for h in _HEADS}
-    if postprocess_mode == "aasm_simple":
+    if postprocess_mode == "aasm_simple" and _can_apply_aasm_simple_postprocess(loader):
         probs_np = {h: torch.cat(probs_all[h]).numpy() for h in _HEADS}
         preds_np = _aasm_simple_postprocess_predictions(
             np.asarray(subject_ids_all, dtype=object),
@@ -402,7 +409,7 @@ def evaluate_joint(
         metrics["staging_prediction_distribution"] = st_pred.as_dict()
     if targets_all["tonic"]:
         targets_np = {h: torch.cat(targets_all[h]).numpy() for h in _HEADS}
-        if postprocess_mode == "aasm_simple":
+        if postprocess_mode == "aasm_simple" and _can_apply_aasm_simple_postprocess(loader):
             probs_np = {h: torch.cat(probs_all[h]).numpy() for h in _HEADS}
             preds_np = _aasm_simple_postprocess_predictions(
                 np.asarray(subject_ids_all, dtype=object),
@@ -502,7 +509,7 @@ def collect_rswa_predictions(
         prob_by_head[h] = prob_arr
         result[f"{h}_expected"] = exp_arr
         result[f"{h}_probability"] = prob_arr
-    if postprocess_mode == "aasm_simple":
+    if postprocess_mode == "aasm_simple" and _can_apply_aasm_simple_postprocess(loader):
         post = _aasm_simple_postprocess_predictions(
             result["subject_id"],
             result["mini_epoch_index"],
