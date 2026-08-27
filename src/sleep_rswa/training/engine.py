@@ -79,7 +79,9 @@ def run_staging_epoch(
     for batch in tqdm(loader, desc="Running staging epoch", unit="batch"):
         signals = batch["signals"].to(device, non_blocking=True)
         targets = batch["sleep_stages"].to(device, non_blocking=True)
-        padding_mask = batch["padding_mask"].to(device, non_blocking=True)
+        padding_mask = batch.get("staging_padding_mask", batch["padding_mask"]).to(
+            device, non_blocking=True
+        )
         valid_mask = batch["staging_valid"].to(device, non_blocking=True) & padding_mask
 
         if not valid_mask.any():
@@ -200,7 +202,7 @@ def _aasm_simple_postprocess_predictions(
 
 def _can_apply_aasm_simple_postprocess(loader: Iterable[dict[str, Any]]) -> bool:
     dataset = getattr(loader, "dataset", None)
-    signal_config = getattr(dataset, "signal_config", None)
+    signal_config = getattr(dataset, "rswa_signal_config", None)
     epoch_sec = getattr(signal_config, "epoch_sec", 3)
     return int(epoch_sec) == 3
 
@@ -241,7 +243,9 @@ def run_rswa_epoch(
         tonic_targets = loss_targets["tonic"]
         phasic_targets = loss_targets["phasic"]
         any_targets = loss_targets["any"]
-        padding_mask = batch["padding_mask"].to(device, non_blocking=True)
+        padding_mask = batch.get("rswa_padding_mask", batch["padding_mask"]).to(
+            device, non_blocking=True
+        )
         valid_mask = batch["rswa_valid"].to(device, non_blocking=True) & padding_mask
 
         if not valid_mask.any():
@@ -347,17 +351,28 @@ def evaluate_joint(
         for batch in tqdm(loader, desc="Evaluating joint", unit="batch"):
             signals = batch["signals"].to(device, non_blocking=True)
             emg = batch["emg_center"].to(device, non_blocking=True)
-            padding_mask = batch["padding_mask"].to(device, non_blocking=True)
+            staging_padding_mask = batch.get(
+                "staging_padding_mask", batch["padding_mask"]
+            ).to(device, non_blocking=True)
+            rswa_padding_mask = batch.get(
+                "rswa_padding_mask", batch["padding_mask"]
+            ).to(device, non_blocking=True)
             stage_targets = batch["sleep_stages"].to(device, non_blocking=True)
             loss_targets = _batch_rswa_targets(batch, device)
             tonic_targets = loss_targets["tonic"]
             phasic_targets = loss_targets["phasic"]
             any_targets = loss_targets["any"]
-            stage_valid = batch["staging_valid"].to(device, non_blocking=True) & padding_mask
-            rswa_valid = batch["rswa_valid"].to(device, non_blocking=True) & padding_mask
+            stage_valid = batch["staging_valid"].to(device, non_blocking=True) & staging_padding_mask
+            rswa_valid = batch["rswa_valid"].to(device, non_blocking=True) & rswa_padding_mask
 
             with _autocast_context(device, amp):
-                outputs = model(signals, emg, mask=padding_mask)
+                outputs = model(
+                    signals,
+                    emg,
+                    mask=rswa_padding_mask,
+                    staging_mask=staging_padding_mask,
+                    rswa_mask=rswa_padding_mask,
+                )
 
             if stage_valid.any():
                 stage_loss = staging_criterion(
@@ -463,14 +478,25 @@ def collect_rswa_predictions(
     with torch.no_grad():
         for batch in loader:
             emg = batch["emg_center"].to(device, non_blocking=True)
-            padding_mask = batch["padding_mask"].to(device, non_blocking=True)
+            padding_mask = batch.get("rswa_padding_mask", batch["padding_mask"]).to(
+                device, non_blocking=True
+            )
             valid_mask = batch["rswa_valid"].to(device, non_blocking=True) & padding_mask
             if not valid_mask.any():
                 continue
             with _autocast_context(device, amp):
                 if expects_signals:
                     signals = batch["signals"].to(device, non_blocking=True)
-                    outputs = model(signals, emg, mask=padding_mask)
+                    staging_padding_mask = batch.get(
+                        "staging_padding_mask", batch["padding_mask"]
+                    ).to(device, non_blocking=True)
+                    outputs = model(
+                        signals,
+                        emg,
+                        mask=padding_mask,
+                        staging_mask=staging_padding_mask,
+                        rswa_mask=padding_mask,
+                    )
                 else:
                     outputs = model(emg, mask=padding_mask)
 
@@ -571,14 +597,25 @@ def collect_staging_predictions(
         for batch in loader:
             signals = batch["signals"].to(device, non_blocking=True)
             targets = batch["sleep_stages"].to(device, non_blocking=True)
-            padding_mask = batch["padding_mask"].to(device, non_blocking=True)
+            padding_mask = batch.get("staging_padding_mask", batch["padding_mask"]).to(
+                device, non_blocking=True
+            )
             valid_mask = batch["staging_valid"].to(device, non_blocking=True) & padding_mask
             if not valid_mask.any():
                 continue
             with _autocast_context(device, amp):
                 if expects_emg:
                     emg = batch["emg_center"].to(device, non_blocking=True)
-                    outputs = model(signals, emg, mask=padding_mask)
+                    rswa_padding_mask = batch.get(
+                        "rswa_padding_mask", batch["padding_mask"]
+                    ).to(device, non_blocking=True)
+                    outputs = model(
+                        signals,
+                        emg,
+                        mask=rswa_padding_mask,
+                        staging_mask=padding_mask,
+                        rswa_mask=rswa_padding_mask,
+                    )
                     logits = outputs["staging_logits"]
                 else:
                     logits = model(signals, mask=padding_mask)

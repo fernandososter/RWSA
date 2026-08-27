@@ -69,6 +69,15 @@ ORANGE = "\033[38;5;214m"
 RESET  = "\033[0m"
 
 
+def _normalize_kernel_tuple(name: str, values: list[int] | tuple[int, ...]) -> tuple[int, ...]:
+    kernels = tuple(int(v) for v in values)
+    if not kernels:
+        raise ValueError(f"{name} precisa receber ao menos um kernel.")
+    if any(v <= 0 for v in kernels):
+        raise ValueError(f"{name} aceita apenas valores positivos: {kernels}")
+    return kernels
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Treina staging e RSWA no mesmo DataLoader com StratifiedGroupKFold."
@@ -149,6 +158,20 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--staging-epoch-sec",
+        type=int,
+        choices=[3, 30],
+        default=None,
+        help="Grade temporal do ramo de staging. Se omitido, usa --target-epoch-sec.",
+    )
+    parser.add_argument(
+        "--rswa-epoch-sec",
+        type=int,
+        choices=[3, 30],
+        default=None,
+        help="Grade temporal do ramo RSWA. Se omitido, usa --target-epoch-sec.",
+    )
+    parser.add_argument(
         "--context-radius",
         type=int,
         default=None,
@@ -156,6 +179,27 @@ def parse_args() -> argparse.Namespace:
             "Número de janelas vizinhas concatenadas no ramo de staging. "
             "Padrão: 1 em 3 s e 0 em 30 s."
         ),
+    )
+    parser.add_argument(
+        "--eeg-kernels",
+        type=int,
+        nargs="+",
+        default=[30, 70, 150],
+        help="Lista de kernels Conv1D do ramo EEG, em amostras.",
+    )
+    parser.add_argument(
+        "--eog-kernels",
+        type=int,
+        nargs="+",
+        default=[50, 150, 250],
+        help="Lista de kernels Conv1D do ramo EOG, em amostras.",
+    )
+    parser.add_argument(
+        "--emg-kernels",
+        type=int,
+        nargs="+",
+        default=[50, 150, 300],
+        help="Lista de kernels Conv1D do ramo EMG, em amostras.",
     )
     parser.add_argument("--lr-staging", type=float, default=1e-4)
     parser.add_argument("--lr-rswa", type=float, default=1e-4)
@@ -279,6 +323,8 @@ def make_loader(subjects, args, shuffle, device):
         use_baseline_relative_channel=args.rswa_use_baseline_relative_channel,
         use_rms_relative_channel=args.rswa_use_rms_relative_channel,
         target_epoch_sec=args.target_epoch_sec,
+        staging_epoch_sec=args.staging_epoch_sec,
+        rswa_epoch_sec=args.rswa_epoch_sec,
         context_radius=args.context_radius,
     )
     sampler = None
@@ -382,16 +428,25 @@ def main() -> None:
     args = parse_args()
     if args.context_radius is not None and args.context_radius < 0:
         raise ValueError("--context-radius não pode ser negativo.")
+    eeg_kernels = _normalize_kernel_tuple("--eeg-kernels", args.eeg_kernels)
+    eog_kernels = _normalize_kernel_tuple("--eog-kernels", args.eog_kernels)
+    emg_kernels = _normalize_kernel_tuple("--emg-kernels", args.emg_kernels)
+    staging_epoch_sec = int(args.staging_epoch_sec or args.target_epoch_sec)
+    rswa_epoch_sec = int(args.rswa_epoch_sec or args.target_epoch_sec)
     disabled_aasm_postprocess = (
-        args.target_epoch_sec != 3 and args.rswa_postprocess_mode == "aasm_simple"
+        rswa_epoch_sec != 3 and args.rswa_postprocess_mode == "aasm_simple"
     )
-    if args.target_epoch_sec != 3 and args.rswa_postprocess_mode == "aasm_simple":
+    if rswa_epoch_sec != 3 and args.rswa_postprocess_mode == "aasm_simple":
         args.rswa_postprocess_mode = "none"
     if args.rswa_use_rms_relative_channel and not args.rswa_use_baseline_relative_channel:
         raise ValueError(
             "--rswa-use-rms-relative-channel exige --rswa-use-baseline-relative-channel."
         )
     shared_joint = _use_shared_joint_system(args.model, args.joint_topology)
+    if shared_joint and staging_epoch_sec != rswa_epoch_sec:
+        raise ValueError(
+            "--joint-topology shared exige a mesma grade temporal em staging e RSWA."
+        )
     if args.experiment_name is None:
         args.experiment_name = f"joint_{args.model}_stratified_kfold"
     seed_everything(args.seed)
@@ -399,7 +454,7 @@ def main() -> None:
     all_subjects = load_subject_directory(args.data_dir)
     resolved_context_radius = (
         args.context_radius if args.context_radius is not None
-        else (1 if args.target_epoch_sec == 3 else 0)
+        else (1 if staging_epoch_sec == 3 else 0)
     )
     rswa_model_cfg = ModelConfig(
         rswa_stage_conditioning=True,
@@ -412,9 +467,12 @@ def main() -> None:
         rswa_use_rms_relative_channel=args.rswa_use_rms_relative_channel,
         use_emg_subwindow_features=args.use_emg_subwindow_features,
         emg_subwindow_ms=args.emg_subwindow_ms,
-        signal_epoch_sec=args.target_epoch_sec,
-        signal_samples_per_epoch=100 * args.target_epoch_sec,
-        signal_context_radius=resolved_context_radius,
+        eeg_kernels=eeg_kernels,
+        eog_kernels=eog_kernels,
+        emg_kernels=emg_kernels,
+        signal_epoch_sec=rswa_epoch_sec,
+        signal_samples_per_epoch=100 * rswa_epoch_sec,
+        signal_context_radius=0,
     )
 
     # ── Conjunto de TESTE fixo (held-out), separado ANTES da CV ────────────
@@ -468,7 +526,11 @@ def main() -> None:
                 f"emg_subwindow_ms={args.emg_subwindow_ms}"
             )
             logger.info(
-                f"Janela temporal: target_epoch_sec={args.target_epoch_sec}s "
+                f"Kernels CNN: EEG={eeg_kernels} EOG={eog_kernels} EMG={emg_kernels}"
+            )
+            logger.info(
+                f"Janela temporal: staging_epoch_sec={staging_epoch_sec}s "
+                f"rswa_epoch_sec={rswa_epoch_sec}s "
                 f"context_radius={resolved_context_radius} "
                 f"samples_per_epoch={rswa_model_cfg.signal_samples_per_epoch}"
             )
@@ -645,7 +707,12 @@ def main() -> None:
                     for batch in train_loader:
                         signals = batch["signals"].to(device, non_blocking=True)
                         emg = batch["emg_center"].to(device, non_blocking=True)
-                        padding_mask = batch["padding_mask"].to(device, non_blocking=True)
+                        staging_padding_mask = batch.get(
+                            "staging_padding_mask", batch["padding_mask"]
+                        ).to(device, non_blocking=True)
+                        rswa_padding_mask = batch.get(
+                            "rswa_padding_mask", batch["padding_mask"]
+                        ).to(device, non_blocking=True)
                         stage_targets = batch["sleep_stages"].to(device, non_blocking=True)
                         tonic_targets = batch["tonic_targets"].to(device, non_blocking=True)
                         phasic_targets = batch["phasic_targets"].to(device, non_blocking=True)
@@ -653,8 +720,14 @@ def main() -> None:
                         tonic_labels = batch["tonic_labels"].to(device, non_blocking=True)
                         phasic_labels = batch["phasic_labels"].to(device, non_blocking=True)
                         any_labels = batch["any_labels"].to(device, non_blocking=True)
-                        stage_valid = batch["staging_valid"].to(device, non_blocking=True) & padding_mask
-                        rswa_valid = batch["rswa_valid"].to(device, non_blocking=True) & padding_mask
+                        stage_valid = (
+                            batch["staging_valid"].to(device, non_blocking=True)
+                            & staging_padding_mask
+                        )
+                        rswa_valid = (
+                            batch["rswa_valid"].to(device, non_blocking=True)
+                            & rswa_padding_mask
+                        )
 
                         if not stage_valid.any() and not rswa_valid.any():
                             continue
@@ -668,7 +741,13 @@ def main() -> None:
                             device_type="cuda", dtype=torch.bfloat16,
                             enabled=(not args.no_amp and device.type == "cuda"),
                         ):
-                            outputs = system(signals, emg, mask=padding_mask)
+                            outputs = system(
+                                signals,
+                                emg,
+                                mask=rswa_padding_mask,
+                                staging_mask=staging_padding_mask,
+                                rswa_mask=rswa_padding_mask,
+                            )
                         if not shape_logged:
                             shape_info = getattr(system, "last_shape_info", None)
                             if shape_info:

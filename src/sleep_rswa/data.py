@@ -199,21 +199,29 @@ class SleepAnalysisDataset(Dataset):
         use_baseline_relative_channel: bool = False,
         use_rms_relative_channel: bool = False,
         target_epoch_sec: int = 3,
+        staging_epoch_sec: int | None = None,
+        rswa_epoch_sec: int | None = None,
         context_radius: int | None = None,
     ):
         self.source_signal_config = SignalConfig()
-        self.target_epoch_sec = int(target_epoch_sec)
-        if self.target_epoch_sec <= 0:
-            raise ValueError("target_epoch_sec precisa ser positivo.")
-        if self.target_epoch_sec % self.source_signal_config.epoch_sec != 0:
-            raise ValueError(
-                "target_epoch_sec precisa ser múltiplo de "
-                f"{self.source_signal_config.epoch_sec}s para reutilizar os .pt atuais."
-            )
+        default_epoch_sec = int(target_epoch_sec)
+        self.staging_epoch_sec = int(staging_epoch_sec or default_epoch_sec)
+        self.rswa_epoch_sec = int(rswa_epoch_sec or default_epoch_sec)
+        for name, epoch_sec in (
+            ("staging_epoch_sec", self.staging_epoch_sec),
+            ("rswa_epoch_sec", self.rswa_epoch_sec),
+        ):
+            if epoch_sec <= 0:
+                raise ValueError(f"{name} precisa ser positivo.")
+            if epoch_sec % self.source_signal_config.epoch_sec != 0:
+                raise ValueError(
+                    f"{name} precisa ser múltiplo de "
+                    f"{self.source_signal_config.epoch_sec}s para reutilizar os .pt atuais."
+                )
         resolved_context_radius = (
             int(context_radius)
             if context_radius is not None
-            else (1 if self.target_epoch_sec == self.source_signal_config.epoch_sec else 0)
+            else (1 if self.staging_epoch_sec == self.source_signal_config.epoch_sec else 0)
         )
         if resolved_context_radius < 0:
             raise ValueError("context_radius não pode ser negativo.")
@@ -228,32 +236,45 @@ class SleepAnalysisDataset(Dataset):
             raise ValueError(
                 "use_rms_relative_channel=True exige use_baseline_relative_channel=True."
             )
-        self.signal_config = SignalConfig(
+        self.staging_signal_config = SignalConfig(
             fs=self.source_signal_config.fs,
-            epoch_sec=self.target_epoch_sec,
-            samples_per_epoch=self.source_signal_config.fs * self.target_epoch_sec,
+            epoch_sec=self.staging_epoch_sec,
+            samples_per_epoch=self.source_signal_config.fs * self.staging_epoch_sec,
             context_radius=resolved_context_radius,
             n_channels=self.source_signal_config.n_channels,
             staging_channel_indices=self.source_signal_config.staging_channel_indices,
         )
+        self.rswa_signal_config = SignalConfig(
+            fs=self.source_signal_config.fs,
+            epoch_sec=self.rswa_epoch_sec,
+            samples_per_epoch=self.source_signal_config.fs * self.rswa_epoch_sec,
+            context_radius=0,
+            n_channels=self.source_signal_config.n_channels,
+            staging_channel_indices=self.source_signal_config.staging_channel_indices,
+        )
         self.rswa_config = RSWAConfig()
-        self.subjects = [
-            self._aggregate_subject(subject)
+        self.staging_subjects = [
+            self._aggregate_subject(subject, epoch_sec=self.staging_epoch_sec)
             for subject in subjects
         ]
+        self.rswa_subjects = [
+            self._aggregate_subject(subject, epoch_sec=self.rswa_epoch_sec)
+            for subject in subjects
+        ]
+        self.subjects = self.rswa_subjects
 
     def __len__(self) -> int:
-        return len(self.subjects)
+        return len(self.rswa_subjects)
 
-    def _aggregate_subject(self, subject: SubjectData) -> SubjectData:
-        factor = self.target_epoch_sec // self.source_signal_config.epoch_sec
+    def _aggregate_subject(self, subject: SubjectData, *, epoch_sec: int) -> SubjectData:
+        factor = epoch_sec // self.source_signal_config.epoch_sec
         if factor == 1:
             return subject
 
         if subject.n_epochs % factor != 0:
             raise ValueError(
                 f"{subject.subject_id}: n_epochs={subject.n_epochs} não é múltiplo de "
-                f"{factor} para agregação em {self.target_epoch_sec}s."
+                f"{factor} para agregação em {epoch_sec}s."
             )
 
         new_t = subject.n_epochs // factor
@@ -360,7 +381,7 @@ class SleepAnalysisDataset(Dataset):
             raise ValueError(
                 f"{subject.subject_id}: signals deve ter shape [T,C,N], recebeu {tuple(signals.shape)}"
             )
-        indices = self.signal_config.staging_channel_indices
+        indices = self.staging_signal_config.staging_channel_indices
         if max(indices) >= signals.shape[1]:
             raise ValueError(
                 f"{subject.subject_id}: canais de staging {indices} não existem em signals "
@@ -387,7 +408,7 @@ class SleepAnalysisDataset(Dataset):
                     "Salve a chave 'emg_signals'/'emg' ou ajuste RSWAConfig.emg_channel_index."
                 )
             emg = signals[:, index:index + 1, :].clone()
-        primary = _zscore_per_channel(emg)[:, :, : self.signal_config.samples_per_epoch]
+        primary = _zscore_per_channel(emg)[:, :, : self.rswa_signal_config.samples_per_epoch]
         if not self.use_baseline_relative_channel:
             return primary
         # Baseline correta = atonia_baseline_uv (a MESMA baseline que a regra
@@ -417,7 +438,7 @@ class SleepAnalysisDataset(Dataset):
             rms_relative = torch.zeros_like(primary)
         else:
             baseline_v = float(baseline_uv) / 1e6
-            window = emg[:, :, : self.signal_config.samples_per_epoch]
+            window = emg[:, :, : self.rswa_signal_config.samples_per_epoch]
             ratio = window / baseline_v
             signed_relative = ratio.clamp(
                 -self.rswa_config.baseline_relative_signed_clamp,
@@ -434,7 +455,7 @@ class SleepAnalysisDataset(Dataset):
                 _rms_envelope_same(
                     window,
                     win_sec=self.rswa_config.baseline_relative_rms_win_sec,
-                    fs=self.signal_config.fs,
+                    fs=self.rswa_signal_config.fs,
                 ) / baseline_v
             )
             rms_relative = (
@@ -453,7 +474,7 @@ class SleepAnalysisDataset(Dataset):
     def stage_distribution(self) -> StageDistribution:
         distribution = StageDistribution()
 
-        for subject in self.subjects:
+        for subject in self.staging_subjects:
             distribution.update(
                 subject.sleep_stages,
             )
@@ -476,7 +497,7 @@ class SleepAnalysisDataset(Dataset):
         total = 0
         evaluable = 0
         positives = 0
-        for subject in self.subjects:
+        for subject in self.rswa_subjects:
             stages = subject.sleep_stages.long()
             conf = subject.rswa_conf.float()
             valid = conf > self.min_confidence
@@ -510,18 +531,24 @@ class SleepAnalysisDataset(Dataset):
 
     def summary(self) -> dict[str, int]:
         return {
-            "exams": len(self.subjects),
+            "exams": len(self.rswa_subjects),
             "items": len(self),
         }
     
 
     def __getitem__(self, idx: int) -> dict[str, torch.Tensor | str]:
-        subject = self.subjects[idx]
-        signals = self._extract_staging_signals(subject)
-        emg = self._extract_emg(subject)
-        t, c, n = signals.shape
+        staging_subject = self.staging_subjects[idx]
+        rswa_subject = self.rswa_subjects[idx]
+        if staging_subject.subject_id != rswa_subject.subject_id:
+            raise ValueError(
+                f"IDs desalinhados em idx={idx}: "
+                f"{staging_subject.subject_id} vs {rswa_subject.subject_id}"
+            )
+        signals = self._extract_staging_signals(staging_subject)
+        emg = self._extract_emg(rswa_subject)
+        t_stage, c, n = signals.shape
 
-        ctx = self.signal_config.context_radius
+        ctx = self.staging_signal_config.context_radius
         if ctx == 0:
             context = signals
         else:
@@ -530,10 +557,10 @@ class SleepAnalysisDataset(Dataset):
                 torch.cat([pad, signals, pad], dim=0)
                 .unfold(0, 2 * ctx + 1, 1)
                 .permute(0, 1, 3, 2)
-                .reshape(t, c, (2 * ctx + 1) * n)
+                .reshape(t_stage, c, (2 * ctx + 1) * n)
             )
 
-        labels = subject.sleep_stages.long()
+        labels = staging_subject.sleep_stages.long()
         if ctx == 0:
             valid_ctx = labels != -1
         else:
@@ -542,17 +569,17 @@ class SleepAnalysisDataset(Dataset):
                 torch.cat([pad_lab, labels, pad_lab]).unfold(0, 2 * ctx + 1, 1) == -1
             ).any(dim=1)
 
-        rswa_labels = subject.rswa_labels.long().clone()
-        confidence = subject.rswa_conf.float().clone()
+        rswa_labels = rswa_subject.rswa_labels.long().clone()
+        confidence = rswa_subject.rswa_conf.float().clone()
         valid_rswa = confidence > self.min_confidence
         if self.rem_mask_only:
-            valid_rswa &= labels.eq(self.rswa_config.rem_stage)
+            valid_rswa &= rswa_subject.sleep_stages.long().eq(self.rswa_config.rem_stage)
 
         # Rotulos por cabeca. Se o .pt os traz explicitos, usa-os; senao,
         # deriva do inteiro rswa_labels (retrocompat com .pt mono-rotulo).
-        if subject.tonic_labels is not None and subject.phasic_labels is not None:
-            tonic_labels = subject.tonic_labels.float().clone()
-            phasic_labels = subject.phasic_labels.float().clone()
+        if rswa_subject.tonic_labels is not None and rswa_subject.phasic_labels is not None:
+            tonic_labels = rswa_subject.tonic_labels.float().clone()
+            phasic_labels = rswa_subject.phasic_labels.float().clone()
         else:
             tonic_labels = rswa_labels.eq(self.rswa_config.tonic_label).float()
             phasic_labels = rswa_labels.eq(self.rswa_config.phasic_label).float()
@@ -560,19 +587,19 @@ class SleepAnalysisDataset(Dataset):
         # any_labels: se o .pt nao a traz explicitamente, deriva de
         # rswa_labels=3 no schema exclusivo novo. Em .pt legados isso segue
         # zerado.
-        if subject.any_labels is not None:
-            any_labels = subject.any_labels.float().clone()
+        if rswa_subject.any_labels is not None:
+            any_labels = rswa_subject.any_labels.float().clone()
         else:
             any_labels = rswa_labels.eq(self.rswa_config.any_label).float()
 
         if self.rswa_target_mode == "aasm_proto":
             tonic_targets = (
-                subject.tonic_proto_labels.float().clone()
-                if subject.tonic_proto_labels is not None else tonic_labels.clone()
+                rswa_subject.tonic_proto_labels.float().clone()
+                if rswa_subject.tonic_proto_labels is not None else tonic_labels.clone()
             )
             phasic_targets = (
-                subject.phasic_proto_labels.float().clone()
-                if subject.phasic_proto_labels is not None else phasic_labels.clone()
+                rswa_subject.phasic_proto_labels.float().clone()
+                if rswa_subject.phasic_proto_labels is not None else phasic_labels.clone()
             )
         else:
             tonic_targets = tonic_labels.clone()
@@ -610,41 +637,46 @@ class SleepAnalysisDataset(Dataset):
             "movement_labels": movement_labels,
             "rswa_valid": valid_rswa,
             "rswa_conf": confidence,
-            "subject_id": subject.subject_id,
+            "subject_id": staging_subject.subject_id,
         }
 
 
 def collate_sleep_analysis_exams(batch):
     b = len(batch)
-    lengths = [item["signals"].shape[0] for item in batch]
-    tmax = max(lengths)
+    stage_lengths = [item["signals"].shape[0] for item in batch]
+    rswa_lengths = [item["emg_center"].shape[0] for item in batch]
+    tmax_stage = max(stage_lengths)
+    tmax_rswa = max(rswa_lengths)
     _, c, n = batch[0]["signals"].shape
     _, ce, ne = batch[0]["emg_center"].shape
     out = {
-        "signals": torch.zeros(b, tmax, c, n),
-        "emg_center": torch.zeros(b, tmax, ce, ne),
-        "sleep_stages": torch.full((b, tmax), -1, dtype=torch.long),
-        "staging_valid": torch.zeros(b, tmax, dtype=torch.bool),
-        "padding_mask": torch.zeros(b, tmax, dtype=torch.bool),
-        "rswa_labels": torch.zeros(b, tmax, dtype=torch.long),
-        "phasic_labels": torch.zeros(b, tmax),
-        "tonic_labels": torch.zeros(b, tmax),
-        "any_labels": torch.zeros(b, tmax),
-        "phasic_targets": torch.zeros(b, tmax),
-        "tonic_targets": torch.zeros(b, tmax),
-        "any_targets": torch.zeros(b, tmax),
-        "movement_labels": torch.zeros(b, tmax),
-        "rswa_valid": torch.zeros(b, tmax, dtype=torch.bool),
-        "rswa_conf": torch.zeros(b, tmax),
+        "signals": torch.zeros(b, tmax_stage, c, n),
+        "emg_center": torch.zeros(b, tmax_rswa, ce, ne),
+        "sleep_stages": torch.full((b, tmax_stage), -1, dtype=torch.long),
+        "staging_valid": torch.zeros(b, tmax_stage, dtype=torch.bool),
+        "staging_padding_mask": torch.zeros(b, tmax_stage, dtype=torch.bool),
+        "rswa_padding_mask": torch.zeros(b, tmax_rswa, dtype=torch.bool),
+        "rswa_labels": torch.zeros(b, tmax_rswa, dtype=torch.long),
+        "phasic_labels": torch.zeros(b, tmax_rswa),
+        "tonic_labels": torch.zeros(b, tmax_rswa),
+        "any_labels": torch.zeros(b, tmax_rswa),
+        "phasic_targets": torch.zeros(b, tmax_rswa),
+        "tonic_targets": torch.zeros(b, tmax_rswa),
+        "any_targets": torch.zeros(b, tmax_rswa),
+        "movement_labels": torch.zeros(b, tmax_rswa),
+        "rswa_valid": torch.zeros(b, tmax_rswa, dtype=torch.bool),
+        "rswa_conf": torch.zeros(b, tmax_rswa),
         "subject_ids": [],
-        "lengths": torch.tensor(lengths),
+        "staging_lengths": torch.tensor(stage_lengths),
+        "rswa_lengths": torch.tensor(rswa_lengths),
     }
-    for i, (item, length) in enumerate(zip(batch, lengths)):
+    for i, item in enumerate(batch):
+        stage_length = stage_lengths[i]
+        rswa_length = rswa_lengths[i]
+        for key in ("signals", "sleep_stages", "staging_valid"):
+            out[key][i, :stage_length] = item[key]
         for key in (
-            "signals",
             "emg_center",
-            "sleep_stages",
-            "staging_valid",
             "rswa_labels",
             "phasic_labels",
             "tonic_labels",
@@ -656,9 +688,12 @@ def collate_sleep_analysis_exams(batch):
             "rswa_valid",
             "rswa_conf",
         ):
-            out[key][i, :length] = item[key]
-        out["padding_mask"][i, :length] = True
+            out[key][i, :rswa_length] = item[key]
+        out["staging_padding_mask"][i, :stage_length] = True
+        out["rswa_padding_mask"][i, :rswa_length] = True
         out["subject_ids"].append(item["subject_id"])
-    out["mask"] = out["padding_mask"]
+    out["padding_mask"] = out["rswa_padding_mask"]
+    out["lengths"] = out["rswa_lengths"]
+    out["mask"] = out["rswa_padding_mask"]
     out["valid_ctx"] = out["staging_valid"]
     return out

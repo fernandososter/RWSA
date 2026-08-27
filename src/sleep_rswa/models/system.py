@@ -14,6 +14,24 @@ from .staging import SleepStagingNet
 from .rswa import RSWADetectionNet
 
 
+def _expand_stage_time(
+    stage_tensor: torch.Tensor,
+    target_length: int,
+) -> torch.Tensor:
+    source_length = int(stage_tensor.shape[1])
+    if source_length == target_length:
+        return stage_tensor
+    if source_length <= 0 or target_length <= 0:
+        raise ValueError("source_length e target_length precisam ser positivos.")
+    if target_length % source_length != 0:
+        raise ValueError(
+            "Não foi possível alinhar staging ao RSWA: "
+            f"T_stage={source_length}, T_rswa={target_length}."
+        )
+    factor = target_length // source_length
+    return stage_tensor.repeat_interleave(factor, dim=1)
+
+
 class SleepStagingRSWASystem(nn.Module):
     def __init__(self, staging_model=None, rswa_model=None):
         super().__init__()
@@ -40,18 +58,30 @@ class SleepStagingRSWASystem(nn.Module):
         )
         self.last_shape_info: dict[str, tuple[int, ...]] = {}
 
-    def forward(self, signals, emg_center, mask=None):
-        if signals.shape[:2] != emg_center.shape[:2]:
+    def forward(
+        self,
+        signals,
+        emg_center,
+        mask=None,
+        staging_mask=None,
+        rswa_mask=None,
+    ):
+        if signals.shape[0] != emg_center.shape[0]:
             raise ValueError(
-                "signals e emg_center precisam alinhar em (B,T); "
+                "signals e emg_center precisam alinhar ao menos em B; "
                 f"recebido {tuple(signals.shape)} e {tuple(emg_center.shape)}."
             )
-        staging_logits = self.staging_model(signals, mask)
+        staging_mask = mask if staging_mask is None else staging_mask
+        rswa_mask = mask if rswa_mask is None else rswa_mask
+        staging_logits = self.staging_model(signals, staging_mask)
         stage_probs = torch.softmax(staging_logits, dim=-1)
         stage_context = stage_probs.detach() if self.detach_stage_probs else stage_probs
-        rswa_kwargs = {"mask": mask}
+        rswa_kwargs = {"mask": rswa_mask}
         if self.use_stage_conditioning and self._rswa_accepts_stage_probs:
-            rswa_kwargs["stage_probs"] = stage_context
+            rswa_kwargs["stage_probs"] = _expand_stage_time(
+                stage_context,
+                emg_center.shape[1],
+            )
         rswa_out = self.rswa_model(emg_center, **rswa_kwargs)
         rswa_shapes = getattr(getattr(self.rswa_model, "encoder", None), "last_shape_info", {})
         self.last_shape_info = {
@@ -151,11 +181,18 @@ class SharedBiMambaJointSystem(nn.Module):
         signals: torch.Tensor,
         emg_center: torch.Tensor,
         mask: torch.Tensor | None = None,
+        staging_mask: torch.Tensor | None = None,
+        rswa_mask: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         if signals.shape[:2] != emg_center.shape[:2]:
             raise ValueError(
-                "signals e emg_center precisam alinhar em (B,T); "
+                "SharedBiMambaJointSystem exige a mesma grade temporal para staging e RSWA; "
                 f"recebido {tuple(signals.shape)} e {tuple(emg_center.shape)}."
+            )
+        if staging_mask is not None and rswa_mask is not None and staging_mask.shape != rswa_mask.shape:
+            raise ValueError(
+                "SharedBiMambaJointSystem exige máscaras temporais com a mesma shape "
+                f"quando ambas são fornecidas: {tuple(staging_mask.shape)} vs {tuple(rswa_mask.shape)}."
             )
         staging_features = self.staging_encoder(signals)
         rswa_features = self.rswa_encoder(emg_center)
@@ -170,7 +207,8 @@ class SharedBiMambaJointSystem(nn.Module):
                 dim=-1,
             )
         )
-        temporal_features = self.temporal(fused_features, mask)
+        temporal_mask = rswa_mask if rswa_mask is not None else mask
+        temporal_features = self.temporal(fused_features, temporal_mask)
         staging_logits = self.staging_classifier(temporal_features)
         rswa_shapes = getattr(self.rswa_encoder, "last_shape_info", {})
         self.last_shape_info = {
