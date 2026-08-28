@@ -86,10 +86,49 @@ class StagingCNNEncoder(nn.Module):
         )
 
         self.pool = nn.AdaptiveAvgPool1d(1)
+        self._auto_chunk_min_samples = 1200
+        self._auto_chunk_size = 16
+        self._auto_chunk_sample_budget = 24_000
 
     @property
     def output_dim(self) -> int:
         return self.cfg.d_model
+
+    def _encode_flat_epochs(
+        self,
+        x: torch.Tensor,
+    ) -> torch.Tensor:
+        eeg_end = self.cfg.eeg_in_channels
+        eog_end = eeg_end + self.cfg.eog_in_channels
+
+        eeg = x[:, :eeg_end, :]
+        eog = x[:, eeg_end:eog_end, :]
+
+        eeg_features = self.branches[0](eeg)
+        eog_features = self.branches[1](eog)
+
+        features = torch.cat(
+            [eeg_features, eog_features],
+            dim=1,
+        )
+
+        features = self.se_global(features)
+        features = self.refine(features)
+        return self.pool(features).squeeze(-1)
+
+    def _resolve_chunk_size(
+        self,
+        n_items: int,
+        samples: int,
+    ) -> int:
+        total_points = int(n_items) * int(samples)
+        if n_items <= self._auto_chunk_size:
+            return 0
+        if samples >= self._auto_chunk_min_samples:
+            return self._auto_chunk_size
+        if total_points >= self._auto_chunk_sample_budget:
+            return self._auto_chunk_size
+        return self._auto_chunk_size
 
     def forward(
         self,
@@ -121,24 +160,18 @@ class StagingCNNEncoder(nn.Module):
             channels,
             samples,
         )
-
-        eeg_end = self.cfg.eeg_in_channels
-        eog_end = eeg_end + self.cfg.eog_in_channels
-
-        eeg = x[:, :eeg_end, :]
-        eog = x[:, eeg_end:eog_end, :]
-
-        eeg_features = self.branches[0](eeg)
-        eog_features = self.branches[1](eog)
-
-        features = torch.cat(
-            [eeg_features, eog_features],
-            dim=1,
+        chunk_size = self._resolve_chunk_size(
+            batch_size * sequence_length,
+            samples,
         )
-
-        features = self.se_global(features)
-        features = self.refine(features)
-        features = self.pool(features).squeeze(-1)
+        if chunk_size <= 0:
+            features = self._encode_flat_epochs(x)
+        else:
+            chunks: list[torch.Tensor] = []
+            for start in range(0, x.shape[0], chunk_size):
+                stop = min(start + chunk_size, x.shape[0])
+                chunks.append(self._encode_flat_epochs(x[start:stop]))
+            features = torch.cat(chunks, dim=0)
 
         return features.reshape(
             batch_size,
