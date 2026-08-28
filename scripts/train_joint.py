@@ -150,24 +150,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--target-epoch-sec",
         type=int,
-        choices=[3, 30],
+        choices=[3, 15, 30],
         default=3,
         help=(
-            "Duração temporal processada pelo treino. Em 30 s, os .pt de 3 s "
+            "Duração temporal processada pelo treino. Em 15 s/30 s, os .pt de 3 s "
             "são agregados no DataLoader sem exigir novo preprocessamento."
         ),
     )
     parser.add_argument(
         "--staging-epoch-sec",
         type=int,
-        choices=[3, 30],
+        choices=[3, 15, 30],
         default=None,
         help="Grade temporal do ramo de staging. Se omitido, usa --target-epoch-sec.",
     )
     parser.add_argument(
         "--rswa-epoch-sec",
         type=int,
-        choices=[3, 30],
+        choices=[3, 15, 30],
         default=None,
         help="Grade temporal do ramo RSWA. Se omitido, usa --target-epoch-sec.",
     )
@@ -177,7 +177,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help=(
             "Número de janelas vizinhas concatenadas no ramo de staging. "
-            "Padrão: 1 em 3 s e 0 em 30 s."
+            "Padrão: 1 em 3 s e 0 em 15 s/30 s."
         ),
     )
     parser.add_argument(
@@ -537,7 +537,7 @@ def main() -> None:
             if disabled_aasm_postprocess:
                 logger.info(
                     "Aviso: rswa_postprocess_mode='aasm_simple' foi desativado "
-                    "automaticamente porque o treino está em 30 s."
+                    "automaticamente porque o treino de RSWA não está em 3 s."
                 )
             logger.info(
                 f"Sujeitos: total={len(all_subjects)} | CV={len(subjects)} | teste={len(test_subjects)} | "
