@@ -87,7 +87,7 @@ class StagingCNNEncoder(nn.Module):
 
         self.pool = nn.AdaptiveAvgPool1d(1)
         self._auto_chunk_min_samples = 1200
-        self._auto_chunk_size = 64
+        self._auto_chunk_size = 32
         self._auto_chunk_sample_budget = 24_000
 
     @property
