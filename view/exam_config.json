@@ -213,5 +213,10 @@
     "meas_date": "22:41:46",
     "annot_start": 30.0,
     "hipno_start": "22:42:16"
+  },
+  "nfle8": {
+    "meas_date": "22:43:54",
+    "annot_start": 30.0,
+    "hipno_start": "22:44:24"
   }
 }
